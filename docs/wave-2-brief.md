@@ -41,7 +41,9 @@ The bot checks these, not what one might assume:
 - A door changes only through its `damage_p_proc`. An explosion changes no tiles,
   and its art objects expire.
 - Critters within 3 hexes of a blast take damage.
-- A fuse's clock stops in combat and dialogue.
+- A fuse stops in dialogue. In combat only the real-time clock stops: 5 game
+  seconds pass per round (SPEC-006, SPEC-007), so a fuse can fire between rounds.
+- A locked door with no script opens on plain Use (SPEC-007 section 3.11.4).
 - `state_hash` skips the clock, queue, stats, flags, world map and VM, and a load
   rebuilds the entity store and reruns Start and MapEnter. Compare as the audit
   below does, never `hash(world) == hash(loaded)`.

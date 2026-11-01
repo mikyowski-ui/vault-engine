@@ -7,13 +7,16 @@
 //! - [`watch`]: GVAR/MVAR/LVAR watches (flat or per-script locals) diffed
 //!   between ticks.
 //! - [`objects`]: map object and critter snapshots, filters, and diffs.
+//! - [`queue_entries`]: the timed queue, read-only, with readable labels.
+//! - [`mutator`]: [`ObjectMutator`], which builds the logged debug commands
+//!   for one object and applies nothing itself.
 //! - [`live`]: a live trace of a world's script execution, attached to its
 //!   host as the vault-core `VmObserver`.
 //! - [`render`]: the world-canvas renderer's metrics (SPEC-022 render path,
 //!   instance, draw and fallback counts) as overlay lines.
 //!
 //! Nothing here mutates world state; stepping drives the VM only through
-//! `Vm::run`. A frontend owns one [`Inspector`] and calls
+//! `Vm::run` and `Vm::step`. A frontend owns one [`Inspector`] and calls
 //! [`Inspector::tick`] once per world update:
 //!
 //! ```
@@ -28,26 +31,103 @@
 //! ```
 pub mod decode;
 pub mod live;
+pub mod mutator;
 pub mod objects;
 pub mod render;
 pub mod stepper;
 pub mod trace;
 pub mod watch;
 
-pub use decode::{DecodeError, Instruction, OpcodeClass};
+pub use decode::{DecodeError, DecodeMode, Instruction, OpcodeClass};
 pub use live::LiveTrace;
+pub use mutator::ObjectMutator;
 pub use objects::{CritterSnapshot, ObjectChange, ObjectFilter, ObjectSnapshot, ObjectTracker};
 pub use render::{FrameRender, RenderMetrics};
-pub use stepper::{RunStop, Stepper, StopReason, VmSnapshot};
-pub use trace::{StepOutcome, TraceEntry, TraceRing};
+pub use stepper::{CriticalHold, RunStop, Stepper, StopReason, VmSnapshot};
+pub use trace::{HoldBreach, StepOutcome, TraceEntry, TraceRing};
 pub use watch::{VarAddress, VarChange, VarScope, VarSnapshot, WatchList, Watcher};
 
 use std::{
     fmt,
     sync::{Arc, Mutex, PoisonError},
 };
-use vault_core::{WorldHost, WorldState, assets::WorldAssets};
+use vault_core::{
+    WorldHost, WorldState,
+    assets::WorldAssets,
+    queue::{EventKind, TimedEvent},
+    skills,
+};
 use vault_vm::{Vm, VmHost};
+
+/// One event of the timed queue, for reading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueEntryView {
+    pub id: u64,
+    /// The game tick it is due.
+    pub due: u64,
+    pub kind: EventKind,
+    /// The owner's map object id (`raw.id`), as logged commands name it, or
+    /// `None` for an event without a live owner.
+    pub owner: Option<u32>,
+    pub detail: String,
+}
+impl QueueEntryView {
+    fn of(world: &WorldState, event: &TimedEvent) -> Self {
+        let owner = world.get(event.object);
+        Self {
+            id: event.id,
+            due: event.due,
+            kind: event.kind,
+            owner: owner.map(|object| object.raw.id),
+            detail: event_detail(event.kind, owner.map(|object| object.raw.pid)),
+        }
+    }
+}
+
+/// The timed queue in the order it will run: by due tick, then insertion.
+pub fn queue_entries(world: &WorldState) -> Vec<QueueEntryView> {
+    world
+        .queue
+        .events()
+        .map(|event| QueueEntryView::of(world, event))
+        .collect()
+}
+
+/// What a queued event is. `pid` is its owner's prototype, which tells the
+/// explosives apart.
+fn event_detail(kind: EventKind, pid: Option<u32>) -> String {
+    let fuse = || match pid {
+        Some(skills::DYNAMITE | skills::DYNAMITE_ARMED) => "dynamite countdown",
+        Some(skills::PLASTIC | skills::PLASTIC_ARMED) => "C4 countdown",
+        _ => "explosive countdown",
+    };
+    match kind {
+        EventKind::Drug { stats, modifiers } => {
+            format!("drug: stats {stats:?} by {modifiers:?}")
+        }
+        EventKind::Knockout => "knockout wake-up".into(),
+        EventKind::Withdrawal([1, drug, perk]) => {
+            format!("withdrawal onset: drug {drug:#x}, perk {perk}")
+        }
+        EventKind::Withdrawal([_, drug, perk]) => {
+            format!("withdrawal end: drug {drug:#x}, perk {perk}")
+        }
+        EventKind::Script { script, parameter } => {
+            format!("script timer: {script:#x}, parameter {parameter}")
+        }
+        EventKind::Midnight => "midnight".into(),
+        EventKind::Poison => "poison".into(),
+        EventKind::Radiation { level, healing: 0 } => format!("radiation onset: level {level}"),
+        EventKind::Radiation { level, .. } => format!("radiation recovery: level {level}"),
+        EventKind::MapUpdate => "map update".into(),
+        EventKind::Other(7) => "flare".into(),
+        EventKind::Other(skills::EXPLOSION_EVENT) => fuse().into(),
+        EventKind::Other(skills::PREMATURE_EVENT) => format!("{} (premature)", fuse()),
+        EventKind::Other(9) => "item drain".into(),
+        EventKind::Other(skills::SNEAK_EVENT) => "sneak recheck".into(),
+        EventKind::Other(kind) => format!("event type {kind}"),
+    }
+}
 
 /// What an [`Inspector`] watches.
 #[derive(Debug, Clone, PartialEq, Eq)]

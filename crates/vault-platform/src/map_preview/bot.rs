@@ -65,6 +65,20 @@ impl Watch {
 }
 
 impl MapPreview {
+    /// A replay's half of `InputCommand::Autoplay`. It runs no agent, since
+    /// the log holds the bot's actions, but presses must route as they did:
+    /// a banner button takes its press, not the map.
+    pub fn replay_autoplay(&mut self, on: bool) -> Result<(), WorldError> {
+        match &mut self.watch {
+            Some(watch) => watch.paused = !on,
+            None if on => {
+                self.watch = Some(Box::new(Watch::new(AutoplayAgent::new(1, false)?)));
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
     /// What the bot sees of the session.
     pub fn bot_view(&self) -> BotView {
         let screen = match &self.screen {
@@ -99,11 +113,11 @@ impl MapPreview {
             BotAction::EnterHere => self.bot_enter_here(),
             BotAction::TownEntrance { index } => self.bot_town_entrance(index),
             BotAction::CloseScreen => {
-                self.step(KeyCode::Escape);
+                self.bot_key(KeyCode::Escape);
                 BotOutcome::Done
             }
             BotAction::DismissDialog => {
-                self.step(KeyCode::Enter);
+                self.bot_key(KeyCode::Enter);
                 BotOutcome::Done
             }
             _ => BotOutcome::Refused(format!("no screen carries out {action:?}")),

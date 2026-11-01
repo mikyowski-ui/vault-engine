@@ -3304,6 +3304,73 @@ which would otherwise index past the table.
 The instanced path applies the same clamp, in the translucent draw and in the
 gray level of a translucent outline's ring.
 
+## F9 tabs and the autoplay bot
+
+The F9 overlay's first tab, **Pages**, holds the pages F8 cycles. The others
+open by a press:
+
+- **Trace & Stepper** shows decoded instructions in the session's own mode, so
+  `0x8200` reads `engine_api_version` under enhanced and `fs_size` under sfall.
+  It starts a procedure in a debugger VM and steps it, with a Step Into Critical
+  toggle and a call-stack filter. The world stays frozen and saving is refused
+  until the procedure ends. A script the world dispatched cannot be stepped,
+  since it runs inside a tick.
+- **Hex & Object** shows a clicked object's prototype, script, flags and lock,
+  with Unlock/Toggle Door, Trigger Proc, Edit Vars, Heal and Kill.
+- **Timers & Explosives** lists the queue, armed explosives first, with
+  Fast-Forward to Detonation. Fast-forward is refused in combat and dialogue.
+- **World Spawner & Warp** lists the maps that load, and spawns items, C4 and
+  keycards.
+- **Autoplay Bot** starts, pauses and stops Watch Mode and sets its speed.
+
+Every change the overlay makes is a logged `debug` record, so a replay repeats it.
+
+The bot plays from `crates/vault-core/src/autoplay.rs`, through the same rules the
+interface uses (`crates/vault-core/src/host_player.rs`). It draws from its own
+random stream, never the world's, and each thing it does is a logged `bot` record,
+so a replay needs no bot.
+
+```sh
+# Headless: no window, GPU, audio or sleeping. Status 1 on a failure.
+vault-platform --autoplay-headless --corpus-dir DATA --preview-map maps/NAME.map \
+  --ticks 50000 --seed 42 --chaos-doors-c4 --autoplay-output run
+vault-platform --replay-bundle run
+
+# Watch Mode: the bot plays the visible game.
+vault-platform --autoplay-watch --game
+```
+
+`--autoplay-output` receives `inputs.jsonl`, `checkpoints.tsv`, `manifest.json` and
+`report.txt`, cut at the failing tick if a run fails. A run ends at its tick budget,
+when the session ends, when the player dies, when the bot runs out of places to go,
+or on a failure: a panic, a chaos check, a parity audit or a stuck loop.
+
+`--replay-bundle` is how to repeat a run, since it sets the policies the run used.
+Plain `--replay-inputs` does not.
+
+**Parity audits** run at each map change, explosion and combat end. The world saves
+to memory, loads into a second host (A), saves and loads again (B). `state_hash` of
+A and B must match, and an ID-keyed diff of the world against A covers objects,
+variables, the clock and the queue, because `state_hash` skips those last two. The
+RNG is copied across, as it is not saved. `report.txt` counts each thing the audit
+allows, all of them effects of a load: Start, MapEnter and map update scripts running,
+the exit-grid art shift, the player's pose, and handles that differ when a script
+moved an object. A script that re-places a critter on every load never settles, so
+A and B may differ in those entries alone.
+
+**`--chaos-doors-c4`** has the bot walk each map's doors and containers. It checks
+that a closed door blocks and an open one does not, that Lockpick and a Crowbar
+change nothing on an unscripted object, and that a dropped, armed explosive fires
+and finishes: its event gone, critters within 3 hexes hurt by the computed amount and
+others not, `damage_p_proc` run, no blocker or ID left behind, and no tiles changed.
+
+**Watch Mode** shows a banner with the goal, the speed buttons and the way back, and
+draws the bot's target and route on the map. Space or any manual click or key hands
+control to the player at once. Space again resumes, so while Watch Mode is on, a
+player who has taken over ends a combat turn with the bar's button, not Space. The
+speeds play several 16 ms frames of the game per shown frame, and leave `game_speed`
+as it is.
+
 ## Replay checkpoints
 
 SPEC-021 §3.10 records one row per headless step, so that two runs show not

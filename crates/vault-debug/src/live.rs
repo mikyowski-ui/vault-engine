@@ -36,7 +36,7 @@ impl VmObserver for LiveTrace {
     }
     fn after_step(&mut self, vm: &Vm, result: &Result<RunOutcome, VmError>) {
         if let Some(pending) = self.pending.pop() {
-            let entry = pending.finish(vm, result.clone(), self.trace.pushed());
+            let entry = pending.finish(vm, result.clone().into(), self.trace.pushed());
             self.trace.push(entry);
         }
     }

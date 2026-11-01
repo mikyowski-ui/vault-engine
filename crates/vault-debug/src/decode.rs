@@ -1,11 +1,54 @@
 //! Read-only SPEC-004 instruction decoding for inspection. Nothing here
 //! executes or mutates a VM.
 use std::fmt;
+use vault_core::{WorldHost, assets::WorldAssets};
 use vault_vm::{
-    Vm, WordSet,
-    extensions::MOD_WORDS,
+    IntProgram, Vm, VmHost, WordSet,
+    extensions::{ENHANCED_RANGE, MOD_WORDS, enhanced_opcode, opcode_in},
     sfall::{mod_row, word_row},
 };
+
+/// How a session reads instruction words: its [`WordSet`] and whether the
+/// enhanced range is on. `0x8200..=0x8281` means one thing under enhanced and
+/// another under sfall mode (SPEC-024b §3.2), and SPEC-017 §2.3 has the
+/// session, never the number or the script, decide. This is the set in a
+/// `Copy` form, so every [`Instruction`] can carry the mode it was decoded
+/// under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodeMode {
+    first: u16,
+    last: u16,
+    mods: bool,
+    enhanced: bool,
+}
+impl DecodeMode {
+    pub fn new(words: &WordSet, enhanced: bool) -> Self {
+        Self {
+            first: *words.words.start(),
+            last: *words.words.end(),
+            mods: words.mods,
+            enhanced,
+        }
+    }
+    /// The mode `program` was parsed under, which is what the VM accepts
+    /// when it runs it.
+    pub fn of(program: &IntProgram) -> Self {
+        Self::new(program.words(), program.enhanced())
+    }
+    /// The running session's mode, for code that has no program at hand.
+    pub fn of_host<A: WorldAssets>(host: &WorldHost<A>) -> Self {
+        Self::new(&host.word_set(), host.enhanced_opcodes())
+    }
+    pub fn words(&self) -> WordSet {
+        WordSet {
+            words: self.first..=self.last,
+            mods: self.mods,
+        }
+    }
+    pub fn enhanced(&self) -> bool {
+        self.enhanced
+    }
+}
 
 /// Which SPEC-004 §3.7 registration range an instruction word falls in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -20,6 +63,10 @@ pub enum OpcodeClass {
     /// Fallout 2 program, SPEC-017 §2.1), and SPEC-024a §7.3's
     /// `0x8300`-`0x8309` under manifest scripting.
     Game,
+    /// `0x8200`-`0x82FF` with the enhanced range on, the words sfall mode
+    /// leaves to it included (SPEC-017 §2.2, SPEC-024b §3.2). Sfall mode's
+    /// own `0x8200`-`0x8281` are [`Self::Game`].
+    Enhanced,
     /// A word outside every registered range. `decode` never produces one
     /// (it reports `DecodeError::Invalid`); only an `Instruction` built by
     /// hand can carry such a word, and it is classified here instead of
@@ -34,6 +81,10 @@ pub struct Instruction {
     pub word: u16,
     /// The big-endian payload of a slot-1 push.
     pub immediate: Option<u32>,
+    /// The mode it was decoded under, which gives its class and name.
+    /// `None` from [`decode`] and [`disassemble`], whose callers have no
+    /// session: Fallout 1's classes, and `lib`/`ext` for the host words.
+    pub mode: Option<DecodeMode>,
 }
 
 /// Why an address does not hold a decodable instruction.
@@ -89,14 +140,40 @@ pub fn classify_in(words: &WordSet, word: u16) -> Option<OpcodeClass> {
         _ => None,
     }
 }
+/// [`classify_in`] for a session: its word set first, as the VM dispatches
+/// (SPEC-024b §3.2), then the enhanced range. `0x830A` and up stay refused in
+/// every session (SPEC-024a §7.1).
+pub fn classify_with(mode: DecodeMode, word: u16) -> Option<OpcodeClass> {
+    classify_in(&mode.words(), word).or_else(|| {
+        (mode.enhanced && ENHANCED_RANGE.contains(&word)).then_some(OpcodeClass::Enhanced)
+    })
+}
 
 /// Decode the instruction starting at `address` in `code`, without checking
-/// that the address is a boundary.
+/// that the address is a boundary. For a caller with no session: it accepts
+/// Fallout 1's words, and the result has no [`Instruction::mode`].
 pub fn decode(code: &[u8], address: u32) -> Result<Instruction, DecodeError> {
-    decode_in(code, address, &WordSet::FALLOUT1)
+    let words = WordSet::FALLOUT1;
+    decode_at(code, address, |word| classify_in(&words, word), None)
 }
-/// [`decode`] for a program of word set `words`.
+/// [`decode`] for a program of word set `words` with the enhanced range off.
 pub fn decode_in(code: &[u8], address: u32, words: &WordSet) -> Result<Instruction, DecodeError> {
+    decode_with(code, address, DecodeMode::new(words, false))
+}
+/// [`decode`] for a session.
+pub fn decode_with(
+    code: &[u8],
+    address: u32,
+    mode: DecodeMode,
+) -> Result<Instruction, DecodeError> {
+    decode_at(code, address, |word| classify_with(mode, word), Some(mode))
+}
+fn decode_at(
+    code: &[u8],
+    address: u32,
+    classify: impl Fn(u16) -> Option<OpcodeClass>,
+    mode: Option<DecodeMode>,
+) -> Result<Instruction, DecodeError> {
     let at = address as usize;
     if at == code.len() {
         return Err(DecodeError::End(address));
@@ -105,7 +182,7 @@ pub fn decode_in(code: &[u8], address: u32, words: &WordSet) -> Result<Instructi
         .get(at..at + 2)
         .ok_or(DecodeError::Truncated(address))?;
     let word = u16::from_be_bytes([bytes[0], bytes[1]]);
-    if classify_in(words, word).is_none() {
+    if classify(word).is_none() {
         return Err(DecodeError::Invalid { address, word });
     }
     let immediate = if instruction_length(word) == 6 {
@@ -120,10 +197,11 @@ pub fn decode_in(code: &[u8], address: u32, words: &WordSet) -> Result<Instructi
         address,
         word,
         immediate,
+        mode,
     })
 }
 
-/// Decode the instruction a VM would execute next.
+/// Decode the instruction a VM would execute next, under its program's mode.
 pub fn decode_next(vm: &Vm) -> Result<Instruction, DecodeError> {
     if vm.pc as usize == vm.code().len() {
         return Err(DecodeError::End(vm.pc));
@@ -131,16 +209,32 @@ pub fn decode_next(vm: &Vm) -> Result<Instruction, DecodeError> {
     if !vm.instruction_boundary(vm.pc) {
         return Err(DecodeError::Address(vm.pc));
     }
-    decode_in(vm.code(), vm.pc, vm.program.words())
+    decode_with(vm.code(), vm.pc, DecodeMode::of(&vm.program))
 }
 
 /// Decode consecutive instructions from `address`, stopping at the first
 /// failure or after `count` instructions.
 pub fn disassemble(code: &[u8], address: u32, count: usize) -> Vec<Instruction> {
+    listing(address, count, |at| decode(code, at))
+}
+/// [`disassemble`] for a session.
+pub fn disassemble_with(
+    code: &[u8],
+    address: u32,
+    count: usize,
+    mode: DecodeMode,
+) -> Vec<Instruction> {
+    listing(address, count, |at| decode_with(code, at, mode))
+}
+fn listing(
+    address: u32,
+    count: usize,
+    decode: impl Fn(u32) -> Result<Instruction, DecodeError>,
+) -> Vec<Instruction> {
     let mut listing = Vec::new();
     let mut at = address;
     while listing.len() < count {
-        let Ok(instruction) = decode(code, at) else {
+        let Ok(instruction) = decode(at) else {
             break;
         };
         listing.push(instruction);
@@ -156,18 +250,23 @@ impl Instruction {
     pub fn next_address(&self) -> u32 {
         self.address + self.length()
     }
-    /// The word's class; `decode` accepted it for its word set, so the
-    /// widest set (sfall mode's, with the mod words) classifies it.
+    /// The word's class under its [`mode`](Self::mode), or Fallout 1's
+    /// without one.
     pub fn class(&self) -> OpcodeClass {
-        classify_in(&WordSet::FALLOUT2_SFALL.with_mods(true), self.word)
+        self.mode
+            .map_or_else(
+                || classify(self.word),
+                |mode| classify_with(mode, self.word),
+            )
             .unwrap_or(OpcodeClass::Invalid)
     }
-    /// A short mnemonic for core and push words; extensions, whose catalogs
-    /// SPEC-004 defers, are `lib`/`ext` with their word, and a mod word or a
-    /// word past Fallout 2's set has its name from SPEC-024a §7.3 or
-    /// SPEC-024b.
+    /// The word's name under its [`mode`](Self::mode) ([`mnemonic_with`]),
+    /// or [`mnemonic`] without one.
     pub fn mnemonic(&self) -> &'static str {
-        mnemonic(self.word)
+        self.mode.map_or_else(
+            || mnemonic(self.word),
+            |mode| mnemonic_with(mode, self.word),
+        )
     }
     /// The mnemonic with its operand, e.g. `push.int 5` or `ext 0x80a5`.
     pub fn text(&self) -> String {
@@ -183,9 +282,10 @@ impl Instruction {
             }
             (_, Some(payload)) => format!("{mnemonic} {payload:#x}"),
             _ => match self.class() {
-                OpcodeClass::Library | OpcodeClass::Game | OpcodeClass::Invalid => {
-                    format!("{mnemonic} {:#06x}", self.word)
-                }
+                OpcodeClass::Library
+                | OpcodeClass::Game
+                | OpcodeClass::Enhanced
+                | OpcodeClass::Invalid => format!("{mnemonic} {:#06x}", self.word),
                 _ => mnemonic.to_string(),
             },
         }
@@ -208,7 +308,10 @@ impl fmt::Display for Instruction {
     }
 }
 
-/// Short names for the SPEC-004 §2.6 core instruction table and §2.5 pushes.
+/// A short name for `word` with no session to go on: `lib`/`ext` for the
+/// host words, and the SPEC-024a §7.3 or SPEC-024b name past Fallout 2's set.
+/// A number can mean several words (SPEC-024b §3.2), so this is a guess there;
+/// a caller with a session uses [`mnemonic_with`].
 pub fn mnemonic(word: u16) -> &'static str {
     if let Some(row) = mod_row(word).or_else(|| {
         (0x8184..=*WordSet::FALLOUT2_SFALL.words.end())
@@ -218,6 +321,33 @@ pub fn mnemonic(word: u16) -> &'static str {
     }) {
         return row.name;
     }
+    fixed_mnemonic(word)
+}
+/// `word`'s meaning in a session, from the table the VM dispatches it
+/// through. A word the session refuses is `invalid`, a reserved Fallout 2
+/// word `ext`, and an unassigned enhanced word `enhanced`.
+pub fn mnemonic_with(mode: DecodeMode, word: u16) -> &'static str {
+    let words = mode.words();
+    match classify_with(mode, word) {
+        None | Some(OpcodeClass::Invalid) => "invalid",
+        Some(OpcodeClass::Push | OpcodeClass::Core) => fixed_mnemonic(word),
+        Some(OpcodeClass::Enhanced) => enhanced_opcode(word).map_or("enhanced", |spec| spec.name),
+        Some(OpcodeClass::Library | OpcodeClass::Game) => opcode_in(&words, word)
+            .map(|spec| spec.name)
+            // SPEC-024b §3.3: a reserved sfall word has a row but no stack row.
+            .or_else(|| {
+                words
+                    .sfall()
+                    .then(|| word_row(word))
+                    .flatten()
+                    .map(|row| row.name)
+            })
+            .unwrap_or_else(|| fixed_mnemonic(word)),
+    }
+}
+/// The SPEC-004 §2.6 core instruction table, §2.5 pushes, and `lib`/`ext`
+/// for the host words SPEC-004 defers.
+fn fixed_mnemonic(word: u16) -> &'static str {
     match word {
         0xc001 => "push.int",
         0xc801 => "push.int.q",

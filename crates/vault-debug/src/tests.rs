@@ -125,7 +125,7 @@ fn decode_registration_ranges_and_invalid_words() {
         (OpcodeClass::Push, "push.tag 0x8401 0x5".to_string())
     );
     let mut vm = fragment(&[vec![0x84, 0x01, 0, 0, 0, 5]]);
-    assert_eq!(decode_next(&vm).unwrap(), tagged);
+    assert_eq!(decode_next(&vm).unwrap().text(), tagged.text());
     let mut host = BasicHost::default();
     assert_eq!(vm.update(&mut host).unwrap(), RunOutcome::FragmentEnd);
     assert_eq!(vm.value_stack.top().unwrap().tag, 0x8401);
@@ -288,15 +288,173 @@ fn faults_are_recorded_in_the_trace() {
     assert_eq!(status_names(entry.status_after), "ended|error");
 }
 
+/// `critical.enter; push 1; push 2; critical.leave; nop` at 0x0, 0x2, 0x8,
+/// 0xe, 0x10.
+fn critical_section() -> Vm {
+    fragment(&[op(0x8002), push(1), push(2), op(0x8003), op(0x8000)])
+}
+
 #[test]
 fn a_critical_section_is_one_step() {
-    let mut vm = fragment(&[op(0x8002), push(1), push(2), op(0x8003), op(0x8000)]);
+    let mut vm = critical_section();
     let mut host = BasicHost::default();
     let mut stepper = Stepper::new(4);
+    assert!(!stepper.step_into_critical, "off unless asked for");
     let entry = stepper.step(&mut vm, &mut host);
     assert_eq!(entry.instruction.unwrap().mnemonic(), "critical.enter");
     assert_eq!((entry.next_pc, entry.value_depth), (16, 2));
     assert_eq!(entry.status_after, 0);
+    assert_eq!(stepper.critical_hold(), None);
+}
+
+#[test]
+fn stepping_into_a_critical_section_runs_one_instruction_at_a_time() {
+    let mut vm = critical_section();
+    let mut host = BasicHost::default();
+    let mut stepper = Stepper::new(8);
+    stepper.step_into_critical = true;
+    let hold = Some(CriticalHold { vm: 1, now_ms: 0 });
+    for (next_pc, critical, held) in [
+        (2, true, hold),
+        (8, true, hold),
+        (14, true, hold),
+        (16, false, None),
+    ] {
+        let entry = stepper.step(&mut vm, &mut host);
+        assert_eq!(entry.next_pc, next_pc);
+        assert_eq!(entry.outcome, StepOutcome::Ran(RunOutcome::Budget));
+        assert_eq!(entry.status_after & VmStatus::CRITICAL != 0, critical);
+        assert_eq!(stepper.critical_hold(), held, "after {next_pc:#x}");
+    }
+    // It ends where the atomic step does, on the same stacks.
+    let mut atomic = critical_section();
+    Stepper::new(1).step(&mut atomic, &mut host);
+    assert_eq!(
+        (vm.pc, vm.status, vm.value_stack.bytes()),
+        (atomic.pc, atomic.status, atomic.value_stack.bytes())
+    );
+    assert_eq!(
+        stepper
+            .trace()
+            .iter()
+            .map(|entry| entry.pc)
+            .collect::<Vec<_>>(),
+        [0, 2, 8, 14]
+    );
+}
+
+#[test]
+fn a_breakpoint_inside_a_critical_section_stops_only_when_stepping_into_it() {
+    let mut stepper = Stepper::new(8);
+    stepper.add_breakpoint(8);
+    let mut host = BasicHost::default();
+    let mut vm = critical_section();
+    let stop = stepper.run_until_break(&mut vm, &mut host, 100);
+    assert_eq!(stop.reason, StopReason::Outcome(RunOutcome::FragmentEnd));
+
+    stepper.step_into_critical = true;
+    let mut vm = critical_section();
+    let stop = stepper.run_until_break(&mut vm, &mut host, 100);
+    assert_eq!(stop.reason, StopReason::Breakpoint(8));
+    assert_eq!(stop.steps, 2);
+    assert!(stepper.critical_hold().is_some());
+}
+
+#[test]
+fn a_hold_refuses_a_step_after_the_clock_moves_and_changes_nothing() {
+    let mut vm = critical_section();
+    let mut host = BasicHost::default();
+    let mut stepper = Stepper::new(8);
+    stepper.step_into_critical = true;
+    host.milliseconds = 40;
+    stepper.step(&mut vm, &mut host);
+    assert_eq!(
+        stepper.critical_hold(),
+        Some(CriticalHold { vm: 1, now_ms: 40 })
+    );
+    // The world ticked, which SPEC-004 §3.3 does not allow here.
+    host.milliseconds = 56;
+    let breach = HoldBreach::ClockMoved {
+        vm: 1,
+        from_ms: 40,
+        to_ms: 56,
+    };
+    let (pc, values) = (vm.pc, vm.value_stack.bytes().to_vec());
+    let entry = stepper.step(&mut vm, &mut host);
+    assert_eq!(entry.outcome, StepOutcome::Refused(breach));
+    assert!(!entry.executed);
+    assert!(
+        entry.to_string().ends_with(
+            "refused: the clock moved from 40 to 56 inside vm 1's critical section (not executed)"
+        ),
+        "{entry}"
+    );
+    assert_eq!((vm.pc, vm.value_stack.bytes()), (pc, values.as_slice()));
+    let stop = stepper.run_until_break(&mut vm, &mut host, 10);
+    assert_eq!(stop.reason, StopReason::Refused(breach));
+    assert_eq!(stop.steps, 1);
+    assert_eq!(
+        stop.to_string(),
+        "stopped after 1 steps: refused: the clock moved from 40 to 56 inside vm 1's critical section"
+    );
+    // Accepting the breach lets stepping go on.
+    assert_eq!(
+        stepper.release_critical(),
+        Some(CriticalHold { vm: 1, now_ms: 40 })
+    );
+    assert!(stepper.step(&mut vm, &mut host).executed);
+}
+
+#[test]
+fn a_hold_refuses_another_vm() {
+    let mut held = critical_section();
+    let mut other = arithmetic();
+    other.id = 2;
+    let mut host = BasicHost::default();
+    let mut stepper = Stepper::new(8);
+    stepper.step_into_critical = true;
+    stepper.step(&mut held, &mut host);
+    let entry = stepper.step(&mut other, &mut host);
+    assert_eq!(
+        entry.outcome,
+        StepOutcome::Refused(HoldBreach::OtherVm {
+            held: 1,
+            stepped: 2
+        })
+    );
+    assert_eq!(other.pc, 0);
+    assert!(stepper.step(&mut held, &mut host).executed);
+}
+
+#[test]
+fn a_section_that_stops_itself_is_not_held() {
+    // Normal execution ends its run here too, so others may run.
+    let mut vm = fragment(&[op(0x8002), op(0x8011), op(0x8000)]);
+    let mut host = BasicHost::default();
+    let mut stepper = Stepper::new(8);
+    stepper.step_into_critical = true;
+    stepper.step(&mut vm, &mut host);
+    assert!(stepper.critical_hold().is_some());
+    let entry = stepper.step(&mut vm, &mut host);
+    assert_eq!(entry.outcome, StepOutcome::Ran(RunOutcome::Stopped));
+    assert!(entry.status_after & VmStatus::CRITICAL != 0);
+    assert_eq!(stepper.critical_hold(), None);
+}
+
+#[test]
+fn turning_stepping_off_inside_a_section_runs_it_to_its_end() {
+    let mut vm = critical_section();
+    let mut host = BasicHost::default();
+    let mut stepper = Stepper::new(8);
+    stepper.step_into_critical = true;
+    stepper.step(&mut vm, &mut host);
+    stepper.step_into_critical = false;
+    let entry = stepper.step(&mut vm, &mut host);
+    // `Vm::run(host, 1)` does not count critical instructions, so the one
+    // instruction it runs is the nop after the section.
+    assert_eq!(entry.next_pc, 18);
+    assert_eq!(entry.status_after, 0);
+    assert_eq!(stepper.critical_hold(), None);
 }
 
 #[test]
@@ -892,7 +1050,7 @@ fn spec017_words_decode_in_a_fallout2_program() {
     assert_eq!(classify_in(&WordSet::FALLOUT2, 0x8184), None);
     let inven_cmds = decode_in(&op(0x8156), 0, &WordSet::FALLOUT2).unwrap();
     assert_eq!(inven_cmds.class(), OpcodeClass::Game);
-    assert_eq!(inven_cmds.text(), "ext 0x8156");
+    assert_eq!(inven_cmds.text(), "inven_cmds 0x8156");
     assert!(
         decode(&op(0x8156), 0).is_err(),
         "Fallout 1 keeps refusing it"
@@ -946,6 +1104,7 @@ fn spec024a_mod_words_decode_with_their_names() {
         address: 0,
         word: 0x830a,
         immediate: None,
+        mode: None,
     };
     assert_eq!(
         (bogus.class(), bogus.mnemonic()),
@@ -954,8 +1113,8 @@ fn spec024a_mod_words_decode_with_their_names() {
 }
 
 /// SPEC-024b: sfall mode's words past Fallout 2's set show their mnemonics,
-/// with their class. Fallout 2's set still refuses them, and the words below
-/// them keep `ext`.
+/// with their class. Fallout 2's set still refuses them, and with no session
+/// the words below them keep `ext`.
 #[test]
 fn spec024b_sfall_words_decode_with_their_names() {
     use crate::decode::{classify_in, decode_in};
@@ -995,8 +1154,319 @@ fn hand_built_instructions_with_unregistered_words_do_not_panic() {
         address: 4,
         word: 0x1234,
         immediate: None,
+        mode: None,
     };
     assert_eq!(bogus.class(), OpcodeClass::Invalid);
     assert_eq!(bogus.text(), "invalid 0x1234");
     assert_eq!(bogus.to_string(), "0x0004  1234           invalid 0x1234");
+}
+
+/// SPEC-024b §3.2: the session, not the number, decides what a word is.
+#[test]
+fn the_session_decides_what_a_word_means() {
+    use crate::decode::{classify_with, decode_with, mnemonic_with};
+    use vault_vm::{WordSet, extensions::opcode};
+    let fallout1 = DecodeMode::new(&WordSet::FALLOUT1, false);
+    let fallout1_enhanced = DecodeMode::new(&WordSet::FALLOUT1, true);
+    let fallout2_enhanced = DecodeMode::new(&WordSet::FALLOUT2, true);
+    let sfall = DecodeMode::new(&WordSet::FALLOUT2_SFALL, false);
+    let sfall_enhanced = DecodeMode::new(&WordSet::FALLOUT2_SFALL, true);
+    use OpcodeClass::{Enhanced, Game};
+    for (mode, word, class, name) in [
+        // The table of §3.2.
+        (fallout1_enhanced, 0x8200, Enhanced, "engine_api_version"),
+        (fallout2_enhanced, 0x8200, Enhanced, "engine_api_version"),
+        (sfall, 0x8200, Game, "fs_size"),
+        (sfall_enhanced, 0x8200, Game, "fs_size"),
+        (fallout1_enhanced, 0x8210, Enhanced, "op_cam_pan_to"),
+        (fallout2_enhanced, 0x8213, Enhanced, "op_cam_reset"),
+        (sfall, 0x8210, Game, "sfall_ver_major"),
+        (sfall_enhanced, 0x8213, Game, "hero_select_win"),
+        (sfall, 0x8156, Game, "read_byte"),
+        (fallout2_enhanced, 0x8156, Game, "inven_cmds"),
+        // Sfall mode's set ends at 0x8281; the enhanced range goes on. An
+        // unassigned word loads, and fails only when run.
+        (sfall_enhanced, 0x8282, Enhanced, "enhanced"),
+        (sfall_enhanced, 0x82ff, Enhanced, "enhanced"),
+        (fallout1_enhanced, 0x8201, Enhanced, "enhanced"),
+    ] {
+        let instruction = decode_with(&op(word), 0, mode).unwrap();
+        assert_eq!(instruction.class(), class, "{word:#06x} {mode:?}");
+        assert_eq!(instruction.mnemonic(), name, "{word:#06x} {mode:?}");
+        assert_eq!(instruction.text(), format!("{name} {word:#06x}"));
+    }
+    // A word a session does not have is refused, named or not elsewhere.
+    for (mode, word) in [
+        (fallout1, 0x8200),
+        (fallout1, 0x8156),
+        (fallout1_enhanced, 0x8156),
+        (fallout1_enhanced, 0x8184),
+        (sfall, 0x8282),
+        (fallout1_enhanced, 0x8300),
+        (sfall_enhanced, 0x8300),
+    ] {
+        assert_eq!(classify_with(mode, word), None, "{word:#06x}");
+        assert_eq!(mnemonic_with(mode, word), "invalid", "{word:#06x}");
+        assert_eq!(
+            decode_with(&op(word), 0, mode),
+            Err(DecodeError::Invalid { address: 0, word })
+        );
+    }
+    // A Fallout 1 script shows Fallout 1's words, not Fallout 2's.
+    let fallout1_name = opcode(0x80b2).unwrap().name;
+    assert_ne!(fallout1_name, "mark_area_known");
+    assert_eq!(mnemonic_with(fallout1, 0x80b2), fallout1_name);
+    assert_eq!(mnemonic_with(fallout2_enhanced, 0x80b2), "mark_area_known");
+    assert_eq!(
+        mnemonic_with(fallout1, 0x8050),
+        opcode(0x8050).unwrap().name
+    );
+    // A reserved word has no name to show, and pushes and core words have
+    // the one name.
+    assert_eq!(mnemonic_with(fallout2_enhanced, 0x815a), "ext");
+    assert_eq!(mnemonic_with(sfall, 0x8039), "add");
+    assert_eq!(mnemonic_with(sfall, 0xc001), "push.int");
+}
+
+/// SPEC-024a §7.1: `0x8300`-`0x8309` under manifest scripting, in either
+/// profile and with or without sfall mode, and the rest of the range never.
+#[test]
+fn mod_words_follow_manifest_scripting_in_every_mode() {
+    use crate::decode::{classify_with, decode_with};
+    use vault_vm::WordSet;
+    for words in [
+        WordSet::FALLOUT1,
+        WordSet::FALLOUT2,
+        WordSet::FALLOUT2_SFALL,
+    ] {
+        for enhanced in [false, true] {
+            let mode = DecodeMode::new(&words.clone().with_mods(true), enhanced);
+            let first = decode_with(&op(0x8300), 0, mode).unwrap();
+            assert_eq!(first.text(), "mod_api_version 0x8300");
+            assert_eq!(first.class(), OpcodeClass::Game);
+            for word in [0x830a, 0x83ff] {
+                assert_eq!(classify_with(mode, word), None, "{word:#06x}");
+            }
+        }
+    }
+}
+
+/// The next instruction, and so the trace, reads as the program's session.
+#[test]
+fn a_running_program_selects_its_own_mode() {
+    use vault_vm::WordSet;
+    let vm_in = |words: &WordSet, enhanced: bool, word: u16| {
+        let program = IntProgram::parse_in(&fixture::program(), words, enhanced).unwrap();
+        Vm::fragment(program, &op(word)).unwrap()
+    };
+    let enhanced = vm_in(&WordSet::FALLOUT1, true, 0x8200);
+    assert_eq!(
+        decode_next(&enhanced).unwrap().text(),
+        "engine_api_version 0x8200"
+    );
+    let sfall = vm_in(&WordSet::FALLOUT2_SFALL, true, 0x8200);
+    assert_eq!(decode_next(&sfall).unwrap().text(), "fs_size 0x8200");
+    let vanilla = vm_in(&WordSet::FALLOUT1, false, 0x8200);
+    assert_eq!(
+        decode_next(&vanilla),
+        Err(DecodeError::Invalid {
+            address: 0,
+            word: 0x8200
+        })
+    );
+
+    let mut vm = vm_in(&WordSet::FALLOUT1, true, 0x8200);
+    struct Enhanced;
+    impl VmHost for Enhanced {
+        fn enhanced_opcodes(&self) -> bool {
+            true
+        }
+    }
+    let entry = Stepper::new(1).step(&mut vm, &mut Enhanced);
+    assert!(entry.to_string().contains("engine_api_version 0x8200"));
+    assert_eq!(vm.value_stack.top().unwrap(), Value::integer(2));
+}
+
+#[test]
+fn a_host_gives_its_session_mode() {
+    use vault_vm::WordSet;
+    let program = IntProgram::parse(&fixture::program()).unwrap();
+    let world = WorldState::empty(1).unwrap();
+    let host = vault_core::WorldHost::new(world, TraceAssets(program));
+    let mode = DecodeMode::of_host(&host);
+    assert_eq!(mode, DecodeMode::new(&WordSet::FALLOUT1, false));
+    assert_eq!(mode.words(), WordSet::FALLOUT1);
+    assert!(!mode.enhanced());
+}
+
+/// Entry points with no session stay as they were.
+#[test]
+fn callers_without_a_session_keep_their_rendering() {
+    use crate::decode::disassemble_with;
+    use vault_vm::WordSet;
+    let code = [op(0x80a5), op(0x8050)].concat();
+    let plain = disassemble(&code, 0, 2);
+    assert!(plain.iter().all(|instruction| instruction.mode.is_none()));
+    assert_eq!(plain[0].text(), "ext 0x80a5");
+    assert_eq!(plain[1].text(), "lib 0x8050");
+    assert_eq!(decode::mnemonic(0x8200), "fs_size");
+    assert_eq!(decode::classify(0x8200), None);
+
+    let mode = DecodeMode::new(&WordSet::FALLOUT1, false);
+    let named = disassemble_with(&code, 0, 5, mode);
+    assert_eq!(named.len(), 2);
+    assert!(
+        named
+            .iter()
+            .all(|instruction| instruction.mode == Some(mode))
+    );
+    assert_ne!(named[0].mnemonic(), "ext");
+}
+
+// --- timed queue and object mutator --------------------------------------
+
+#[test]
+fn queue_entries_label_events_and_name_owners_by_map_id() {
+    use vault_core::{queue::EventKind, skills};
+    let mut world = WorldState::empty(1).unwrap();
+    let mut item = |pid, id| {
+        let mut record = object(pid, 100, "", None);
+        record.raw.id = id;
+        world.insert(record).unwrap()
+    };
+    let dynamite = item(skills::DYNAMITE_ARMED, 0x51);
+    let plastic = item(skills::PLASTIC_ARMED, 0x52);
+    let unknown = item(0x29, 0x53);
+    assert_ne!(dynamite, 0x51, "a handle is not the map id");
+    let mut queue = |delay, object, kind| world.queue.insert(100, delay, object, kind).unwrap();
+    queue(50, dynamite, EventKind::Other(8));
+    queue(40, plastic, EventKind::Other(11));
+    queue(30, unknown, EventKind::Other(8));
+    queue(30, 0, EventKind::Poison);
+    queue(
+        60,
+        0xdead,
+        EventKind::Radiation {
+            level: 2,
+            healing: 0,
+        },
+    );
+    queue(
+        61,
+        0,
+        EventKind::Radiation {
+            level: 2,
+            healing: 1,
+        },
+    );
+    queue(
+        70,
+        0,
+        EventKind::Script {
+            script: 0x1234,
+            parameter: 7,
+        },
+    );
+    queue(
+        80,
+        0,
+        EventKind::Drug {
+            stats: [1, 2, 3],
+            modifiers: [-1, 0, 2],
+        },
+    );
+    queue(81, 0, EventKind::Withdrawal([1, 0x6b, 4]));
+    queue(82, 0, EventKind::Withdrawal([0, 0x6b, 4]));
+    queue(90, 0, EventKind::Midnight);
+    queue(91, 0, EventKind::MapUpdate);
+    queue(92, 0, EventKind::Knockout);
+    queue(93, 0, EventKind::Other(7));
+    queue(94, 0, EventKind::Other(9));
+    queue(95, 0, EventKind::Other(10));
+    queue(96, 0, EventKind::Other(42));
+
+    let entries = queue_entries(&world);
+    let lines: Vec<(u64, Option<u32>, &str)> = entries
+        .iter()
+        .map(|entry| (entry.due, entry.owner, entry.detail.as_str()))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            (130, Some(0x53), "explosive countdown"),
+            (130, None, "poison"),
+            (140, Some(0x52), "C4 countdown (premature)"),
+            (150, Some(0x51), "dynamite countdown"),
+            (160, None, "radiation onset: level 2"),
+            (161, None, "radiation recovery: level 2"),
+            (170, None, "script timer: 0x1234, parameter 7"),
+            (180, None, "drug: stats [1, 2, 3] by [-1, 0, 2]"),
+            (181, None, "withdrawal onset: drug 0x6b, perk 4"),
+            (182, None, "withdrawal end: drug 0x6b, perk 4"),
+            (190, None, "midnight"),
+            (191, None, "map update"),
+            (192, None, "knockout wake-up"),
+            (193, None, "flare"),
+            (194, None, "item drain"),
+            (195, None, "sneak recheck"),
+            (196, None, "event type 42"),
+        ]
+    );
+    assert_eq!(entries[0].kind, EventKind::Other(8));
+    assert_eq!(entries[3].id, 1);
+    // Reading leaves the queue as it was.
+    assert_eq!(world.queue.events().count(), entries.len());
+}
+
+#[test]
+fn object_mutator_builds_commands_for_its_object() {
+    use vault_core::debug::DebugCommand as Command;
+    let target = ObjectMutator(0x51);
+    assert_eq!(
+        target.hp(12),
+        Command::SetHitPoints {
+            object: 0x51,
+            value: 12
+        }
+    );
+    assert_eq!(
+        target.ap(3),
+        Command::SetActionPoints {
+            object: 0x51,
+            value: 3
+        }
+    );
+    assert_eq!(
+        target.door(Some(true), None, Some(false)),
+        Command::SetDoor {
+            object: 0x51,
+            open: Some(true),
+            locked: None,
+            jammed: Some(false)
+        }
+    );
+    assert_eq!(
+        target.item_count(0x29, 4),
+        Command::SetItemCount {
+            owner: 0x51,
+            pid: 0x29,
+            count: 4
+        }
+    );
+    assert_eq!(
+        target.fire(6, 1),
+        Command::FireProc {
+            object: 0x51,
+            event: 6,
+            fixed: 1
+        }
+    );
+    assert_eq!(
+        target.lvar(2, -1),
+        Command::SetObjectLocalVar {
+            object: 0x51,
+            index: 2,
+            value: -1
+        }
+    );
 }

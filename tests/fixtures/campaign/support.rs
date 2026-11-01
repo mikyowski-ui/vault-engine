@@ -100,8 +100,9 @@ fn item(id: u32, hex: i32, row: i32, extra: &[i32]) -> (Vec<u8>, Option<Script>)
     (record, None)
 }
 
-fn critter(id: u32, hex: i32, script: Option<i32>) -> (Vec<u8>, Option<Script>) {
+fn critter(id: u32, hex: i32, team: i32, script: Option<i32>) -> (Vec<u8>, Option<Script>) {
     let mut record = world::object(1, hex, id, &[]);
+    world::word(&mut record, 0x6c, team);
     world::word(&mut record, 0x74, 30);
     placed(record, script.map(|index| Script { index, id }))
 }
@@ -172,8 +173,16 @@ pub fn write_campaign(root: &std::path::Path, edition: Edition) {
     if edition == Edition::Fallout2 {
         fallout2::write_tables(root);
     }
-    // A pistol of 10 rounds (punch-free single shot, 4 AP) and its ammunition.
+    // A door a player can use, as the synthetic scenery prototype cannot be.
+    let mut scenery = world::prototype(2, 0);
+    world::word(&mut scenery, 0x18, 0x800);
+    std::fs::write(root.join("proto/scenery/synthetic.pro"), scenery).unwrap();
+    // A pistol of 10 rounds and range 10, 4 AP, with animation code 4, and its
+    // ammunition.
     let mut pistol = item_prototype(PISTOL_ROW, 3);
+    world::word(&mut pistol, 0x39, 4);
+    world::word(&mut pistol, 0x39 + 16, 10);
+    world::word(&mut pistol, 0x39 + 20, 10);
     world::word(&mut pistol, 0x18, 0x76);
     world::word(&mut pistol, 0x34, -1);
     world::word(&mut pistol, 0x39 + 32, 4);
@@ -219,6 +228,14 @@ pub fn write_campaign(root: &std::path::Path, edition: Edition) {
         )
         .unwrap();
     }
+    // The pistol's animation code 4: its stand, walk and fire art.
+    for letter in 'a'..='m' {
+        std::fs::copy(
+            root.join("art/critters/sampleaa.frm"),
+            root.join(format!("art/critters/sampleg{letter}.frm")),
+        )
+        .unwrap();
+    }
     // The door script: its `damage_p_proc` destroys it.
     let destroy = [state::instruction(0x80bc), state::instruction(0x80f4)].concat();
     let door_script = state::program(
@@ -245,8 +262,8 @@ pub fn write_campaign(root: &std::path::Path, edition: Edition) {
             door(JAMMED_DOOR, 20305, JAMMED, None),
             door(SCRIPTED_DOOR, 20307, LOCKED, Some(door_index)),
             item(CONTAINER, 20500, 1, &[]),
-            critter(FRIEND, 20099, Some(0)),
-            critter(FOE, 20900, None),
+            critter(FRIEND, 20099, 0, Some(0)),
+            critter(FOE, 20900, 1, None),
             item(PISTOL, 20102, PISTOL_ROW, &[5, 0x11]),
             item(AMMUNITION, 20104, AMMUNITION_ROW, &[5]),
             item(DYNAMITE, 20106, DYNAMITE_ROW, &[0]),
@@ -256,7 +273,7 @@ pub fn write_campaign(root: &std::path::Path, edition: Edition) {
         ],
         vec![
             door(30, 20301, 0, None),
-            critter(31, 20900, None),
+            critter(31, 20900, 1, None),
             exit(32, EXIT_HEX, next(1)),
         ],
         vec![exit(40, EXIT_HEX, next(2))],

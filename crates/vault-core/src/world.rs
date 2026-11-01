@@ -1415,6 +1415,16 @@ impl WorldState {
         self.unique_ids.remove(&old);
         self.unique_ids.insert(id, reference);
     }
+    /// Ids the index holds for a retired object, or for one now under another
+    /// id. Lookups rebuild the index only when its length is off, so an equal
+    /// count can hide one of these.
+    pub fn stale_object_ids(&self) -> Vec<u32> {
+        self.unique_ids
+            .iter()
+            .filter(|(id, reference)| self.get(**reference).is_none_or(|o| o.raw.id != **id))
+            .map(|(id, _)| *id)
+            .collect()
+    }
     fn id_index(&mut self) -> &BTreeMap<u32, ObjectRef> {
         let player_id = self.get(self.player).map(|object| object.raw.id);
         let stale = self.unique_ids.len() != self.references.len()

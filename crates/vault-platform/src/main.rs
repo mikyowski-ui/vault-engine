@@ -1,6 +1,4 @@
 mod audio;
-// Filled in and called from `main` as Wave 2 lands.
-#[cfg_attr(not(test), allow(dead_code))]
 mod autoplay_runner;
 mod boot;
 mod config;
@@ -77,6 +75,32 @@ struct Args {
         conflicts_with_all = ["smoke_test", "no_audio"]
     )]
     replay_inputs: Option<PathBuf>,
+    /// Play the named map with the autoplay bot, with no window, GPU, audio or
+    /// sleeping, auditing saves as it goes. A run that finds a failure writes
+    /// a bundle to --autoplay-output and exits with status 1.
+    #[arg(
+        long,
+        requires = "preview_asset",
+        conflicts_with_all = ["replay_inputs", "smoke_test", "autoplay_watch", "replay_bundle"]
+    )]
+    autoplay_headless: bool,
+    /// Let the autoplay bot play the visible game, with the Watch Mode banner.
+    /// Space hands control to the player.
+    #[arg(long, conflicts_with_all = ["replay_inputs", "smoke_test"])]
+    autoplay_watch: bool,
+    /// With --autoplay-headless: the most ticks to run.
+    #[arg(long, value_name = "N", default_value_t = 50_000)]
+    ticks: u64,
+    /// With the autoplay flags: audit doors, locks and explosives on each map.
+    #[arg(long)]
+    chaos_doors_c4: bool,
+    /// With --autoplay-headless: the folder for the run's log, checkpoints,
+    /// manifest and report.
+    #[arg(long, value_name = "DIR", default_value = "autoplay-run")]
+    autoplay_output: PathBuf,
+    /// Replay a bundle --autoplay-headless wrote, comparing its checkpoints.
+    #[arg(long, value_name = "DIR", conflicts_with_all = ["replay_inputs", "smoke_test"])]
+    replay_bundle: Option<PathBuf>,
     /// SPEC-024a §2.3: a load order, as a `mod_list` file. It wins over the
     /// settings file, and it is how a replay mounts layers.
     #[arg(long, value_name = "PATH")]
@@ -723,6 +747,11 @@ impl DisplayPalette {
 /// Without the flag nothing is written. The log is a diagnostic: when it
 /// cannot be written (a closed pipe, a full disk), logging stops with a
 /// warning and the game goes on.
+/// A Watch Mode frame of the virtual clock.
+const WATCH_FRAME_MS: u64 = 16;
+/// How long Max speed plays in a shown frame, leaving time to draw it.
+const WATCH_MAX_BUDGET: Duration = Duration::from_millis(12);
+
 #[derive(Default)]
 struct InputLog(Option<Box<dyn std::io::Write>>);
 impl InputLog {
@@ -761,6 +790,12 @@ struct Stopped {
 
 #[derive(Default)]
 struct Shell {
+    /// `--autoplay-watch`'s seed and chaos audit, until a world is up.
+    autoplay_start: Option<(i32, bool)>,
+    /// The last `Autoplay` record logged: whether the bot had control.
+    autoplay_logged: bool,
+    /// How far Watch Mode's speed has run the clock ahead of the wall.
+    watch_ahead: u64,
     renderer: Option<Renderer>,
     window: Option<Arc<Window>>,
     ids: SequenceIds,
@@ -1075,7 +1110,116 @@ impl Shell {
     }
     /// The F9 overlay's committed commands: each is logged, then applied,
     /// so a replay of the log applies it at the same point, exactly once.
+    /// Watch Mode's control changes follow the inputs that made them.
+    fn log_autoplay_change(&mut self) {
+        let change = self
+            .session
+            .as_mut()
+            .and_then(|preview| replay::interactive_world(preview))
+            .and_then(|world| world.take_autoplay_change(&mut self.autoplay_logged));
+        if let Some(on) = change {
+            self.record(InputCommand::Autoplay { on });
+        }
+    }
+    /// `--autoplay-watch`: the bot joins the first session with a world.
+    fn start_watch(&mut self) {
+        if let Some(world) = self
+            .session
+            .as_mut()
+            .and_then(|preview| replay::interactive_world(preview))
+            && let Some((seed, chaos)) = self.autoplay_start.take()
+        {
+            match vault_core::autoplay::AutoplayAgent::new(seed, chaos) {
+                Ok(agent) => {
+                    world.watch = Some(Box::new(map_preview::bot::Watch::new(agent)));
+                }
+                Err(error) => tracing::error!(%error, "the bot did not start"),
+            }
+        }
+    }
+    /// Whether the bot is playing now.
+    fn bot_has_control(&mut self) -> bool {
+        self.session
+            .as_mut()
+            .and_then(|preview| replay::interactive_world(preview))
+            .and_then(|world| world.watch.as_ref())
+            .is_some_and(|watch| !watch.paused)
+    }
+    /// One shown frame of Watch Mode: its speed's virtual 16 ms frames, each a
+    /// logged tick. The clock runs ahead of the wall by what they added, so a
+    /// tick never goes back when the player takes over.
+    fn watch_frames(&mut self, now: u64) -> AppResult<session::Advance> {
+        let begun = Instant::now();
+        let Some(preview) = self.session.as_mut() else {
+            return Ok(session::Advance::Finished);
+        };
+        let Some(mut watch) =
+            replay::interactive_world(preview).and_then(|world| world.watch.take())
+        else {
+            return Ok(session::Advance::Running {
+                changed: false,
+                due: Vec::new(),
+            });
+        };
+        let (log, ids) = (&mut self.input_log, &mut self.ids);
+        let mut changed = false;
+        let mut finished = false;
+        let mut frames = 0;
+        let mut failure = None;
+        loop {
+            let at = now.saturating_add(frames * WATCH_FRAME_MS);
+            let step = autoplay_runner::autoplay_step(
+                preview,
+                &mut watch.agent,
+                |command| {
+                    if let Some(writer) = &mut log.0
+                        && let Err(error) = input::write_command(writer, ids, command)
+                    {
+                        log.stop(&*error);
+                    }
+                    Ok(())
+                },
+                at,
+            );
+            frames += 1;
+            match step {
+                Ok(step) => {
+                    changed |= step.changed;
+                    finished = step.finished;
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            }
+            let done = match watch.speed.frames() {
+                Some(count) => frames >= u64::from(count),
+                None => begun.elapsed() >= WATCH_MAX_BUDGET,
+            };
+            if done || finished || watch.agent.status().finished {
+                break;
+            }
+        }
+        self.watch_ahead = self
+            .watch_ahead
+            .saturating_add((frames - 1) * WATCH_FRAME_MS);
+        if watch.agent.status().finished {
+            watch.paused = true;
+        }
+        if let Some(world) = replay::interactive_world(preview) {
+            world.watch = Some(watch);
+        }
+        match failure {
+            Some(error) => Err(error),
+            None if finished => Ok(session::Advance::Finished),
+            None => Ok(session::Advance::Running {
+                changed,
+                due: Vec::new(),
+            }),
+        }
+    }
     fn drain_debug(&mut self, event_loop: &ActiveEventLoop) {
+        self.log_autoplay_change();
         let Some(preview) = self.session.as_mut() else {
             return;
         };
@@ -2682,7 +2826,8 @@ impl ApplicationHandler for Shell {
         let Some(started) = self.started.filter(|_| self.session.is_some()) else {
             return;
         };
-        let now = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let now = (started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
+            .saturating_add(self.watch_ahead);
         // A touch held long enough comes due as a long press.
         if self.touch_ui
             && let Some(window) = self.window.clone()
@@ -2692,20 +2837,33 @@ impl ApplicationHandler for Shell {
         }
         // D-11: every frame's clock is logged, so a replay ticks the preview
         // at the same times between the same commands.
-        self.log(event_loop, InputCommand::Tick { now_ms: now });
-        let Some(session) = self.session.as_mut() else {
-            return;
-        };
-        // The session's frame step (SPEC-020 §2.3), as a replay runs it;
-        // SPEC-014 §3.29: held keys repeat on the frame clock.
-        let (changed, due) = match session.advance(now, &mut self.repeat) {
-            Ok(session::Advance::Running { changed, due }) => (changed, due),
-            Ok(session::Advance::Finished) => {
-                tracing::info!("movie finished");
-                event_loop.exit();
-                return;
+        self.start_watch();
+        let (changed, due) = if self.bot_has_control() {
+            match self.watch_frames(now) {
+                Ok(session::Advance::Running { changed, due }) => (changed, due),
+                Ok(session::Advance::Finished) => {
+                    tracing::info!("the bot's game ended");
+                    event_loop.exit();
+                    return;
+                }
+                Err(error) => return self.fail(event_loop, error),
             }
-            Err(error) => return self.fail(event_loop, error),
+        } else {
+            self.log(event_loop, InputCommand::Tick { now_ms: now });
+            let Some(session) = self.session.as_mut() else {
+                return;
+            };
+            // The session's frame step (SPEC-020 §2.3), as a replay runs it;
+            // SPEC-014 §3.29: held keys repeat on the frame clock.
+            match session.advance(now, &mut self.repeat) {
+                Ok(session::Advance::Running { changed, due }) => (changed, due),
+                Ok(session::Advance::Finished) => {
+                    tracing::info!("movie finished");
+                    event_loop.exit();
+                    return;
+                }
+                Err(error) => return self.fail(event_loop, error),
+            }
         };
         if let Some(window) = self.window.clone() {
             for key in due {
@@ -2797,17 +2955,31 @@ impl ApplicationHandler for Shell {
                 {
                     return;
                 }
-                self.log(
-                    event_loop,
-                    InputCommand::Key {
-                        physical_key: match event.physical_key {
-                            PhysicalKey::Code(code) => format!("{code:?}"),
-                            PhysicalKey::Unidentified(code) => format!("Unidentified({code:?})"),
+                // A replay's Space would end a turn: the takeover is logged
+                // as `Autoplay`, never as the key.
+                let swallowed = match event.physical_key {
+                    PhysicalKey::Code(key) => self
+                        .session
+                        .as_mut()
+                        .and_then(|preview| replay::interactive_world(preview))
+                        .is_some_and(|world| world.autoplay_swallows(key, pressed)),
+                    PhysicalKey::Unidentified(_) => false,
+                };
+                if !swallowed {
+                    self.log(
+                        event_loop,
+                        InputCommand::Key {
+                            physical_key: match event.physical_key {
+                                PhysicalKey::Code(code) => format!("{code:?}"),
+                                PhysicalKey::Unidentified(code) => {
+                                    format!("Unidentified({code:?})")
+                                }
+                            },
+                            pressed,
+                            repeat: event.repeat,
                         },
-                        pressed,
-                        repeat: event.repeat,
-                    },
-                );
+                    );
+                }
                 // SPEC-014 §3.29: the engine repeats a held key itself, so
                 // the operating system's repeats are only logged.
                 let PhysicalKey::Code(key) = event.physical_key else {
@@ -2981,6 +3153,41 @@ fn run(mut args: Args) -> AppResult<()> {
         );
         return Ok(());
     }
+    if let Some(folder) = &args.replay_bundle {
+        let replayed = autoplay_runner::replay_bundle(folder)?;
+        println!(
+            "Bundle replayed: {} rows, state {}",
+            replayed.rows,
+            replayed.state_hash.as_deref().unwrap_or("none")
+        );
+        return Ok(());
+    }
+    if args.autoplay_headless {
+        args.preview.game_profile = args.game_profile.unwrap_or_default();
+        args.preview.mods = args.mod_list.clone().map(config::ModList::File);
+        let mut options = autoplay_runner::AutoplayOptions::from_args(
+            args.preview.clone(),
+            args.autoplay_output.clone(),
+        );
+        options.ticks = args.ticks;
+        options.chaos = args.chaos_doors_c4;
+        let report = autoplay_runner::run_headless_autoplay(options)?;
+        println!(
+            "Autoplay: {:?} after {} ticks, {} actions, {} refusals, {} audits, {} chaos checks, {:.0} ticks/s; {}",
+            report.ended,
+            report.ticks,
+            report.actions,
+            report.refusals,
+            report.tally.total(),
+            report.bot.checks,
+            report.ticks_per_second,
+            report.output.display(),
+        );
+        return match report.failure {
+            Some(failure) => Err(format!("autoplay failed: {:?}", failure.kind).into()),
+            None => Ok(()),
+        };
+    }
     if let Some(path) = &args.replay_inputs {
         args.preview.headless = true;
         // A replay takes nothing from the settings, but the command line's
@@ -3066,6 +3273,9 @@ fn run(mut args: Args) -> AppResult<()> {
     let mut shell = Shell {
         smoke_test: args.smoke_test,
         input_log,
+        autoplay_start: args
+            .autoplay_watch
+            .then(|| (args.preview.seed.unwrap_or(1), args.chaos_doors_c4)),
         switch_base: (!args.smoke_test).then(|| Box::new(switch_args(&args))),
         ..Default::default()
     };
@@ -3170,6 +3380,93 @@ mod tests {
 
     fn parse(args: &[&str]) -> Args {
         Args::try_parse_from(std::iter::once("vault-platform").chain(args.iter().copied())).unwrap()
+    }
+
+    /// A writer the test reads back.
+    #[derive(Clone, Default)]
+    struct SharedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for SharedLog {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Watch Mode's frames with no window: its speed plays several logged
+    /// ticks a shown frame, the clock stays monotonic when the player takes
+    /// over, and the log replays to the same world with no agent running.
+    #[test]
+    fn watch_frames_log_a_session_a_replay_repeats() {
+        use map_preview::bot::BotSpeed;
+        use vault_fixtures::campaign::{self, Edition};
+        let dir = map_preview::test_support::synthetic_corpus();
+        campaign::write_campaign(dir.path(), Edition::Fallout1);
+        let args = preview::PreviewArgs {
+            corpus_dir: Some(dir.path().into()),
+            preview_map: Some(campaign::start(Edition::Fallout1)),
+            player_gcd: Some("premade/synthetic.gcd".into()),
+            seed: Some(42),
+            ..Default::default()
+        };
+        let start = || {
+            session::SessionRuntime::start(session::SessionConfig::replay(args.clone()))
+                .unwrap()
+                .unwrap()
+        };
+        let log = SharedLog::default();
+        let mut shell = Shell {
+            session: Some(start()),
+            input_log: InputLog(Some(Box::new(log.clone()))),
+            autoplay_start: Some((42, true)),
+            ..Default::default()
+        };
+        // The first record of every session the shell logs.
+        let [width, height] = replay::INITIAL_SURFACE;
+        shell.record(InputCommand::Surface { width, height });
+        shell.start_watch();
+        assert!(shell.bot_has_control());
+        let world = |shell: &mut Shell| {
+            let session = shell.session.as_mut().unwrap();
+            replay::interactive_world(session)
+                .unwrap()
+                .host
+                .world
+                .state_hash()
+        };
+        let watch = |shell: &mut Shell| -> Option<Box<map_preview::bot::Watch>> {
+            let session = shell.session.as_mut().unwrap();
+            replay::interactive_world(session).unwrap().watch.take()
+        };
+        let mut held = watch(&mut shell).unwrap();
+        held.speed = BotSpeed::X4;
+        replay::interactive_world(shell.session.as_mut().unwrap())
+            .unwrap()
+            .watch = Some(held);
+        let frames = 400;
+        for frame in 0..frames {
+            let now = (frame + 1) * WATCH_FRAME_MS + shell.watch_ahead;
+            shell.watch_frames(now).unwrap();
+            shell.log_autoplay_change();
+        }
+        assert_eq!(shell.watch_ahead, frames * 3 * WATCH_FRAME_MS);
+        let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        let ticks = text
+            .lines()
+            .filter(|line| line.contains(r#""kind":"tick""#));
+        assert_eq!(ticks.count() as u64, frames * 4, "four ticks a shown frame");
+        assert!(text.contains(r#""kind":"bot""#), "the bot played");
+        // The takeover: the bot waits, and the session runs on the plain path.
+        assert!(watch(&mut shell).is_some());
+        assert!(!shell.bot_has_control(), "the bot is out of the session");
+
+        let expected = world(&mut shell);
+        let mut replayed = replay::Replay::new(start()).unwrap();
+        replayed.run(std::io::Cursor::new(text)).unwrap();
+        let hash = replayed.world().unwrap().host.world.state_hash();
+        assert_eq!(hash, expected, "the replay reached the same world");
     }
 
     #[test]

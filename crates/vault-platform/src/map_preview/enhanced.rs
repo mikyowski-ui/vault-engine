@@ -767,6 +767,7 @@ impl MapPreview {
         // the interface frame over the world).
         if pressed
             && world_view
+            && !right
             && let Some(ui) = at.ui.filter(|ui| self.debug_panel_at(*ui))
         {
             self.debug_panel_press(ui);

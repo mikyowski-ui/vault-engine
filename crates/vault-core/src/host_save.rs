@@ -260,6 +260,13 @@ impl<A: WorldAssets> WorldHost<A> {
     /// left: marked saved with the current time as its last visit, and
     /// written even when it is an excluded map (SPEC-014 §3.35).
     pub fn build_save(&mut self, info: &SaveInfo) -> Result<SaveGame, WorldError> {
+        // The stepped procedure lives outside the world, so a save could not
+        // hold it.
+        if self.debug_vm.is_some() {
+            return Err(WorldError::Invalid(
+                "saving is refused while a procedure is being stepped".into(),
+            ));
+        }
         // A slot names its current map, which restore loads first
         // (SPEC-014 §3.35): with no map loaded the slot could never load. An
         // unnumbered map still has its working name (SPEC-008 §3.10).

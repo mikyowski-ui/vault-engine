@@ -678,6 +678,7 @@ impl<A: WorldAssets> WorldHost<A> {
         // the whole exported-variable registry is cleared, all owners.
         self.registry.clear();
         self.programs.clear();
+        self.end_debug_stepping();
         self.program_scripts.clear();
         self.departed.clear();
         // Nothing queued for the left map's programs may run against the
@@ -1000,7 +1001,14 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         Ok(())
     }
+    /// A stepped procedure's program is gone, and ids can alias after a load.
+    fn end_debug_stepping(&mut self) {
+        if self.debug_vm.take().is_some() {
+            self.debug_paused = false;
+        }
+    }
     pub(crate) fn clear_program_bindings(&mut self) {
+        self.end_debug_stepping();
         self.departed.clear();
         self.host_busy.clear();
         self.program_scripts.clear();

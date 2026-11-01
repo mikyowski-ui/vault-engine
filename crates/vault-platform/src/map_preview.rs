@@ -45,8 +45,6 @@ const EGG_ART: u32 = 0x0600_0002;
 mod automap;
 mod autoplay_hud;
 mod barter;
-// Called once Wave 2's flags are wired in.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod bot;
 mod called;
 mod camera;
@@ -236,7 +234,6 @@ pub struct MapPreview {
     /// The vault-debug inspector and its overlay, when on.
     debug: Option<debug::DebugOverlay>,
     /// Watch Mode's bot, when one is playing this session.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) watch: Option<Box<bot::Watch>>,
     /// The map view's light levels.
     /// SPEC-014 §3.34 the inventory figure's facing and when it last
@@ -1609,6 +1606,10 @@ impl MapPreview {
         if self.debug_key(key) {
             return true;
         }
+        // The world stays frozen while the debugger steps a procedure.
+        if self.host.debug_vm.is_some() {
+            return true;
+        }
         // The `enhanced` tactical overlay's toggle, Alt+H (presentation
         // only, so the combat lock does not hold it).
         if key == KeyCode::KeyH && self.hud.modifiers[2] && self.qol() {
@@ -1795,16 +1796,22 @@ impl MapPreview {
         if self.fade_blocks() {
             return true;
         }
-        if self.movie_press() {
-            return true;
-        }
         // Drawn over everything, so they come before anything that would
         // swallow the press: a combat lock must not kill the debugger's tabs.
+        // On the unlocked world `point` is a canvas pixel, and `enhanced_button`
+        // has asked already with the interface pixel.
         if !right && self.autoplay_click(point) {
             return true;
         }
-        if !right && self.debug_panel_at(point) {
+        if self.movie_press() {
+            return true;
+        }
+        if !right && !self.pointer.world && self.debug_panel_at(point) {
             self.debug_panel_press(point);
+            return true;
+        }
+        // The world stays frozen while the debugger steps a procedure.
+        if self.host.debug_vm.is_some() {
             return true;
         }
         // The dialog box and the Set Timer window take the left button
@@ -1883,6 +1890,10 @@ impl MapPreview {
         // nothing; clicks are discarded, never queued. The Swap hands
         // button alone still presses (§3.27).
         if self.watch_shown() {
+            // The debugger picks an object during a lock too.
+            if self.map_area(point) && self.debug_click(point, right) {
+                return true;
+            }
             if !right && !self.map_area(point) {
                 self.swap_button_press(point);
             }
