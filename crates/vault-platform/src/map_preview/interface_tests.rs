@@ -4162,7 +4162,9 @@ fn characterization_attack() {
     use crate::map_preview::test_support::Recorder;
     let dir = corpus();
     // SPEC-007 §3.10.1: an attack whose art is missing does not register.
-    for suffix in ["aq", "an", "ao", "ap", "ar", "ba", "bb", "bo", "bp", "ch", "cj"] {
+    for suffix in [
+        "aq", "an", "ao", "ap", "ar", "ba", "bb", "bo", "bp", "ch", "cj",
+    ] {
         std::fs::copy(
             dir.path().join("art/critters/sampleaa.frm"),
             dir.path().join(format!("art/critters/sample{suffix}.frm")),

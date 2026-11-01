@@ -216,9 +216,6 @@ impl Default for Hud {
 /// §3.26 `wait2.frm`: 6 frames at 10 fps.
 pub(crate) const WATCH_FRAMES: u32 = cursor::ANIMATED[1].1;
 
-/// A cap on the slot's reload loop (see `reload_from_slot`).
-const RELOAD_LIMIT: usize = 1000;
-
 /// A bar button's screen rectangle.
 fn bar_button_rect(button: BarButton) -> Rect {
     let [bx, by] = bar::BAR_ORIGIN;
@@ -1078,16 +1075,8 @@ impl MapPreview {
             // book by the item-slot route, an explosive's Set Timer window
             // (SPEC-013 §3.10), a Motion Sensor's automap (§3.33), a drug,
             // a kit on the player, else the use procedure.
-            if self.host.world.combat {
-                let player = self.host.world.player;
-                let cost = self.host.hook_fixed_cost(player, 2, item);
-                let Some(state) = self.host.world.critter_state_mut(player) else {
-                    return;
-                };
-                if state.ap < cost {
-                    return;
-                }
-                state.ap -= cost;
+            if !self.host.player_spend_use_ap(item) {
+                return;
             }
             self.use_item_now(item, vault_core::BookRoute::ItemSlot);
             return;
@@ -1109,74 +1098,23 @@ impl MapPreview {
     /// when something loaded. Then the mode advances and the weapon's
     /// ready sound plays (SPEC-010).
     fn reload_from_slot(&mut self, weapon: ObjectRef) {
-        let player = self.host.world.player;
-        let combat = self.host.world.combat;
-        let cost = if combat {
-            self.host.hook_fixed_cost(player, 2, weapon)
-        } else {
-            2
-        };
-        if combat
-            && self
-                .host
-                .world
-                .critter_state(player)
-                .is_none_or(|state| state.ap < cost)
-        {
-            return;
-        }
-        let mut loaded = false;
-        // Each reload fills the magazine or uses up (and destroys) one unit,
-        // so the loop ends; the cap only bounds malformed empty packs.
-        for _ in 0..RELOAD_LIMIT {
-            match self.host.world.search_reload(player, weapon) {
-                Ok(true) => loaded = true,
-                Ok(false) => break,
-                Err(error) => {
+        match self.host.player_reload(weapon) {
+            vault_core::host_player::PlayerReload::ShortOfAp => return,
+            vault_core::host_player::PlayerReload::Ran { error } => {
+                if let Some(error) = error {
                     self.status = error.to_string().into_bytes();
-                    break;
                 }
             }
-        }
-        if loaded
-            && combat
-            && let Some(state) = self.host.world.critter_state_mut(player)
-        {
-            state.ap = (state.ap - cost).max(0);
         }
         let next = bar::next_weapon_mode(WeaponMode::Reload, |mode| self.slot_mode_available(mode));
         let hand = self.hand();
         self.hud.slots[hand].set(Some(weapon), next);
-        let name = self
-            .host
-            .weapon_sound_name(
-                vault_core::ai::READY_SOUND,
-                weapon,
-                hit_mode::RIGHT_PRIMARY,
-                0,
-            )
-            .unwrap_or_default();
-        self.host.world.emit(WorldEffect::WeaponSound {
-            object: player,
-            weapon,
-            effect: vault_core::ai::READY_SOUND,
-            name,
-        });
         self.drain_effects();
     }
     /// The player asks for combat when not in it (`a`, and the item slot's
     /// attack modes).
     fn request_combat(&mut self) {
-        if !self.host.world.combat {
-            let player = self.host.world.player;
-            self.host.world.pending_combat = Some(vault_core::combat_state::CombatRequest {
-                attacker: player,
-                defender: 0,
-                accuracy: 0,
-                damage: [0, i32::MAX],
-                flags: None,
-            });
-        }
+        self.host.player_request_combat();
     }
     /// The active hand: 0 left, 1 right.
     fn hand(&self) -> usize {
@@ -1416,55 +1354,15 @@ impl MapPreview {
     /// mode that is not aimed attacks at once, uncalled, and an aimed mode
     /// opens the called-shot window.
     pub(crate) fn attack_request(&mut self, target: ObjectRef) {
-        use vault_core::critical::state::INPUT_GATE;
-        let player = self.host.world.player;
-        let gate = self.host.world.combat_state.flags & INPUT_GATE != 0;
-        let Some((mode, aimed)) = self.slot_attack().filter(|_| gate) else {
+        use vault_core::host_player::PlayerAttack;
+        let Some((mode, aimed)) = self.slot_attack() else {
             return;
         };
-        let attack =
-            match self
-                .host
-                .world
-                .attack_profile(player, target, mode, location::UNCALLED, aimed)
-            {
-                Ok(attack) => attack,
-                Err(error) => {
-                    self.status = error.to_string().into_bytes();
-                    return;
-                }
-            };
-        // SPEC-024b §6.10: the hook runs before the cost meets the AP.
-        let mut attack = attack;
-        if self.host.hooks_on() {
-            attack.hooked_cost = Some(self.host.hook_ap_cost(player, &attack));
-        }
-        if let Err(refusal) = self.host.world.preflight(player, target, &attack) {
-            self.refuse_attack(refusal, attack.ap_cost(), mode);
-            return;
-        }
-        if !self.host.world.combat {
-            self.host.world.pending_combat = Some(vault_core::combat_state::CombatRequest {
-                attacker: player,
-                defender: target,
-                accuracy: 0,
-                damage: [0, i32::MAX],
-                flags: None,
-            });
-            self.hud.replay = Some(target);
-            return;
-        }
-        if aimed {
-            self.open_called(target, mode);
-            return;
-        }
-        // The kick draw follows the preflight (no draws).
-        match self
-            .host
-            .perform_attack(player, target, mode, location::UNCALLED, false)
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(refusal)) => self.refuse_attack(refusal, attack.ap_cost(), mode),
+        match self.host.player_attack(target, mode, aimed) {
+            Ok(PlayerAttack::Gated | PlayerAttack::Attacked) => {}
+            Ok(PlayerAttack::Refused { refusal, cost }) => self.refuse_attack(refusal, cost, mode),
+            Ok(PlayerAttack::CombatRequested) => self.hud.replay = Some(target),
+            Ok(PlayerAttack::Aimed) => self.open_called(target, mode),
             Err(error) => self.status = error.to_string().into_bytes(),
         }
     }
@@ -1619,15 +1517,8 @@ impl MapPreview {
                 if !self.action_allowed(target, ObjectAction::UseObject(item)) {
                     return;
                 }
-                if self.host.world.combat {
-                    let cost = self.host.hook_fixed_cost(player, 2, item);
-                    let Some(state) = self.host.world.critter_state_mut(player) else {
-                        return;
-                    };
-                    if state.ap < cost {
-                        return;
-                    }
-                    state.ap -= cost;
+                if !self.host.player_spend_use_ap(item) {
+                    return;
                 }
                 self.selected = Some(target);
                 self.interact(ObjectAction::UseObject(item));

@@ -36,6 +36,7 @@ pub mod host_mods;
 mod host_motion;
 mod host_movement;
 mod host_movie;
+pub mod host_player;
 pub mod host_rest;
 mod host_revisit;
 pub mod host_save;
