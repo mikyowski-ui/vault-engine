@@ -918,19 +918,19 @@ impl<A: WorldAssets> WorldHost<A> {
         if let Some((hex, elevation, pid)) = center {
             let (min, max) = skills::explosion_range(pid);
             let player = self.world.player;
-            let blast = self.fallout2_blast();
-            self.start_explosion(hex, elevation, (min, max), Some(player), animated, blast)?;
+            let outer = self.world.resolving.replace(explosive);
+            let started =
+                self.start_explosion(hex, elevation, (min, max), Some(player), animated, true);
+            if !animated || started.is_err() {
+                self.world.resolving = outer;
+            }
+            started?;
         }
         if let Some(owner) = self.world.get(explosive).and_then(|o| o.owner) {
             self.world.remove_item(owner, explosive, 1)?;
         }
         self.world.erase(explosive);
         Ok(())
-    }
-    /// R1-rev9: whether a timed explosive has its blast radius, and tells
-    /// scripts its damage type. Fallout 1 keeps the center-only rule.
-    fn fallout2_blast(&self) -> bool {
-        self.world.fallout2.is_some() || self.assets.game_profile() == crate::GameProfile::Fallout2
     }
     /// §3.10 the explosion's victims. The living critter blocking the center
     /// hex; with `blast`, every living critter on the elevation within hex
@@ -989,8 +989,8 @@ impl<A: WorldAssets> WorldHost<A> {
     /// §3.10 an explosion at `hex`: damage covers the living critter
     /// blocking the center hex, computed now with one D(min, max) draw (the
     /// splash enumeration is disabled in R1, so nothing else takes damage).
-    /// With `blast` (R1-rev9) it covers the blast radius, one draw for each
-    /// victim, and the scenery scripts learn the damage type.
+    /// With `blast`, a timed explosive's (R1-rev10), it covers the blast
+    /// radius, one draw for each victim.
     /// An animated explosion plays `whn1xxx1` with its art, `roktxpd.frm` on
     /// the center and the six adjacent hexes, and stays in progress until
     /// its damage step (`step_explosions`); an unanimated one applies the
@@ -1020,11 +1020,6 @@ impl<A: WorldAssets> WorldHost<A> {
             victims.push((victim, damage, knockback));
         }
         let art = self.explosion_art(hex, elevation, skills::explosion_art::ROCKET, 0);
-        let fixed = if blast {
-            crate::combat::damage_type::EXPLOSION
-        } else {
-            0
-        };
         let explosion = crate::world::ActiveExplosion {
             hex,
             elevation,
@@ -1032,7 +1027,6 @@ impl<A: WorldAssets> WorldHost<A> {
             source,
             art,
             notified: false,
-            fixed,
         };
         if animated {
             self.world.emit(WorldEffect::SoundEffect {
@@ -1072,6 +1066,7 @@ impl<A: WorldAssets> WorldHost<A> {
             .take_if(|explosion| explosion.art.finished())
         {
             self.apply_explosion(&explosion)?;
+            self.world.resolving = None;
             changed = true;
         }
         Ok(changed)
@@ -1137,14 +1132,14 @@ impl<A: WorldAssets> WorldHost<A> {
     /// scenery object script within hex distance 3 of the center on its
     /// elevation, then every spatial script there, keeping those with a
     /// `damage_p_proc` (a program not yet loaded runs `start` first); then
-    /// run each collected `damage_p_proc` once, with the explosion's fixed
-    /// parameter. Critter scripts are not notified.
+    /// run each collected `damage_p_proc` once, with fixed parameter 6
+    /// (R1-rev10) and the object as target. Critter scripts are not notified.
     fn notify_explosion_scripts(
         &mut self,
         explosion: &crate::world::ActiveExplosion,
     ) -> Result<(), WorldError> {
         let (hex, elevation) = (explosion.hex, explosion.elevation);
-        let (source, fixed) = (explosion.source, explosion.fixed);
+        let source = explosion.source;
         let near = |at: i32| {
             vault_formats::HexGrid::angular_distance(at, hex)
                 .is_ok_and(|distance| distance <= NOTICE_RADIUS)
@@ -1205,15 +1200,17 @@ impl<A: WorldAssets> WorldHost<A> {
         }
         self.world.spatial_enabled = previous;
         for (script, owner) in collected {
+            let outer = std::mem::replace(&mut self.world.notified, (owner != 0).then_some(owner));
             let result = self.dispatch(ScriptRequest {
                 script,
                 event: ScriptEvent::Damage,
                 source: source.unwrap_or(0),
                 target: owner,
-                fixed,
+                fixed: crate::combat::damage_type::EXPLOSION,
                 action: -1,
                 only_present: true,
             });
+            self.world.notified = outer;
             if let Err(error) = result {
                 self.world
                     .diagnostic(format!("explosion damage_p_proc: {error}"));

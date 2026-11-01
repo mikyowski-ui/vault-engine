@@ -3734,6 +3734,32 @@ the `state_hash` and `combat_hash` columns as they are with no mod.
 
 Lua or Wasm scripting, custom HUD drawing and networked mods are out of scope.
 
+## Explosives (SPEC-013 R1-rev10, SPEC-017 rule 49)
+
+A timed explosive damages every living critter within 3 hexes of its center on its
+elevation, the player included, under both profiles and both presets. A scripted
+`explosion` and a weapon stay center-only. Item, scenery and spatial scripts within 3
+hexes run `damage_p_proc` with fixed parameter 6 after a timed or scripted explosion;
+a weapon or thrown explosion runs no notice.
+
+Under `fallout2`, `metarule` 49 gives 6 for the object whose notice is running, and
+for the explosive from its event firing until its explosion ends, though the object
+itself is erased while the art plays. Otherwise it reads the weapon table, so a real
+weapon gives its own type and anything else gives -1 with a diagnostic. Under
+`fallout1`, rule 49 stays unknown and gives 0, so a door there has to read
+`fixed_param`.
+
+On real data:
+
+- Both locked Temple of Trials doors in `arcaves.map` fall to armed Dynamite or
+  Plastic Explosives dropped beside them, by their own `destroy_object`, under the
+  retail install and under Et Tu's base data. `artemple.map` has no door.
+- The door at hex 11108 falls to one blast. The door at hex 13528, on elevation 2,
+  counts blasts in a local variable and falls to the fourth. Its script holds that
+  number, so the engine leaves it alone.
+- Et Tu's own `ARCAVES.MAP` (`fo1_base`) has the same four doors with no scripts and
+  no locks, so a blast does nothing to them.
+
 ## Core contracts
 
 `EntityStore<T>` is a `slotmap::SlotMap<EntityId, T>`. Construct it with
@@ -3789,15 +3815,6 @@ Sfall mode (SPEC-024b), against the spec's boundaries:
 - `HOOK_USEOBJ` runs for the player's use of a map object and for a critter's use of
   an inventory item in the shell's item paths; `HOOK_ENCOUNTER` event 1 runs for
   the drop to terrain and for entering an area.
-
-Explosives (SPEC-013 R1-rev9), on real data:
-
-- The locked Temple of Trials doors do not open to an armed explosive. They are in
-  `arcaves.map`; `artemple.map` has no door. A timed explosive's notice reaches each
-  door's `damage_p_proc` with fixed parameter 6, as §3.10 says, but both scripts ask
-  metarule 49 for the damage type of the door itself, and SPEC-017 gives -1 for a
-  non-weapon. A script that reads `fixed_param`, as the fixture's does, opens. The
-  rule these two scripts need has to come from a spec.
 
 SPEC-024c, on real data:
 

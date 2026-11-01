@@ -416,8 +416,8 @@ pub struct ActiveExplosion {
     pub hex: i32,
     pub elevation: u8,
     /// Each victim in damage order, with its damage and knockback: the
-    /// critter blocking the center hex, or under `fallout2` a timed
-    /// explosive's whole blast radius.
+    /// critter blocking the center hex, or a timed explosive's whole blast
+    /// radius.
     pub victims: Vec<(ObjectRef, i32, i32)>,
     /// The credited attacker: the player for a timed explosive, none for a
     /// scripted request.
@@ -426,8 +426,6 @@ pub struct ActiveExplosion {
     /// center has played, and the damage step follows the last art.
     pub art: ExplosionArt,
     pub notified: bool,
-    /// The fixed parameter of the scenery scripts' `damage_p_proc`.
-    pub fixed: i32,
 }
 
 /// The id of an explosion art object in render snapshots: no world object
@@ -805,6 +803,11 @@ pub struct WorldState {
     pub pending_explosion: Option<ExplosionRequest>,
     /// SPEC-013 §3.10 the animated explosion in progress, if any.
     pub explosion: Option<ActiveExplosion>,
+    /// SPEC-017 §5.1 rule 49: the explosive being resolved, from its event
+    /// firing until its explosion ends. It outlives the object itself.
+    pub resolving: Option<ObjectRef>,
+    /// SPEC-017 §5.1 rule 49: the object whose notice `damage_p_proc` runs.
+    pub notified: Option<ObjectRef>,
     /// SPEC-007 §3.10 attack presentations, played in order: each owns the
     /// drawn state of the objects it shows until it ends.
     pub shows: VecDeque<crate::choreography::Show>,
@@ -1015,6 +1018,8 @@ impl WorldState {
             pending_loot: None,
             pending_explosion: None,
             explosion: None,
+            resolving: None,
+            notified: None,
             shows: VecDeque::new(),
             combat_speed: 0,
             player_speedup: false,
@@ -1851,6 +1856,11 @@ impl WorldState {
             opponent: 0,
         })?;
         Ok(reference)
+    }
+    /// SPEC-017 §5.1 rule 49 during an explosion: `reference` is the object
+    /// in a notice, or the explosive being resolved.
+    pub(crate) fn in_explosion(&self, reference: ObjectRef) -> bool {
+        self.notified == Some(reference) || self.resolving == Some(reference)
     }
     pub fn erase(&mut self, reference: ObjectRef) {
         if let Some(owner) = self

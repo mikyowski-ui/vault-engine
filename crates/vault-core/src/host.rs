@@ -664,6 +664,7 @@ impl<A: WorldAssets> WorldHost<A> {
         // floating text) do not survive it either.
         self.world.shows.clear();
         self.world.explosion = None;
+        self.world.resolving = None;
         self.world.pending_explosion = None;
         self.world.pending_loot = None;
         self.world.pending_combat = None;

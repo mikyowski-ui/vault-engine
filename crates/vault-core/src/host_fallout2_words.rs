@@ -505,6 +505,11 @@ impl<A: WorldAssets> WorldHost<A> {
             47 => self.world.ai.language_filter.unwrap_or(0).clamp(0, 1),
             // SPEC-014 §2.3: `violence_level` 0-3, default 3.
             48 => self.world.violence.unwrap_or(3).clamp(0, 3),
+            // Revision 5: an object in an explosion's notice, or the explosive
+            // being resolved, which is erased while its art plays.
+            49 if self.world.in_explosion(parameter as u32) => {
+                crate::combat::damage_type::EXPLOSION
+            }
             49 => {
                 let damage = self
                     .live(name, parameter as u32)
