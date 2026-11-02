@@ -529,6 +529,8 @@ impl std::ops::DerefMut for SessionRuntime {
 /// The session options a world starts with: one step configures a map
 /// preview and each world the game creates (SPEC-020 §2.3 rule 2).
 pub(crate) struct WorldOptions {
+    /// The settings profile the session runs.
+    pub profile_name: Option<String>,
     /// Worlds complete movies instead of waiting for them.
     pub headless: bool,
     /// The vault-debug inspector runs.
@@ -560,6 +562,7 @@ impl WorldOptions {
         world.set_enhanced(self.enhanced);
         world.set_touch_ui(self.touch_ui);
         world.mod_export = self.mod_export;
+        world.profile_name = self.profile_name;
         world.debug_session = self.debug_session;
         world.set_scene_renderer(self.renderer);
         if let Some(root) = self.sfall_files {

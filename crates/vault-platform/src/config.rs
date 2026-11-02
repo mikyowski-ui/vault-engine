@@ -17,10 +17,16 @@
 //! paths.
 //!
 //! `[profiles.<name>]` with any other name is a custom profile: `edition`, and
-//! its own `sfall` and `mod_list`. It shares its edition's data. The top-level
-//! `profile = "<name>"` selects it, which replaces the edition table's `sfall`
-//! and `mod_list` whenever that edition runs and gives it its own save folder.
-//! The other edition keeps its own table.
+//! its own `sfall` and `mod_list`. The top-level `profile = "<name>"` selects
+//! it, which replaces the edition table's `sfall` and `mod_list` whenever that
+//! edition runs and gives it its own save folder. The other edition keeps its
+//! own table.
+//!
+//! Any profile table may also hold `install_dir` (its own data, found by
+//! name), `secondary_dat_dirs` (another game's data it links, as Et Tu links
+//! Fallout 1's) and its own Enhanced settings ([`EnhancedProfile`]), which win
+//! over the top-level ones when it runs. `[presets.<name>]` holds saved custom
+//! presets, and `[known_paths]` every folder the launcher has remembered.
 //!
 //! **Keys from before scoping.** A top-level `mod_list` and `sfall` under
 //! `[scripting]` are still read, as a table's value: `sfall` belongs to
@@ -287,21 +293,182 @@ impl GamePaths {
 
 /// What a profile scopes beyond its paths: the two settings that belong to
 /// one game's mod stack.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProfileScope {
     /// `sfall` (SPEC-024b §3.1): opt-in sfall mode.
     pub sfall: Option<bool>,
     pub mod_list: Option<ModList>,
+    /// The folder this profile's own data is found in, by name.
+    pub install_dir: Option<PathBuf>,
+    /// Folders of another game's data this profile links.
+    pub secondary_dat_dirs: Vec<PathBuf>,
+    pub enhanced: EnhancedProfile,
+}
+
+/// A profile's or a preset's Enhanced and quality-of-life settings. A `None`
+/// leaves the top-level setting in force.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct EnhancedProfile {
+    pub preset: Option<Preset>,
+    pub viewport_mode: Option<ViewportMode>,
+    pub default_zoom: Option<f32>,
+    pub smooth_camera: Option<bool>,
+    pub roof_peek: Option<RoofPeek>,
+    pub ui_scale: Option<UiScale>,
+    pub game_speed: Option<GameSpeed>,
+    /// The tactical overlay (HP bars, AP badges and the rest), on from the
+    /// start of a session.
+    pub tactical_overlay: Option<bool>,
+}
+
+impl EnhancedProfile {
+    /// The keys it reads, as the top level spells them.
+    const KEYS: [&str; 8] = [
+        "preset",
+        "viewport_mode",
+        "default_zoom",
+        "smooth_camera",
+        "roof_peek",
+        "ui_scale",
+        "game_speed",
+        "tactical_overlay",
+    ];
+
+    /// Read `key = value`; `false` when the key is none of these.
+    fn assign(&mut self, key: &str, value: &Value) -> Result<bool, String> {
+        if !Self::KEYS.contains(&key) {
+            return Ok(false);
+        }
+        if key == "tactical_overlay" {
+            let Value::Bool(flag) = value else {
+                return Err("`tactical_overlay` expects true or false".into());
+            };
+            self.tactical_overlay = Some(*flag);
+            return Ok(true);
+        }
+        let mut parsed = Config::default();
+        parsed.assign(key, key, value.clone())?;
+        self.preset = parsed.preset.or(self.preset);
+        self.viewport_mode = parsed.viewport_mode.or(self.viewport_mode);
+        self.default_zoom = parsed.default_zoom.or(self.default_zoom);
+        self.smooth_camera = parsed.smooth_camera.or(self.smooth_camera);
+        self.roof_peek = parsed.roof_peek.or(self.roof_peek);
+        self.ui_scale = parsed.ui_scale.or(self.ui_scale);
+        self.game_speed = parsed.game_speed.or(self.game_speed);
+        Ok(true)
+    }
+
+    /// Its lines in `table`.
+    fn entries(&self, table: &str, list: &mut Vec<Entry>) {
+        let mut line = |key: &str, value: String| list.push(Entry::new(table, key, value));
+        if let Some(preset) = self.preset {
+            line("preset", quote(preset.name()));
+        }
+        if let Some(mode) = self.viewport_mode {
+            line("viewport_mode", quote(viewport_name(mode)));
+        }
+        if let Some(zoom) = self.default_zoom {
+            line("default_zoom", float(f64::from(zoom)));
+        }
+        if let Some(smooth) = self.smooth_camera {
+            line("smooth_camera", smooth.to_string());
+        }
+        if let Some(mode) = self.roof_peek {
+            line("roof_peek", quote(roof_peek_name(mode)));
+        }
+        match self.ui_scale {
+            Some(UiScale::Auto) => line("ui_scale", quote("auto")),
+            Some(UiScale::Scale(scale)) => line("ui_scale", float(f64::from(scale))),
+            None => {}
+        }
+        if let Some(speed) = self.game_speed {
+            line("game_speed", float(f64::from(speed.factor())));
+        }
+        if let Some(on) = self.tactical_overlay {
+            line("tactical_overlay", on.to_string());
+        }
+    }
+}
+
+/// `[presets.<name>]`: Enhanced settings the player saved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CustomPreset {
+    pub name: String,
+    pub settings: EnhancedProfile,
+}
+
+/// Which list of [`KnownPaths`] a path belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnownKind {
+    Fallout1,
+    Fallout2,
+    Mods,
+    Pinned,
+}
+
+/// `[known_paths]`: folders the launcher remembers, newest first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KnownPaths {
+    pub fallout1: Vec<PathBuf>,
+    pub fallout2: Vec<PathBuf>,
+    pub mods: Vec<PathBuf>,
+    pub pinned: Vec<PathBuf>,
+}
+
+impl KnownPaths {
+    /// The most any one list keeps.
+    pub const LIMIT: usize = 32;
+
+    pub fn list(&self, kind: KnownKind) -> &[PathBuf] {
+        match kind {
+            KnownKind::Fallout1 => &self.fallout1,
+            KnownKind::Fallout2 => &self.fallout2,
+            KnownKind::Mods => &self.mods,
+            KnownKind::Pinned => &self.pinned,
+        }
+    }
+
+    fn list_mut(&mut self, kind: KnownKind) -> &mut Vec<PathBuf> {
+        match kind {
+            KnownKind::Fallout1 => &mut self.fallout1,
+            KnownKind::Fallout2 => &mut self.fallout2,
+            KnownKind::Mods => &mut self.mods,
+            KnownKind::Pinned => &mut self.pinned,
+        }
+    }
+
+    /// Put `path` first in its list, once. Whether the list changed.
+    pub fn remember(&mut self, kind: KnownKind, path: &Path) -> bool {
+        let list = self.list_mut(kind);
+        if list.first().is_some_and(|first| first == path) {
+            return false;
+        }
+        list.retain(|known| known != path);
+        list.insert(0, path.to_path_buf());
+        list.truncate(Self::LIMIT);
+        true
+    }
+
+    /// Drop `path` from its list. Whether it was there.
+    pub fn forget(&mut self, kind: KnownKind, path: &Path) -> bool {
+        let list = self.list_mut(kind);
+        let before = list.len();
+        list.retain(|known| known != path);
+        list.len() != before
+    }
 }
 
 /// `[profiles.<name>]` for a name that is no edition's.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CustomProfile {
     pub name: String,
     pub edition: GameProfile,
     /// Empty while it is the active scope: see [`Config::mod_list`].
     pub scope: ProfileScope,
 }
+
+/// The Et Tu profile's name, which `--profile` and the desktop menu use.
+pub const ETTU_PROFILE: &str = "ettu";
 
 /// A custom profile's name: a table name, and a folder name on any host.
 fn valid_profile_name(name: &str) -> bool {
@@ -391,6 +558,16 @@ pub struct Config {
     /// top-level fields, so its entry stays empty, as in [`Self::profiles`].
     pub scopes: PerGame<ProfileScope>,
     pub custom_profiles: Vec<CustomProfile>,
+    /// The active scope's data folder, like [`Self::mod_list`].
+    pub install_dir: Option<PathBuf>,
+    /// The active scope's linked folders, like [`Self::mod_list`].
+    pub secondary_dat_dirs: Vec<PathBuf>,
+    /// The active scope's Enhanced settings, like [`Self::mod_list`]. What a
+    /// launch reads is the top-level fields with these over them
+    /// ([`Self::scoped_to`]).
+    pub enhanced: EnhancedProfile,
+    pub custom_presets: Vec<CustomPreset>,
+    pub known_paths: KnownPaths,
     /// The tables this engine does not know, each as its text: ignored, but
     /// kept so that a full rewrite does not lose them either.
     pub unknown_tables: Vec<String>,
@@ -404,6 +581,9 @@ enum Table {
     Edition(GameProfile),
     /// An index into [`Config::custom_profiles`].
     Custom(usize),
+    /// An index into [`Config::custom_presets`].
+    CustomPreset(usize),
+    KnownPaths,
     Unknown,
 }
 
@@ -426,7 +606,19 @@ fn table_name(line: &str) -> Option<&str> {
 
 /// Whether the engine reads a table of this name.
 fn known_table(name: &str) -> bool {
-    name == "scripting" || name == "profiles" || name.starts_with("profiles.")
+    name == "scripting"
+        || name == "profiles"
+        || name == "known_paths"
+        || name.starts_with("profiles.")
+        || name.starts_with("presets.")
+}
+
+/// `key`'s array of paths.
+fn path_list(key: &str, value: &Value) -> Result<Vec<PathBuf>, String> {
+    match value {
+        Value::Array(paths) => Ok(paths.iter().map(Into::into).collect()),
+        _ => Err(format!("`{key}` expects an array of paths")),
+    }
 }
 
 /// Read `key = value` of a `[profiles.*]` table into `scope`; `false` when
@@ -449,7 +641,17 @@ fn assign_scoped(scope: &mut ProfileScope, key: &str, value: &Value) -> Result<b
             }
             scope.mod_list = Some(parse_mod_list(key, value.clone())?);
         }
-        _ => return Ok(false),
+        "install_dir" => {
+            if scope.install_dir.is_some() {
+                return Err(duplicate());
+            }
+            match value {
+                Value::String(path) => scope.install_dir = Some(path.into()),
+                _ => return Err("`install_dir` expects a path".into()),
+            }
+        }
+        "secondary_dat_dirs" => scope.secondary_dat_dirs = path_list(key, value)?,
+        _ => return scope.enhanced.assign(key, value),
     }
     Ok(true)
 }
@@ -534,6 +736,24 @@ impl Config {
                     table = Table::Scripting;
                     continue;
                 }
+                if name == "known_paths" {
+                    table = Table::KnownPaths;
+                    continue;
+                }
+                if let Some(preset) = name.strip_prefix("presets.") {
+                    if !valid_profile_name(preset) {
+                        return Err(error(format!("invalid preset name `{preset}`")));
+                    }
+                    if config.custom_presets.iter().any(|it| it.name == preset) {
+                        return Err(error(format!("duplicate table `[{name}]`")));
+                    }
+                    table = Table::CustomPreset(config.custom_presets.len());
+                    config.custom_presets.push(CustomPreset {
+                        name: preset.to_owned(),
+                        settings: EnhancedProfile::default(),
+                    });
+                    continue;
+                }
                 let unsupported = || {
                     error(format!(
                         "unsupported table `[{name}]` (a profile is [profiles.fallout1], \
@@ -586,6 +806,28 @@ impl Config {
             }
             match table {
                 Table::Unknown => {}
+                Table::KnownPaths => {
+                    let paths = path_list(key, &value).map_err(error)?;
+                    let known = &mut config.known_paths;
+                    match key {
+                        "fallout1" => known.fallout1 = paths,
+                        "fallout2" => known.fallout2 = paths,
+                        "mods" => known.mods = paths,
+                        "pinned" => known.pinned = paths,
+                        _ => {
+                            return Err(error(format!(
+                                "`{key}` is not a known_paths list (fallout1, fallout2, mods \
+                                 or pinned)"
+                            )));
+                        }
+                    }
+                }
+                Table::CustomPreset(at) => {
+                    let settings = &mut config.custom_presets[at].settings;
+                    if !settings.assign(key, &value).map_err(error)? {
+                        return Err(error(format!("`{key}` is not a preset setting")));
+                    }
+                }
                 Table::Scripting => {
                     if key != "sfall" {
                         return Err(error(format!("`{key}` is not a scripting setting (sfall)")));
@@ -616,8 +858,9 @@ impl Config {
                         .map_err(error)?
                     {
                         return Err(error(format!(
-                            "`{key}` is not a custom profile setting (edition, sfall or \
-                             mod_list): a custom profile shares its edition's data"
+                            "`{key}` is not a custom profile setting (edition, sfall, \
+                             mod_list, install_dir, secondary_dat_dirs or an Enhanced \
+                             setting)"
                         )));
                     }
                 }
@@ -633,7 +876,8 @@ impl Config {
                         .ok_or_else(|| {
                             error(format!(
                                 "`{key}` is not a profile setting (master_dat, critter_dat, \
-                                 data_root, sfall or mod_list)"
+                                 data_root, sfall, mod_list, install_dir, secondary_dat_dirs \
+                                 or an Enhanced setting)"
                             ))
                         })?;
                     if slot.is_some() {
@@ -698,8 +942,7 @@ impl Config {
             config.set_paths(stored);
         }
         let active = std::mem::take(config.home_mut(config.active_game()));
-        config.sfall = active.sfall;
-        config.mod_list = active.mod_list;
+        config.set_active_scope(active);
         Ok(config)
     }
 
@@ -853,6 +1096,13 @@ impl Config {
                 )
             })
         };
+        let paths_text = |paths: &[PathBuf]| {
+            let items = paths
+                .iter()
+                .map(|item| path(item))
+                .collect::<std::io::Result<Vec<_>>>()?;
+            Ok::<String, std::io::Error>(format!("[{}]", items.join(", ")))
+        };
         let scoped = |table: &str, scope: &ProfileScope, list: &mut Vec<Entry>| {
             if let Some(sfall) = scope.sfall {
                 list.push(Entry::new(table, "sfall", sfall.to_string()));
@@ -869,6 +1119,14 @@ impl Config {
                 None => None,
             };
             list.extend(text.map(|text| Entry::new(table, "mod_list", text)));
+            if let Some(dir) = &scope.install_dir {
+                list.push(Entry::new(table, "install_dir", path(dir)?));
+            }
+            if !scope.secondary_dat_dirs.is_empty() {
+                let text = paths_text(&scope.secondary_dat_dirs)?;
+                list.push(Entry::new(table, "secondary_dat_dirs", text));
+            }
+            scope.enhanced.entries(table, list);
             Ok::<(), std::io::Error>(())
         };
         let mut list = Vec::new();
@@ -961,6 +1219,21 @@ impl Config {
                 scoped(&table, &self.active_scope(), &mut list)?;
             } else {
                 scoped(&table, &custom.scope, &mut list)?;
+            }
+        }
+        for preset in &self.custom_presets {
+            let table = format!("presets.{}", preset.name);
+            preset.settings.entries(&table, &mut list);
+        }
+        let known = &self.known_paths;
+        for (key, paths) in [
+            ("fallout1", &known.fallout1),
+            ("fallout2", &known.fallout2),
+            ("mods", &known.mods),
+            ("pinned", &known.pinned),
+        ] {
+            if !paths.is_empty() {
+                list.push(Entry::new("known_paths", key, paths_text(paths)?));
             }
         }
         Ok(list)
@@ -1096,6 +1369,23 @@ impl Config {
         {
             visit(path);
         }
+        let customs = self
+            .custom_profiles
+            .iter_mut()
+            .map(|custom| &mut custom.scope);
+        let scopes = [&mut self.scopes.fallout1, &mut self.scopes.fallout2]
+            .into_iter()
+            .chain(customs);
+        for scope in scopes {
+            if let Some(dir) = &mut scope.install_dir {
+                visit(dir);
+            }
+            scope.secondary_dat_dirs.iter_mut().for_each(&mut visit);
+        }
+        if let Some(dir) = &mut self.install_dir {
+            visit(dir);
+        }
+        self.secondary_dat_dirs.iter_mut().for_each(&mut visit);
         for list in [
             &mut self.mod_list,
             &mut self.scopes.fallout1.mod_list,
@@ -1174,6 +1464,7 @@ impl Config {
             roof_peek: self.roof_peek.unwrap_or(default.roof_peek),
             ui_scale: self.ui_scale.map_or(default.ui_scale, UiScale::factor),
             navigation_only: false,
+            tactical_overlay: self.enhanced.tactical_overlay,
         }
     }
 
@@ -1233,6 +1524,11 @@ impl Config {
     /// paths when it has none (a file from before profiles, launched with
     /// `--game-profile`).
     pub fn launch_paths(&self, game: GameProfile) -> GamePaths {
+        if let Some(dir) = self.scope(game).install_dir
+            && let Some(found) = discover_game(std::slice::from_ref(&dir), game)
+        {
+            return found;
+        }
         let paths = self.profile(game);
         if paths.is_empty() {
             self.paths()
@@ -1262,7 +1558,117 @@ impl Config {
         ProfileScope {
             sfall: self.sfall,
             mod_list: self.mod_list.clone(),
+            install_dir: self.install_dir.clone(),
+            secondary_dat_dirs: self.secondary_dat_dirs.clone(),
+            enhanced: self.enhanced,
         }
+    }
+
+    fn set_active_scope(&mut self, scope: ProfileScope) {
+        self.sfall = scope.sfall;
+        self.mod_list = scope.mod_list;
+        self.install_dir = scope.install_dir;
+        self.secondary_dat_dirs = scope.secondary_dat_dirs;
+        self.enhanced = scope.enhanced;
+    }
+
+    /// The profiles a player can choose, as (name, edition): both editions,
+    /// then the custom ones.
+    pub fn profile_names(&self) -> Vec<(String, GameProfile)> {
+        GAMES
+            .iter()
+            .map(|game| (game_name(*game).to_owned(), *game))
+            .chain(
+                self.custom_profiles
+                    .iter()
+                    .map(|custom| (custom.name.clone(), custom.edition)),
+            )
+            .collect()
+    }
+
+    /// The profile running now: its name, as [`Self::profile_names`] gives it.
+    pub fn active_profile(&self) -> &str {
+        self.scope_name(self.active_game())
+    }
+
+    /// Make the profile `name` active, keeping the one it replaces. Whether
+    /// such a profile exists.
+    pub fn select_profile(&mut self, name: &str) -> bool {
+        let Some((_, edition)) = self
+            .profile_names()
+            .into_iter()
+            .find(|(known, _)| known == name)
+        else {
+            return false;
+        };
+        self.switch_game(edition);
+        let old = self.active_scope();
+        *self.home_mut(edition) = old;
+        self.profile = (parse_game(name).is_none()).then(|| name.to_owned());
+        let new = std::mem::take(self.home_mut(edition));
+        self.set_active_scope(new);
+        true
+    }
+
+    /// Add an empty custom profile of `edition`.
+    pub fn add_custom_profile(&mut self, name: &str, edition: GameProfile) -> Result<(), String> {
+        if !valid_profile_name(name) || parse_game(name).is_some() {
+            return Err(format!("`{name}` cannot name a profile"));
+        }
+        if self.custom_profiles.iter().any(|it| it.name == name) {
+            return Err(format!("a profile named `{name}` exists"));
+        }
+        self.custom_profiles.push(CustomProfile {
+            name: name.to_owned(),
+            edition,
+            scope: ProfileScope::default(),
+        });
+        Ok(())
+    }
+
+    /// Keep `settings` as the custom preset `name`, replacing one of that name.
+    pub fn save_custom_preset(
+        &mut self,
+        name: &str,
+        settings: EnhancedProfile,
+    ) -> Result<(), String> {
+        if !valid_profile_name(name) {
+            return Err(format!("`{name}` cannot name a preset"));
+        }
+        match self.custom_presets.iter_mut().find(|it| it.name == name) {
+            Some(preset) => preset.settings = settings,
+            None => self.custom_presets.push(CustomPreset {
+                name: name.to_owned(),
+                settings,
+            }),
+        }
+        Ok(())
+    }
+
+    /// The profile `name`'s edition and Enhanced settings.
+    pub fn profile_enhanced(&self, name: &str) -> Option<(GameProfile, EnhancedProfile)> {
+        if self.active_profile() == name {
+            return Some((self.active_game(), self.enhanced));
+        }
+        if let Some(game) = parse_game(name) {
+            return Some((game, self.scopes.get(game).enhanced));
+        }
+        self.custom_profiles
+            .iter()
+            .find(|it| it.name == name)
+            .map(|custom| (custom.edition, custom.scope.enhanced))
+    }
+
+    /// The top-level settings with the active scope's Enhanced ones over them.
+    fn overlay_enhanced(&mut self) {
+        let own = self.enhanced;
+        self.preset = own.preset.or(self.preset);
+        self.viewport_mode = own.viewport_mode.or(self.viewport_mode);
+        self.default_zoom = own.default_zoom.or(self.default_zoom);
+        self.smooth_camera = own.smooth_camera.or(self.smooth_camera);
+        self.roof_peek = own.roof_peek.or(self.roof_peek);
+        self.ui_scale = own.ui_scale.or(self.ui_scale);
+        self.game_speed = own.game_speed.or(self.game_speed);
     }
 
     /// The `sfall` and `mod_list` a launch of `game` reads.
@@ -1290,6 +1696,7 @@ impl Config {
     pub fn scoped_to(&self, game: GameProfile) -> Self {
         let mut scoped = self.clone();
         scoped.choose_game(game, self.launch_paths(game));
+        scoped.overlay_enhanced();
         scoped
     }
 
@@ -1305,8 +1712,7 @@ impl Config {
             let old = self.active_scope();
             *self.home_mut(active) = old;
             let new = std::mem::take(self.home_mut(game));
-            self.sfall = new.sfall;
-            self.mod_list = new.mod_list;
+            self.set_active_scope(new);
         }
         self.game = Some(game);
     }
@@ -1784,9 +2190,32 @@ pub fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// An entry of `dir` named `name` without regard to ASCII case, a
-/// directory or a file as asked.
-fn entry(dir: &Path, name: &str, directory: bool) -> Option<PathBuf> {
+/// Put `settings` in the table of the profile `name` of the settings file at
+/// `path`, and change nothing else: other profiles, comments and unknown keys
+/// stay, and the active profile stays active. An in-game change comes here,
+/// since it holds no `Config` of its own.
+pub fn save_profile_enhanced(
+    path: &Path,
+    name: &str,
+    settings: EnhancedProfile,
+) -> Result<(), String> {
+    let mut config = Config::load(path).map_err(|error| error.to_string())?;
+    if config.active_profile() == name {
+        config.enhanced = settings;
+    } else if let Some(game) = parse_game(name) {
+        config.scopes.get_mut(game).enhanced = settings;
+    } else if let Some(custom) = config.custom_profiles.iter_mut().find(|it| it.name == name) {
+        custom.scope.enhanced = settings;
+    } else {
+        return Err(format!("the settings have no profile named `{name}`"));
+    }
+    config.commit(path)
+}
+
+/// The entry of `dir` named `name` without regard to ASCII case: the canonical
+/// lookup, for a game's data arrives in any case. Of several, the first by
+/// name, because directory order is the file system's.
+pub fn entry_any_case(dir: &Path, name: &str, keep: impl Fn(&Path) -> bool) -> Option<PathBuf> {
     let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .flatten()
@@ -1797,17 +2226,21 @@ fn entry(dir: &Path, name: &str, directory: bool) -> Option<PathBuf> {
                 .is_some_and(|entry| entry.eq_ignore_ascii_case(name))
         })
         .map(|entry| entry.path())
-        .filter(|path| {
-            if directory {
-                path.is_dir()
-            } else {
-                path.is_file()
-            }
-        })
+        .filter(|path| keep(path))
         .collect();
-    // Directory order is the file system's: the choice must not be.
     found.sort();
     found.into_iter().next()
+}
+
+/// [`entry_any_case`], a directory or a file as asked.
+fn entry(dir: &Path, name: &str, directory: bool) -> Option<PathBuf> {
+    entry_any_case(dir, name, |path| {
+        if directory {
+            path.is_dir()
+        } else {
+            path.is_file()
+        }
+    })
 }
 
 /// Game data in the first of `dirs` holding both `MASTER.DAT` and
@@ -2108,6 +2541,7 @@ future_float = 5e-1
                 roof_peek: RoofPeek::CursorXray,
                 ui_scale: Some(2.0),
                 navigation_only: false,
+                tactical_overlay: None,
             }
         );
         // The writer keeps every key, numbers as numbers (floats with a
@@ -2335,6 +2769,109 @@ future_float = 5e-1
             find(&[temp.path().join("none"), temp.path().into()]),
             Some(path)
         );
+    }
+
+    /// Wave 3's tables survive a round trip, each profile keeps its own settings,
+    /// and a launch reads the running profile's over the top level.
+    #[test]
+    fn profiles_presets_and_known_paths_round_trip() {
+        let text = concat!(
+            "game = \"fallout2\"\n",
+            "profile = \"ettu\"\n",
+            "preset = \"vanilla\"\n",
+            "# a comment that stays\n",
+            "[profiles.fallout1]\n",
+            "viewport_mode = \"fixed_640x480\"\n",
+            "[profiles.ettu]\n",
+            "edition = \"fallout2\"\n",
+            "install_dir = \"/games/ettu\"\n",
+            "secondary_dat_dirs = [\"/games/fallout1\"]\n",
+            "sfall = true\n",
+            "preset = \"enhanced\"\n",
+            "tactical_overlay = true\n",
+            "[presets.mine]\n",
+            "roof_peek = \"cursor_xray\"\n",
+            "[known_paths]\n",
+            "fallout1 = [\"/games/fallout1\"]\n",
+            "pinned = [\"/games\"]\n",
+        );
+        let config = Config::parse(text).unwrap();
+        assert_eq!(config.active_profile(), "ettu");
+        assert_eq!(
+            config.install_dir.as_deref(),
+            Some(Path::new("/games/ettu"))
+        );
+        assert_eq!(
+            config.secondary_dat_dirs,
+            [PathBuf::from("/games/fallout1")]
+        );
+        assert_eq!(config.enhanced.preset, Some(Preset::Enhanced));
+        assert_eq!(
+            config.custom_presets[0].settings.roof_peek,
+            Some(RoofPeek::CursorXray)
+        );
+        assert_eq!(config.known_paths.pinned, [PathBuf::from("/games")]);
+        let scoped = config.scoped_to(GameProfile::Fallout2);
+        assert_eq!(scoped.preset, Some(Preset::Enhanced), "the profile wins");
+        assert_eq!(scoped.enhanced_settings().tactical_overlay, Some(true));
+        let other = config.scoped_to(GameProfile::Fallout1);
+        assert_eq!(
+            other.preset,
+            Some(Preset::Vanilla),
+            "the other game keeps its own"
+        );
+        assert_eq!(other.sfall, None, "sfall stays with Et Tu");
+        let again = Config::parse(&config.to_toml().unwrap()).unwrap();
+        assert_eq!(again, config);
+    }
+
+    #[test]
+    fn selecting_a_profile_keeps_the_one_it_replaces() {
+        let mut config = Config::parse(concat!(
+            "game = \"fallout2\"\n",
+            "[profiles.fallout2]\n",
+            "sfall = true\n",
+            "[profiles.ettu]\n",
+            "edition = \"fallout2\"\n",
+        ))
+        .unwrap();
+        assert!(config.select_profile("ettu"));
+        assert_eq!(config.sfall, None);
+        config.sfall = Some(false);
+        assert!(config.select_profile("fallout1"));
+        assert_eq!(config.active_game(), GameProfile::Fallout1);
+        assert!(config.select_profile("fallout2"));
+        assert_eq!(config.sfall, Some(true), "its own table came back");
+        assert!(config.select_profile("ettu"));
+        assert_eq!(config.sfall, Some(false), "and Et Tu's");
+        assert!(!config.select_profile("gone"));
+    }
+
+    #[test]
+    fn saving_a_named_profile_leaves_the_rest_of_the_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault-engine.toml");
+        let text = concat!(
+            "game = \"fallout1\"\n",
+            "# keep me\n",
+            "[profiles.fallout2]\n",
+            "viewport_mode = \"fixed_640x480\" # and me\n",
+            "[profiles.ettu]\n",
+            "edition = \"fallout2\"\n",
+        );
+        std::fs::write(&path, text).unwrap();
+        let settings = EnhancedProfile {
+            tactical_overlay: Some(true),
+            ..EnhancedProfile::default()
+        };
+        save_profile_enhanced(&path, "ettu", settings).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("# keep me"), "{saved}");
+        assert!(saved.contains("# and me"), "{saved}");
+        let config = Config::parse(&saved).unwrap();
+        assert_eq!(config.active_game(), GameProfile::Fallout1, "still active");
+        assert_eq!(config.profile_enhanced("ettu").unwrap().1, settings);
+        assert!(save_profile_enhanced(&path, "gone", settings).is_err());
     }
 
     #[test]

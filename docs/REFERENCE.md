@@ -216,6 +216,8 @@ are clean-room safe:
 - `widescreen-modals-qol.gif`: Shift's ground-item outlines, a crate's
   loot window over the dimmed widescreen world, TAKE ALL, then the
   companion's Gear window from its pill and WIELD twice.
+- `launcher-settings-preview.png`: the launcher's live preview of the Enhanced
+  settings.
 - `f9-live-debugger.gif`: the F9 overlay's pages (the script trace, the
   object inspector on a clicked critter, the GVAR and MVAR editors, the map
   jump, the item spawner) to the camera page's Export Current Setup as Mod.
@@ -3303,6 +3305,64 @@ which would otherwise index past the table.
 
 The instanced path applies the same clamp, in the translucent draw and in the
 gray level of a translucent outline's ring.
+
+## The launcher studio
+
+The launcher has profile cards on the left, four tabs in the middle and a live
+preview on the right. Each profile keeps its own data, `sfall`, load order and
+Enhanced settings, in its `[profiles.<name>]` table:
+
+```toml
+game = "fallout2"
+profile = "ettu"
+
+[profiles.ettu]
+edition = "fallout2"
+install_dir = "/games/Fallout 2"
+secondary_dat_dirs = ["/games/Fallout"]   # read where the game's own data lacks a file
+sfall = true
+preset = "enhanced"
+viewport_mode = "unlocked_widescreen"
+tactical_overlay = true
+
+[presets.my-setup]                         # [Save Custom Preset]
+roof_peek = "cursor_xray"
+
+[known_paths]                              # remembered as you pick them
+fallout1 = ["/games/Fallout"]
+pinned = ["/games"]
+```
+
+- **Fallout: Et Tu** always has a card, the `ettu` profile, which is ready once its
+  paths are set.
+- **Auto-Detect** fills a profile from a folder. It finds the archives in any case,
+  and notes `fallout1in2`, `mods/` and `ddraw.ini` by name, and links a remembered
+  Fallout 1 folder when the folder looks like Et Tu. A folder with `fallout1in2` goes
+  to the Et Tu card from any other. It reads no mod's contents.
+- The folder browser lists pinned and remembered folders, common Steam, GOG and
+  Heroic locations, and the drives. **P** pins the folder on show.
+- **Presets** are `1:1 Vanilla Purist`, `Widescreen Classic` and `Modern Tactical`,
+  plus any you save. Hovering a setting shows it in the preview. Under the fixed
+  viewport zoom and roof peek do nothing, and the preview shows that.
+- **Resume Last Save** loads the save written last. **Autoplay Test** plays with
+  the bot in Watch Mode.
+- In game, under the enhanced preset, **Options > Enhanced** (or `H`) changes these
+  live and saves them to the running profile alone. Vanilla or Enhanced rules
+  apply at the next start.
+
+`--profile NAME --game` starts a profile from the command line. A name the settings
+do not have opens the launcher, which says so.
+
+To add Vault Engine to a Linux desktop's menu:
+
+```sh
+cargo build --release --package vault-platform
+cargo xtask install-desktop              # --uninstall removes it
+```
+
+That writes the desktop entry, with actions for each game, and an icon, and copies
+the binary to `~/.local/bin/vault-engine`. It never builds, and refuses a stale binary.
+A menu launch has no working directory of its own, so it reads the per-user settings.
 
 ## F9 tabs and the autoplay bot
 

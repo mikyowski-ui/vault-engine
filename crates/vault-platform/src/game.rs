@@ -205,6 +205,10 @@ pub struct Game {
     /// The last refusal shown on returning to the menu (a table that
     /// SPEC-018 §4 refuses names its file and line).
     pub last_error: Option<String>,
+    /// Go to the newest save as soon as the menu is up.
+    pub resume_latest: bool,
+    /// The settings profile this session runs.
+    pub profile_name: Option<String>,
 }
 
 /// One fade over the fixed 700 ms of the §3.2 safe rule: step k of n sets
@@ -277,6 +281,8 @@ impl Game {
             preferences,
             interrupt_walk: true,
             music_configured: config.get_int("sound", "music").unwrap_or(1) != 0,
+            resume_latest: false,
+            profile_name: None,
             stage: Stage::Menu { since: 0 },
             movies: VecDeque::new(),
             now: 0,
@@ -684,6 +690,7 @@ impl Game {
         world.roof_key = false;
         // The session's options, as a map preview takes them.
         crate::session::WorldOptions {
+            profile_name: self.profile_name.clone(),
             headless: self.headless,
             debug: self.debug,
             enhanced: self.enhanced,
@@ -992,7 +999,27 @@ impl Game {
         }
     }
 
+    /// Resume Last Save: from the menu to the newest save, through the load
+    /// screen, which stays open when there is none.
+    fn resume_newest(&mut self) {
+        if !self.prepare_fallout2() {
+            return;
+        }
+        match self.world_with(CharacterSheet::default()) {
+            Ok(mut world) => {
+                world.open_save_screen(Mode::LoadFromMenu);
+                world.load_newest_slot();
+                self.stage = Stage::Load(Box::new(world));
+            }
+            Err(error) => tracing::error!(%error, "resume failed"),
+        }
+    }
+
     pub fn tick(&mut self, now: u64) -> AppResult<bool> {
+        if self.resume_latest && matches!(self.stage, Stage::Menu { .. }) {
+            self.resume_latest = false;
+            self.resume_newest();
+        }
         let before = std::mem::replace(&mut self.now, now);
         if !matches!(self.stage, Stage::World(_) | Stage::Load(_)) {
             self.sync_volumes();

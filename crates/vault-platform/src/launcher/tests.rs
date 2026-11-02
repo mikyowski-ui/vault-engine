@@ -1,4 +1,5 @@
 use super::*;
+use crate::enhanced::BuiltinPreset;
 use sha2::{Digest, Sha256};
 use std::fs;
 
@@ -414,7 +415,9 @@ fn save_rewrites_the_settings_and_keeps_unknown_keys() {
     assert_eq!(saved.scaling, Some(ScalingMode::AspectFit));
     assert_eq!(saved.fullscreen, Some(true));
     assert_eq!(saved.audio, Some(false));
-    assert_eq!(saved.preset, Some(Preset::Enhanced));
+    // The preset is the active profile's, in its table.
+    assert_eq!(saved.enhanced.preset, Some(Preset::Enhanced));
+    assert_eq!(saved.preset, None);
     assert_eq!(saved.mod_list, None);
     // A launcher started from the saved file shows the same settings.
     let reloaded = Launcher::new(Setup {
@@ -563,18 +566,24 @@ fn load_order_edits_round_trip_through_the_writer() {
     });
     assert_eq!(reloaded.mods.entries, launcher.mods.entries);
     assert_eq!(reloaded.mods.check, launcher.mods.check);
-    // An inline path list is shown but stays read-only.
+    // An inline path list is shown as it stands, and the first edit makes it
+    // a load order: `load_order.toml` is there already, so it gets its own.
     let inline = Config {
         mod_list: Some(ModList::Paths(vec![dir.join("mods/one")])),
         ..reloaded.config.clone()
     };
     let mut launcher = Launcher::new(setup(dir, inline));
     launcher.tab = Tab::Mods;
-    assert!(launcher.mods.read_only.is_some());
+    assert_eq!(launcher.mods.read_only, None);
     assert!(launcher.mods.check.stack.is_ok());
     launcher.handle(LauncherInput::Dropped(dir.join("mods/two")));
-    assert_eq!(launcher.mods.entries.len(), 1);
-    assert!(launcher.status.starts_with("Read only"));
+    assert_eq!(paths(&launcher), ["mods/one", "mods/two"]);
+    assert!(launcher.mods.check.layers.iter().all(Check::is_ok));
+    launcher.save().unwrap();
+    assert_eq!(
+        launcher.config.mod_list,
+        Some(ModList::File(dir.join("load_order_fallout1.toml")))
+    );
 }
 
 #[test]
@@ -882,7 +891,7 @@ fn the_keyboard_moves_the_focus_in_layout_order() {
     use {Field as F, Tab as T, Widget as W};
     launcher.focus = W::Tab(T::Data);
     let mut seen = vec![launcher.focus];
-    for _ in 0..13 {
+    for _ in 0..24 {
         key(&mut launcher, KeyCode::Tab);
         seen.push(launcher.focus);
     }
@@ -891,7 +900,8 @@ fn the_keyboard_moves_the_focus_in_layout_order() {
         [
             W::Tab(T::Data),
             W::Tab(T::Display),
-            W::Tab(T::Mods),
+            W::Tab(T::Audio),
+            W::Tab(T::Debug),
             W::Field(F::Master),
             W::Browse(F::Master),
             W::Field(F::Critter),
@@ -899,25 +909,38 @@ fn the_keyboard_moves_the_focus_in_layout_order() {
             W::Field(F::DataRoot),
             W::Browse(F::DataRoot),
             W::Game,
+            W::AutoDetect,
+            W::Layers,
+            W::LayerUp,
+            W::LayerDown,
+            W::LayerToggle,
+            W::LayerRemove,
+            W::NewLayer,
+            W::AddLayer,
+            W::BrowseLayer,
             W::Save,
             W::Play,
             W::PlayDebug,
             W::Quit,
+            W::ProfileCard(0),
         ]
     );
-    key(&mut launcher, KeyCode::Tab);
-    assert_eq!(launcher.focus, W::Tab(T::Data));
     launcher.handle(LauncherInput::Key {
         key: KeyCode::Tab,
         shift: true,
     });
     assert_eq!(launcher.focus, W::Quit);
-    // Arrows on the tab row switch tabs.
+    // Arrows on the pills switch tabs, wrapping, and leave a tab for its rows.
     launcher.focus = W::Tab(T::Data);
     key(&mut launcher, KeyCode::ArrowLeft);
-    assert_eq!((launcher.tab, launcher.focus), (T::Mods, W::Tab(T::Mods)));
+    assert_eq!((launcher.tab, launcher.focus), (T::Debug, W::Tab(T::Debug)));
     key(&mut launcher, KeyCode::ArrowDown);
-    assert_eq!(launcher.focus, W::Layers);
+    assert_eq!(launcher.focus, W::Debug);
+    // The Mods tab shares the first pill.
+    launcher.tab = T::Mods;
+    launcher.focus = W::Tab(T::Data);
+    key(&mut launcher, KeyCode::ArrowRight);
+    assert_eq!(launcher.tab, T::Display);
     // The browser is modal, and Esc backs out of it to its button.
     launcher.tab = T::Data;
     launcher.focus = W::Browse(F::Critter);
@@ -926,8 +949,9 @@ fn the_keyboard_moves_the_focus_in_layout_order() {
     key(&mut launcher, KeyCode::Tab);
     assert_eq!(launcher.focus, W::BrowseUse);
     key(&mut launcher, KeyCode::Tab);
+    assert_eq!(launcher.focus, W::BrowseCancel);
     key(&mut launcher, KeyCode::Tab);
-    assert_eq!(launcher.focus, W::BrowseList);
+    assert_eq!(launcher.focus, W::KnownPath(0));
     key(&mut launcher, KeyCode::Escape);
     assert!(launcher.browser.is_none());
     assert_eq!(launcher.focus, W::Browse(F::Critter));
@@ -940,11 +964,18 @@ fn the_keyboard_moves_the_focus_in_layout_order() {
     key(&mut launcher, KeyCode::ArrowDown);
     assert_eq!(launcher.focus, W::Browse(F::Master));
     // The pointer: hover, then a press focuses and activates.
-    launcher.handle(LauncherInput::Pointer([350, 420]));
+    let inside = |launcher: &Launcher, widget: W| {
+        let rect = launcher.rect(widget).unwrap();
+        [rect.x + 2, rect.y + 2]
+    };
+    let play = inside(&launcher, W::Play);
+    launcher.handle(LauncherInput::Pointer(play));
     assert_eq!(launcher.hover, Some(W::Play));
-    let quit = launcher.handle(LauncherInput::Press([590, 420]));
+    let quit = inside(&launcher, W::Quit);
+    let quit = launcher.handle(LauncherInput::Press(quit));
     assert_eq!(quit, Some(LauncherAction::Quit));
-    launcher.handle(LauncherInput::Press([120, 46]));
+    let pill = inside(&launcher, W::Tab(T::Display));
+    launcher.handle(LauncherInput::Press(pill));
     assert_eq!(launcher.tab, T::Display);
 }
 
@@ -963,6 +994,7 @@ fn the_enhanced_display_rows_show_step_and_save_with_the_enhanced_preset() {
         Widget::RoofPeek,
         Widget::UiScale,
         Widget::GameSpeed,
+        Widget::TacticalOverlay,
     ];
     // Vanilla: hidden, out of the focus order, and the tab draws as before.
     launcher.focus = Widget::Preset;
@@ -973,17 +1005,17 @@ fn the_enhanced_display_rows_show_step_and_save_with_the_enhanced_preset() {
             .all(|widget| !launcher.order().contains(widget))
     );
     key(&mut launcher, KeyCode::Space);
-    assert_eq!(launcher.config.preset, Some(Preset::Enhanced));
-    // Enhanced: the rows follow the left column in the focus order.
+    assert_eq!(launcher.config.enhanced.preset, Some(Preset::Enhanced));
+    // Enhanced: the rows follow the general ones in the focus order.
     let order = launcher.order();
     let last = order
         .iter()
-        .position(|widget| *widget == Widget::HotkeyHints)
+        .position(|widget| *widget == Widget::Fullscreen)
         .unwrap();
-    assert_eq!(order[last - 1], Widget::Debug);
-    assert_eq!(&order[last + 1..last + 7], &enhanced);
-    assert_eq!(order[last + 7], Widget::Save);
-    launcher.focus = Widget::HotkeyHints;
+    assert_eq!(order[last - 1], Widget::Scaling);
+    assert_eq!(&order[last + 1..last + 8], &enhanced);
+    assert_eq!(order[last + 8], Widget::Save);
+    launcher.focus = Widget::Fullscreen;
     for widget in enhanced {
         key(&mut launcher, KeyCode::Tab);
         assert_eq!(launcher.focus, widget);
@@ -998,40 +1030,47 @@ fn the_enhanced_display_rows_show_step_and_save_with_the_enhanced_preset() {
     );
     // The defaults, then each choice.
     assert_eq!(
-        launcher.config.enhanced_settings(),
+        launcher.active_enhanced().settings,
         crate::enhanced::EnhancedSettings::default()
     );
+    // Each goes in the active profile's table.
     launcher.focus = Widget::Viewport;
     key(&mut launcher, KeyCode::ArrowRight);
-    assert_eq!(launcher.config.viewport_mode, Some(ViewportMode::Fixed));
+    assert_eq!(
+        launcher.config.enhanced.viewport_mode,
+        Some(ViewportMode::Fixed)
+    );
     // The zoom steps through its stops, both ways, wrapping at the ends.
     launcher.focus = Widget::Zoom;
     let mut zooms = Vec::new();
     for _ in 0..8 {
         key(&mut launcher, KeyCode::ArrowRight);
-        zooms.push(launcher.config.default_zoom.unwrap());
+        zooms.push(launcher.config.enhanced.default_zoom.unwrap());
     }
     assert_eq!(zooms, [1.25, 1.5, 2.0, 2.5, 3.0, 0.5, 0.75, 1.0]);
     key(&mut launcher, KeyCode::ArrowLeft);
-    assert_eq!(launcher.config.default_zoom, Some(0.75));
+    assert_eq!(launcher.config.enhanced.default_zoom, Some(0.75));
     // A value from the file between stops moves from the nearest one.
-    launcher.config.default_zoom = Some(1.1);
+    launcher.config.enhanced.default_zoom = Some(1.1);
     key(&mut launcher, KeyCode::ArrowRight);
-    assert_eq!(launcher.config.default_zoom, Some(1.25));
+    assert_eq!(launcher.config.enhanced.default_zoom, Some(1.25));
     launcher.focus = Widget::SmoothCamera;
     key(&mut launcher, KeyCode::Enter);
-    assert_eq!(launcher.config.smooth_camera, Some(false));
+    assert_eq!(launcher.config.enhanced.smooth_camera, Some(false));
     launcher.focus = Widget::RoofPeek;
     key(&mut launcher, KeyCode::Space);
-    assert_eq!(launcher.config.roof_peek, Some(RoofPeek::CursorXray));
+    assert_eq!(
+        launcher.config.enhanced.roof_peek,
+        Some(RoofPeek::CursorXray)
+    );
     key(&mut launcher, KeyCode::ArrowLeft);
     key(&mut launcher, KeyCode::ArrowLeft);
-    assert_eq!(launcher.config.roof_peek, Some(RoofPeek::Hidden));
+    assert_eq!(launcher.config.enhanced.roof_peek, Some(RoofPeek::Hidden));
     launcher.focus = Widget::UiScale;
     let mut scales = Vec::new();
     for _ in 0..6 {
         key(&mut launcher, KeyCode::ArrowRight);
-        scales.push(launcher.config.ui_scale.unwrap());
+        scales.push(launcher.config.enhanced.ui_scale.unwrap());
     }
     assert_eq!(
         scales,
@@ -1045,31 +1084,42 @@ fn the_enhanced_display_rows_show_step_and_save_with_the_enhanced_preset() {
         ]
     );
     key(&mut launcher, KeyCode::ArrowLeft);
-    assert_eq!(launcher.config.ui_scale, Some(UiScale::Scale(3.0)));
+    assert_eq!(launcher.config.enhanced.ui_scale, Some(UiScale::Scale(3.0)));
     // The game speed cycles 1.0, 1.5, 2.0 both ways, as Alt+F does.
     use crate::enhanced::GameSpeed;
     launcher.focus = Widget::GameSpeed;
-    assert_eq!(launcher.config.game_speed(), GameSpeed::Normal);
+    assert_eq!(launcher.active_enhanced().game_speed, GameSpeed::Normal);
     let mut speeds = Vec::new();
     for _ in 0..3 {
         key(&mut launcher, KeyCode::ArrowRight);
-        speeds.push(launcher.config.game_speed.unwrap());
+        speeds.push(launcher.config.enhanced.game_speed.unwrap());
     }
     assert_eq!(
         speeds,
         [GameSpeed::Fast, GameSpeed::Faster, GameSpeed::Normal]
     );
     key(&mut launcher, KeyCode::ArrowLeft);
-    assert_eq!(launcher.config.game_speed, Some(GameSpeed::Faster));
+    assert_eq!(launcher.config.enhanced.game_speed, Some(GameSpeed::Faster));
     key(&mut launcher, KeyCode::Enter);
-    assert_eq!(launcher.config.game_speed, Some(GameSpeed::Normal));
+    assert_eq!(launcher.config.enhanced.game_speed, Some(GameSpeed::Normal));
     let rect = launcher.rect(Widget::GameSpeed).unwrap();
     launcher.handle(LauncherInput::Press([rect.x + 4, rect.y + 4]));
-    assert_eq!(launcher.config.game_speed, Some(GameSpeed::Fast));
+    assert_eq!(launcher.config.enhanced.game_speed, Some(GameSpeed::Fast));
     // A click on a row steps it too.
     let rect = launcher.rect(Widget::Zoom).unwrap();
     launcher.handle(LauncherInput::Press([rect.x + 4, rect.y + 4]));
-    assert_eq!(launcher.config.default_zoom, Some(1.5));
+    assert_eq!(launcher.config.enhanced.default_zoom, Some(1.5));
+    // A click on a slider's track takes the stop under it.
+    let track = view::slider_track(rect);
+    launcher.handle(LauncherInput::Press([track.x, rect.y + 4]));
+    assert_eq!(launcher.config.enhanced.default_zoom, Some(0.5));
+    launcher.handle(LauncherInput::Press([rect.x + 4, rect.y + 4]));
+    assert_eq!(launcher.config.enhanced.default_zoom, Some(0.75));
+    launcher.handle(LauncherInput::Press([rect.x + 4, rect.y + 4]));
+    assert_eq!(launcher.config.enhanced.default_zoom, Some(1.0));
+    launcher.handle(LauncherInput::Press([rect.x + 4, rect.y + 4]));
+    launcher.handle(LauncherInput::Press([rect.x + 4, rect.y + 4]));
+    assert_eq!(launcher.config.enhanced.default_zoom, Some(1.5));
     // Save writes them, and they read back.
     assert_eq!(launcher.save(), Ok(dir.join(config::FILE_NAME)));
     let text = fs::read_to_string(dir.join(config::FILE_NAME)).unwrap();
@@ -1085,12 +1135,13 @@ fn the_enhanced_display_rows_show_step_and_save_with_the_enhanced_preset() {
         assert!(text.contains(line), "{line}: {text}");
     }
     let saved = Config::parse(&text).unwrap();
-    assert_eq!(saved.game_speed(), GameSpeed::Fast);
-    // A launcher from the saved file shows it again.
+    // A launch reads them, and a launcher from the saved file shows them.
+    let launch = saved.scoped_to(saved.active_game());
+    assert_eq!(launch.game_speed(), GameSpeed::Fast);
     let reloaded = Launcher::new(setup(dir, saved.clone()));
-    assert_eq!(reloaded.config.game_speed(), GameSpeed::Fast);
+    assert_eq!(reloaded.active_enhanced().game_speed, GameSpeed::Fast);
     assert_eq!(
-        saved.enhanced_settings(),
+        launch.enhanced_settings(),
         crate::enhanced::EnhancedSettings {
             viewport: ViewportMode::Fixed,
             default_zoom: 1.5,
@@ -1098,6 +1149,7 @@ fn the_enhanced_display_rows_show_step_and_save_with_the_enhanced_preset() {
             roof_peek: RoofPeek::Hidden,
             ui_scale: Some(3.0),
             navigation_only: false,
+            tactical_overlay: None,
         }
     );
     // Back to Vanilla, the rows hide again (their keys stay saved).
@@ -1108,6 +1160,13 @@ fn the_enhanced_display_rows_show_step_and_save_with_the_enhanced_preset() {
             .iter()
             .all(|widget| !launcher.order().contains(widget))
     );
+    // Vanilla on the fixed viewport is the purist preset, which lights its
+    // button; on the viewport it started with, the tab draws as it did.
+    assert_eq!(
+        launcher.active_preset(),
+        Some(PresetMatch::Builtin(BuiltinPreset::VanillaPurist))
+    );
+    launcher.config.enhanced.viewport_mode = None;
     assert_eq!(launcher.image().pixels(), vanilla.pixels());
 }
 
@@ -1156,8 +1215,8 @@ fn the_initial_screen_draws_the_same_frame() {
     assert_eq!(
         digest,
         concat!(
-            "e4eaed7d9bf7f9427f237d4722895d98",
-            "bf5f118abd0d7f046b279560a38e6798"
+            "9af742bf683c34f096233c0202e375e6",
+            "06d03285cb823c7473fc9b4b69ce8a73"
         )
     );
     // Every tab and the browser draw within the palette's own entries.
@@ -1213,15 +1272,18 @@ fn the_touch_ui_row_follows_fullscreen_toggles_and_saves() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
     let mut launcher = Launcher::new(setup(dir, Config::default()));
-    launcher.tab = Tab::Display;
-    // In the focus order right after Fullscreen.
+    launcher.tab = Tab::Audio;
+    // In the focus order right after Audio.
     let order = launcher.order();
     let at = order
         .iter()
-        .position(|widget| *widget == Widget::Fullscreen)
+        .position(|widget| *widget == Widget::Audio)
         .unwrap();
-    assert_eq!(&order[at + 1..at + 3], &[Widget::TouchUi, Widget::Preset]);
-    launcher.focus = Widget::Fullscreen;
+    assert_eq!(
+        &order[at + 1..at + 3],
+        &[Widget::TouchUi, Widget::HotkeyHints]
+    );
+    launcher.focus = Widget::Audio;
     key(&mut launcher, KeyCode::Tab);
     assert_eq!(launcher.focus, Widget::TouchUi);
     // Off by default; Space turns it on, and the row draws it.
@@ -1230,39 +1292,6 @@ fn the_touch_ui_row_follows_fullscreen_toggles_and_saves() {
     key(&mut launcher, KeyCode::Space);
     assert_eq!(launcher.config.touch_ui, Some(true));
     assert_ne!(launcher.image().pixels(), off.pixels());
-    // With the enhanced rows shown too: two columns, the general rows on
-    // the left and the enhanced ones on the right, evenly spaced with room
-    // between them, side by side, and all above the help line.
-    launcher.config.preset = Some(Preset::Enhanced);
-    let column = |widgets: [Widget; 6]| widgets.map(|widget| launcher.rect(widget).unwrap());
-    let general = column([
-        Widget::Scaling,
-        Widget::Fullscreen,
-        Widget::TouchUi,
-        Widget::Preset,
-        Widget::Audio,
-        Widget::Debug,
-    ]);
-    let enhanced = column([
-        Widget::Viewport,
-        Widget::Zoom,
-        Widget::SmoothCamera,
-        Widget::RoofPeek,
-        Widget::UiScale,
-        Widget::GameSpeed,
-    ]);
-    for rows in [general, enhanced] {
-        for pair in rows.windows(2) {
-            assert_eq!(pair[1].y - pair[0].y, 36, "{pair:?}");
-            assert!(pair[1].y - (pair[0].y + pair[0].h) >= 16, "{pair:?}");
-        }
-        assert!(rows[5].y + rows[5].h + 16 <= 330, "{rows:?}");
-    }
-    for (left, right) in general.iter().zip(&enhanced) {
-        assert_eq!(left.y, right.y);
-        assert!(left.x + left.w + 100 < right.x, "{left:?} {right:?}");
-        assert!(right.x + right.w <= 620);
-    }
     // Save writes it, and a launcher from the file shows it.
     assert_eq!(launcher.save(), Ok(dir.join(config::FILE_NAME)));
     let text = fs::read_to_string(dir.join(config::FILE_NAME)).unwrap();
@@ -1277,8 +1306,8 @@ fn the_touch_ui_row_follows_fullscreen_toggles_and_saves() {
     assert_eq!(launcher.config.touch_ui, Some(false));
 }
 
-/// SPEC-020 §2.6: the `Hotkey hints` row, on the Display & audio tab under
-/// both presets, steps through its three values and saves like any row.
+/// SPEC-020 §2.6: the `Hotkey hints` row, on the Audio & Input tab under both
+/// presets, steps through its three values and saves like any row.
 #[test]
 fn the_hotkey_hints_row_steps_and_saves_under_both_presets() {
     let dir = tempfile::tempdir().unwrap();
@@ -1288,7 +1317,7 @@ fn the_hotkey_hints_row_steps_and_saves_under_both_presets() {
             ..Config::default()
         };
         let mut launcher = Launcher::new(setup(dir.path(), config));
-        launcher.tab = Tab::Display;
+        launcher.tab = Tab::Audio;
         assert!(launcher.order().contains(&Widget::HotkeyHints));
         launcher.focus = Widget::HotkeyHints;
         let shown = |launcher: &Launcher| launcher.config.hotkey_hints;
@@ -1318,7 +1347,7 @@ fn the_hotkey_hints_row_steps_and_saves_under_both_presets() {
 fn the_hotkey_hints_row_is_on_the_tab_and_clear_of_the_help_line() {
     let dir = tempfile::tempdir().unwrap();
     let mut launcher = Launcher::new(setup(dir.path(), Config::default()));
-    launcher.tab = Tab::Display;
+    launcher.tab = Tab::Audio;
     let rect = launcher.rect(Widget::HotkeyHints).unwrap();
     assert!(rect.y + rect.h < view::HELP_TOP - 8);
     let press = LauncherInput::Press([rect.x + 2, rect.y + 2]);
@@ -1392,4 +1421,910 @@ fn play_from_setup_sets_last_played() {
         let read = Config::load(&path).unwrap();
         assert_eq!(read.last_played.is_some(), selector);
     }
+}
+
+/// `dir`'s data for each edition, in folders of their own, and a third folder
+/// of Fallout 2 data, for a custom profile that runs on its own install.
+struct Installs {
+    fallout1: PathBuf,
+    fallout2: PathBuf,
+    ettu: PathBuf,
+}
+
+impl Installs {
+    fn new(dir: &Path) -> Self {
+        let folder = |name: &str| {
+            let folder = dir.join(name);
+            fs::create_dir_all(&folder).unwrap();
+            folder
+        };
+        let installs = Self {
+            fallout1: folder("fo1"),
+            fallout2: folder("fo2"),
+            ettu: folder("ettu"),
+        };
+        install(&installs.fallout1);
+        fallout2_install(&installs.fallout2);
+        fallout2_install(&installs.ettu);
+        installs
+    }
+    /// Fallout 1 active, each edition on its folder, and the custom profile
+    /// `ettu` on its own, with `sfall` and its own Enhanced settings.
+    fn config(&self) -> Config {
+        use GameProfile::{Fallout1, Fallout2};
+        let found =
+            |dir: &PathBuf, game| config::discover_game(std::slice::from_ref(dir), game).unwrap();
+        let profiles = PerGame {
+            fallout1: found(&self.fallout1, Fallout1),
+            fallout2: found(&self.fallout2, Fallout2),
+        };
+        let mut config = Config::with_profiles(Fallout1, profiles);
+        config.add_custom_profile("ettu", Fallout2).unwrap();
+        let scope = &mut config.custom_profiles[0].scope;
+        scope.install_dir = Some(self.ettu.clone());
+        scope.sfall = Some(true);
+        scope.enhanced = BuiltinPreset::ModernTactical.settings();
+        config
+    }
+}
+
+fn layer(path: &str) -> LayerEntry {
+    LayerEntry {
+        path: Some(path.to_owned()),
+        ..LayerEntry::default()
+    }
+}
+
+/// A folder layer that mounts.
+fn mod_folder(dir: &Path) {
+    fs::create_dir_all(dir.join("data")).unwrap();
+    fs::write(dir.join("data/x.txt"), "x").unwrap();
+}
+
+const FALLOUT1: usize = 0;
+const FALLOUT2: usize = 1;
+const ETTU: usize = 2;
+
+#[test]
+fn each_card_is_a_profile_with_its_own_scope() {
+    use GameProfile::{Fallout1, Fallout2};
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let installs = Installs::new(dir);
+    let mut config = installs.config();
+    config.last_played = Some("fallout2".into());
+    config.custom_profiles[0].scope.mod_list = Some(ModList::Paths(vec![dir.join("one")]));
+    mod_folder(&dir.join("one"));
+    let settings = dir.join(config::FILE_NAME);
+    let mut launcher = Launcher::new(Setup {
+        settings_path: Some(settings.clone()),
+        ..setup(dir, config)
+    });
+
+    let cards = launcher.profile_cards();
+    let names: Vec<&str> = cards.iter().map(|card| card.name.as_str()).collect();
+    assert_eq!(names, ["fallout1", "fallout2", "ettu"]);
+    let titles: Vec<&str> = cards.iter().map(|card| card.title.as_str()).collect();
+    assert_eq!(titles, ["Fallout 1", "Fallout 2", "Fallout: Et Tu"]);
+    let editions: Vec<_> = cards.iter().map(|card| card.edition).collect();
+    assert_eq!(editions, [Fallout1, Fallout2, Fallout2]);
+    assert!(cards.iter().all(|card| card.ready), "{cards:?}");
+    let active: Vec<bool> = cards.iter().map(|card| card.active).collect();
+    assert_eq!(active, [true, false, false]);
+    assert!(cards[ETTU].sfall && !cards[FALLOUT2].sfall);
+    assert_eq!(cards[ETTU].mods, 1);
+    assert!(cards[FALLOUT2].last_played && !cards[ETTU].last_played);
+
+    // The card shows the profile: its folder, its mods, its settings.
+    launcher.activate(Widget::ProfileCard(ETTU));
+    assert_eq!(launcher.config.active_profile(), "ettu");
+    assert_eq!(launcher.game(), Fallout2);
+    assert_eq!(
+        launcher.path(Field::Master),
+        Some(installs.ettu.join("master.dat"))
+    );
+    assert_eq!(launcher.config.sfall, Some(true));
+    assert_eq!(launcher.mods.entries.len(), 1);
+    assert_eq!(
+        launcher.active_preset(),
+        Some(PresetMatch::Builtin(BuiltinPreset::ModernTactical))
+    );
+    let cards = launcher.profile_cards();
+    assert!(cards[ETTU].active && cards[ETTU].ready);
+    // `last_played` names the edition, which runs as this profile now.
+    assert!(cards[ETTU].last_played && !cards[FALLOUT2].last_played);
+
+    // An edit stays with the profile it was made in.
+    launcher.activate(Widget::Zoom);
+    assert_eq!(launcher.config.enhanced.default_zoom, Some(1.25));
+    launcher.activate(Widget::ProfileCard(FALLOUT1));
+    assert_eq!(launcher.active_enhanced().settings.default_zoom, 1.0);
+    assert_eq!(launcher.config.sfall, None);
+    assert!(launcher.mods.entries.is_empty());
+
+    // Its folder never lands on its edition's paths, whatever Save does.
+    launcher.activate(Widget::ProfileCard(ETTU));
+    launcher.activate(Widget::Save);
+    assert_eq!(launcher.status_state, State::Ok, "{}", launcher.status);
+    let saved = Config::load(&settings).unwrap();
+    assert_eq!(saved.active_profile(), "ettu");
+    assert_eq!(saved.install_dir, Some(installs.ettu.clone()));
+    assert_eq!(saved.enhanced.default_zoom, Some(1.25));
+    assert_eq!(
+        saved.profile(Fallout2).master_dat,
+        Some(installs.fallout2.join("master.dat"))
+    );
+    assert_eq!(
+        saved.launch_paths(Fallout2).master_dat,
+        Some(installs.ettu.join("master.dat"))
+    );
+    let mut reloaded = Launcher::new(Setup {
+        settings_path: Some(settings.clone()),
+        ..setup(dir, saved)
+    });
+    assert_eq!(
+        reloaded.path(Field::Master),
+        Some(installs.ettu.join("master.dat"))
+    );
+    reloaded.activate(Widget::ProfileCard(FALLOUT2));
+    assert_eq!(
+        reloaded.path(Field::Master),
+        Some(installs.fallout2.join("master.dat"))
+    );
+    assert_eq!(reloaded.config.install_dir, None);
+    assert_eq!(reloaded.config.custom_profiles[0].scope.sfall, Some(true));
+}
+
+/// A custom profile with no folder reads its edition's, and a folder typed in
+/// becomes its own. Paths that are not one folder cannot be kept, and the
+/// launcher says so, but a launch still runs what the fields say.
+#[test]
+fn a_custom_profiles_paths_never_reach_its_edition() {
+    use GameProfile::Fallout1;
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let installs = Installs::new(dir);
+    let other = dir.join("other");
+    fs::create_dir_all(&other).unwrap();
+    install(&other);
+    let edition = installs.fallout1.join("MASTER.DAT");
+    let mut launcher = Launcher::new(setup(dir, installs.config()));
+
+    launcher.activate(Widget::NewProfile);
+    assert_eq!(launcher.config.active_profile(), "profile-1");
+    assert_eq!(launcher.game(), Fallout1);
+    assert_eq!(launcher.path(Field::Master), Some(edition.clone()));
+    assert_eq!(launcher.ready(), Ok(()));
+    launcher.activate(Widget::Save);
+    assert_eq!(launcher.config.install_dir, None);
+
+    launcher.set_field(Field::Master, &other.join("MASTER.DAT"));
+    launcher.set_field(Field::Critter, &other.join("CRITTER.DAT"));
+    assert_eq!(launcher.ready(), Ok(()));
+    launcher.activate(Widget::Save);
+    assert_eq!(launcher.status_state, State::Ok, "{}", launcher.status);
+    assert_eq!(launcher.config.install_dir, Some(other.clone()));
+    assert_eq!(launcher.config.master_dat, Some(edition.clone()));
+    assert_eq!(
+        launcher.launch_config().launch_paths(Fallout1).master_dat,
+        Some(other.join("MASTER.DAT"))
+    );
+
+    // MASTER.DAT here and CRITTER.DAT there.
+    launcher.set_field(Field::Critter, &installs.fallout1.join("CRITTER.DAT"));
+    assert_eq!(launcher.ready(), Ok(()));
+    launcher.activate(Widget::Save);
+    assert_eq!(launcher.status_state, State::Bad);
+    assert!(
+        launcher.status.contains("one game folder"),
+        "{}",
+        launcher.status
+    );
+    assert_eq!(launcher.config.master_dat, Some(edition.clone()));
+    let launch = launcher.launch_config();
+    let run = launch.scoped_to(Fallout1);
+    assert_eq!(run.master_dat, Some(other.join("MASTER.DAT")));
+    assert_eq!(run.critter_dat, Some(installs.fallout1.join("CRITTER.DAT")));
+    assert_eq!(launcher.config.master_dat, Some(edition.clone()));
+
+    // An edition keeps what it is given, and a folder of its own that has
+    // gone out of step with its fields goes.
+    launcher.activate(Widget::ProfileCard(FALLOUT1));
+    assert_eq!(launcher.path(Field::Master), Some(edition));
+    launcher.config.install_dir = Some(installs.fallout1.clone());
+    launcher.set_field(Field::Master, &other.join("MASTER.DAT"));
+    launcher.set_field(Field::Critter, &other.join("CRITTER.DAT"));
+    assert!(launcher.apply_fields());
+    assert_eq!(launcher.config.install_dir, None);
+    assert_eq!(
+        launcher.config.launch_paths(Fallout1).master_dat,
+        Some(other.join("MASTER.DAT"))
+    );
+}
+
+/// A frame asks for the cards: another profile's check is kept, not repeated.
+#[test]
+fn a_cards_check_is_kept_until_something_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let installs = Installs::new(dir);
+    let mut launcher = Launcher::new(setup(dir, installs.config()));
+    assert!(launcher.profile_cards()[FALLOUT2].ready);
+    fs::remove_file(installs.fallout2.join("master.dat")).unwrap();
+    assert!(launcher.profile_cards()[FALLOUT2].ready, "not read again");
+    launcher.save().unwrap();
+    assert!(!launcher.profile_cards()[FALLOUT2].ready);
+    // The active card follows the fields as they are edited.
+    assert!(launcher.profile_cards()[FALLOUT1].ready);
+    launcher.set_field(Field::Master, &dir.join("gone.dat"));
+    assert!(!launcher.profile_cards()[FALLOUT1].ready);
+}
+
+#[test]
+fn a_card_with_unsaved_mods_stays_and_starts_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let installs = Installs::new(dir);
+    let mut launcher = Launcher::new(Setup {
+        settings_path: Some(dir.join(config::FILE_NAME)),
+        ..setup(dir, installs.config())
+    });
+    mod_folder(&dir.join("one"));
+    assert!(launcher.add_layer("one".into()));
+    for widget in [
+        Widget::ProfileCard(ETTU),
+        Widget::ProfilePlay(ETTU),
+        Widget::ProfileResume(ETTU),
+        Widget::ProfileAutoplay(ETTU),
+        Widget::NewProfile,
+    ] {
+        assert_eq!(launcher.activate(widget), None, "{widget:?}");
+        assert_eq!(launcher.config.active_profile(), "fallout1");
+        assert_eq!(launcher.mods.entries, [layer("one")]);
+        assert!(launcher.status.contains("Save the Mods tab"), "{widget:?}");
+    }
+    assert_eq!(launcher.config.custom_profiles.len(), 1);
+    // The active profile's own card needs nothing saved.
+    assert_eq!(
+        launcher.activate(Widget::ProfilePlay(FALLOUT1)),
+        Some(LauncherAction::Play)
+    );
+    // Play saved them, so the card can go.
+    assert_eq!(launcher.activate(Widget::ProfileCard(ETTU)), None);
+    assert_eq!(launcher.config.active_profile(), "ettu");
+    assert!(launcher.mods.entries.is_empty());
+}
+
+#[test]
+fn a_cards_buttons_play_that_profile() {
+    use GameProfile::Fallout2;
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let installs = Installs::new(dir);
+    let mut launcher = Launcher::new(setup(dir, installs.config()));
+    for (widget, action) in [
+        (Widget::ProfilePlay(ETTU), LauncherAction::Play),
+        (Widget::ProfileResume(FALLOUT1), LauncherAction::ResumeLast),
+        (Widget::ProfileAutoplay(ETTU), LauncherAction::AutoplayTest),
+    ] {
+        assert_eq!(launcher.activate(widget), Some(action));
+    }
+    let launch = launcher.launch_config();
+    assert_eq!(launch.active_profile(), "ettu");
+    assert_eq!(launch.scope_name(Fallout2), "ettu");
+    assert_eq!(launch.game, Some(Fallout2));
+    // What the shell's start reads from it.
+    let run = launch.scoped_to(Fallout2);
+    assert_eq!(run.master_dat, Some(installs.ettu.join("master.dat")));
+    assert_eq!(run.sfall, Some(true));
+    assert_eq!(run.preset, Some(Preset::Enhanced));
+    assert_eq!(run.enhanced.tactical_overlay, Some(true));
+    // A card with no data says why, and nothing starts.
+    fs::remove_file(installs.fallout1.join("MASTER.DAT")).unwrap();
+    assert_eq!(launcher.activate(Widget::ProfilePlay(FALLOUT1)), None);
+    assert_eq!(launcher.config.active_profile(), "fallout1");
+    assert!(
+        launcher.status.starts_with("Not ready."),
+        "{}",
+        launcher.status
+    );
+}
+
+#[test]
+fn new_profiles_take_the_next_free_name_and_read_back() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let mut launcher = Launcher::new(setup(dir, Config::default()));
+    launcher.activate(Widget::NewProfile);
+    launcher.activate(Widget::ProfileCard(FALLOUT1));
+    launcher.activate(Widget::NewProfile);
+    let names: Vec<String> = launcher
+        .profile_cards()
+        .into_iter()
+        .map(|card| card.name)
+        .collect();
+    assert_eq!(
+        names,
+        ["fallout1", "fallout2", "ettu", "profile-1", "profile-2"]
+    );
+    assert_eq!(launcher.config.active_profile(), "profile-2");
+    let path = launcher.save().unwrap();
+    let saved = Config::load(&path).unwrap();
+    assert_eq!(saved.active_profile(), "profile-2");
+    assert_eq!(
+        saved.custom_profiles.len(),
+        3,
+        "Et Tu's and the two new ones"
+    );
+}
+
+#[test]
+fn the_builtin_presets_set_what_the_brief_says() {
+    use crate::enhanced::{RoofPeek, ViewportMode};
+    let settings = BuiltinPreset::VanillaPurist.settings();
+    assert_eq!(settings.preset, Some(Preset::Vanilla));
+    assert_eq!(settings.viewport_mode, Some(ViewportMode::Fixed));
+    assert_eq!(settings.tactical_overlay, Some(false));
+    let settings = BuiltinPreset::WidescreenClassic.settings();
+    assert_eq!(settings.preset, Some(Preset::Enhanced));
+    assert_eq!(settings.viewport_mode, Some(ViewportMode::Unlocked));
+    assert_eq!(settings.default_zoom, Some(1.0));
+    assert_eq!(settings.roof_peek, Some(RoofPeek::Vanilla));
+    assert_eq!(settings.tactical_overlay, Some(false));
+    let settings = BuiltinPreset::ModernTactical.settings();
+    assert_eq!(settings.preset, Some(Preset::Enhanced));
+    assert_eq!(settings.viewport_mode, Some(ViewportMode::Unlocked));
+    assert_eq!(settings.roof_peek, Some(RoofPeek::CursorXray));
+    assert_eq!(settings.tactical_overlay, Some(true));
+}
+
+#[test]
+fn a_preset_applies_to_the_active_profile_and_is_recognized() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let installs = Installs::new(dir);
+    let mut launcher = Launcher::new(setup(dir, installs.config()));
+    // A plain profile's settings are no preset's: its viewport is unlocked.
+    assert_eq!(launcher.active_preset(), None);
+    for preset in BuiltinPreset::ALL {
+        launcher.activate(Widget::BuiltinPreset(preset));
+        assert_eq!(launcher.config.enhanced, preset.settings());
+        assert_eq!(launcher.active_preset(), Some(PresetMatch::Builtin(preset)));
+    }
+    // A value from the top level matches too: a table need not repeat it.
+    launcher.config.enhanced.default_zoom = None;
+    launcher.config.default_zoom = Some(1.0);
+    launcher.activate(Widget::BuiltinPreset(BuiltinPreset::WidescreenClassic));
+    launcher.config.enhanced.default_zoom = None;
+    assert_eq!(
+        launcher.active_preset(),
+        Some(PresetMatch::Builtin(BuiltinPreset::WidescreenClassic))
+    );
+    // Off the preset by one row.
+    launcher.activate(Widget::TacticalOverlay);
+    assert_eq!(launcher.config.enhanced.tactical_overlay, Some(true));
+    assert_eq!(launcher.active_preset(), None);
+    // The other profile did not move.
+    launcher.activate(Widget::ProfileCard(FALLOUT2));
+    assert!(!launcher.active_enhanced().tactical_overlay);
+    assert_eq!(launcher.active_enhanced().preset, Preset::Vanilla);
+    assert_eq!(launcher.config.enhanced, Default::default());
+}
+
+#[test]
+fn a_custom_preset_keeps_every_setting_and_reads_back() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let mut launcher = Launcher::new(setup(dir, Config::default()));
+    launcher.activate(Widget::BuiltinPreset(BuiltinPreset::ModernTactical));
+    launcher.activate(Widget::Zoom);
+    let wanted = launcher.active_enhanced();
+    launcher.activate(Widget::SaveCustomPreset);
+    assert_eq!(launcher.active_preset(), Some(PresetMatch::Custom(0)));
+    let preset = &launcher.config.custom_presets[0];
+    assert_eq!(preset.name, "custom-1");
+    assert_eq!(preset.settings, wanted.profile());
+    // A second press keeps no second copy; a change makes a second preset.
+    launcher.activate(Widget::SaveCustomPreset);
+    assert_eq!(launcher.config.custom_presets.len(), 1);
+    launcher.activate(Widget::Zoom);
+    launcher.activate(Widget::SaveCustomPreset);
+    assert_eq!(launcher.config.custom_presets[1].name, "custom-2");
+    // It holds its values when the top level moves under it.
+    launcher.activate(Widget::CustomPreset(0));
+    assert_eq!(launcher.active_enhanced(), wanted);
+    assert_eq!(launcher.active_preset(), Some(PresetMatch::Custom(0)));
+    launcher.activate(Widget::CustomPreset(9));
+    assert_eq!(launcher.active_enhanced(), wanted);
+    let path = launcher.save().unwrap();
+    let saved = Config::load(&path).unwrap();
+    assert_eq!(saved.custom_presets, launcher.config.custom_presets);
+    // A preset that names nothing is no match for anything.
+    launcher.config.custom_presets = vec![config::CustomPreset {
+        name: "empty".into(),
+        settings: EnhancedProfile::default(),
+    }];
+    assert_eq!(
+        launcher.active_preset(),
+        Some(PresetMatch::Builtin(BuiltinPreset::ModernTactical))
+    );
+}
+
+/// The preview follows the saved settings, and the pointer: the widget under it
+/// stands in with its next value, until a press makes that the saved one.
+#[test]
+fn the_preview_answers_on_hover_and_keeps_what_a_press_chose() {
+    use crate::enhanced::{RoofPeek, ViewportMode};
+    let temp = tempfile::tempdir().unwrap();
+    let mut launcher = Launcher::new(setup(temp.path(), Config::default()));
+    assert_eq!(
+        launcher.previewed,
+        PreviewSettings {
+            enhanced: false,
+            viewport: ViewportMode::Unlocked,
+            zoom: 1.0,
+            roof_peek: RoofPeek::Vanilla,
+            tactical_overlay: false,
+        }
+    );
+    launcher.config.preset = Some(Preset::Enhanced);
+    launcher.tab = Tab::Display;
+    let pointer = |launcher: &mut Launcher, widget: Option<Widget>| {
+        let point = widget.map_or([0, 0], |it| {
+            let rect = launcher.rect(it).unwrap();
+            [rect.x + 2, rect.y + 2]
+        });
+        launcher.handle(LauncherInput::Pointer(point));
+    };
+    let center = |launcher: &mut Launcher, widget: Widget| {
+        let rect = launcher.rect(widget).unwrap();
+        [rect.x + 2, rect.y + 2]
+    };
+    pointer(&mut launcher, None);
+    assert!(launcher.previewed.enhanced);
+
+    let tactical = Widget::BuiltinPreset(BuiltinPreset::ModernTactical);
+    pointer(&mut launcher, Some(tactical));
+    assert_eq!(launcher.previewed.roof_peek, RoofPeek::CursorXray);
+    assert!(launcher.previewed.tactical_overlay);
+    assert_eq!(
+        launcher.config.enhanced,
+        Default::default(),
+        "nothing saved"
+    );
+    pointer(&mut launcher, None);
+    assert_eq!(launcher.previewed.roof_peek, RoofPeek::Vanilla);
+    assert!(!launcher.previewed.tactical_overlay);
+
+    pointer(&mut launcher, Some(Widget::Zoom));
+    assert_eq!(launcher.previewed.zoom, 1.25);
+    pointer(&mut launcher, None);
+    pointer(&mut launcher, Some(Widget::RoofPeek));
+    assert_eq!(launcher.previewed.roof_peek, RoofPeek::CursorXray);
+    pointer(&mut launcher, Some(Widget::Viewport));
+    assert_eq!(launcher.previewed.roof_peek, RoofPeek::Vanilla);
+    assert_eq!(launcher.previewed.viewport, ViewportMode::Fixed);
+    pointer(&mut launcher, Some(Widget::TacticalOverlay));
+    assert!(launcher.previewed.tactical_overlay);
+
+    // A press: the value hovered is the value kept, and the pointer that
+    // stays over it does not show the one after.
+    let point = center(&mut launcher, Widget::TacticalOverlay);
+    launcher.handle(LauncherInput::Press(point));
+    assert_eq!(launcher.config.enhanced.tactical_overlay, Some(true));
+    assert!(launcher.previewed.tactical_overlay);
+    launcher.handle(LauncherInput::Pointer(point));
+    assert!(launcher.previewed.tactical_overlay);
+    // It answers again when the pointer comes back.
+    pointer(&mut launcher, None);
+    pointer(&mut launcher, Some(Widget::TacticalOverlay));
+    assert!(!launcher.previewed.tactical_overlay);
+}
+
+#[test]
+fn valid_folders_are_remembered_on_save_and_on_browse() {
+    use GameProfile::Fallout1;
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let installs = Installs::new(dir);
+    mod_folder(&dir.join("mods/one"));
+    fs::write(dir.join("mods/two.dat"), critter_archive()).unwrap();
+    let known =
+        |launcher: &Launcher, kind: KnownKind| launcher.config.known_paths.list(kind).to_vec();
+    let config = Config::with_profiles(Fallout1, PerGame::default());
+    let mut launcher = Launcher::new(setup(dir, config));
+
+    // Browse: only what validates.
+    launcher.pick_folder(Target::Field(Field::Master), installs.fallout2.clone());
+    assert!(
+        known(&launcher, KnownKind::Fallout1).is_empty(),
+        "the other game's"
+    );
+    launcher.pick_folder(Target::Field(Field::DataRoot), dir.join("gone"));
+    assert!(known(&launcher, KnownKind::Fallout1).is_empty());
+    launcher.set_field(Field::DataRoot, Path::new(""));
+    launcher.fields = Default::default();
+    launcher.pick_folder(Target::Field(Field::Master), installs.fallout1.clone());
+    assert_eq!(
+        known(&launcher, KnownKind::Fallout1),
+        std::slice::from_ref(&installs.fallout1)
+    );
+    launcher.pick_folder(Target::Layer, dir.join("mods/one"));
+    assert_eq!(known(&launcher, KnownKind::Mods), [dir.join("mods/one")]);
+    launcher.pick_folder(Target::Layer, dir.join("mods/missing"));
+    assert_eq!(known(&launcher, KnownKind::Mods), [dir.join("mods/one")]);
+    assert_eq!(launcher.mods.entries.len(), 2);
+    launcher.activate(Widget::LayerRemove);
+    launcher.pick_file(Target::Layer, dir.join("mods/two.dat"));
+    assert_eq!(
+        known(&launcher, KnownKind::Mods),
+        [dir.join("mods"), dir.join("mods/one")]
+    );
+
+    // Save: everything valid now, under its game, and it reads back.
+    launcher.config.known_paths = Default::default();
+    let path = launcher.save().unwrap();
+    assert_eq!(
+        known(&launcher, KnownKind::Fallout1),
+        std::slice::from_ref(&installs.fallout1)
+    );
+    assert_eq!(
+        known(&launcher, KnownKind::Mods),
+        [dir.join("mods"), dir.join("mods/one")]
+    );
+    assert!(known(&launcher, KnownKind::Fallout2).is_empty());
+    assert_eq!(
+        Config::load(&path).unwrap().known_paths,
+        launcher.config.known_paths
+    );
+    launcher.activate(Widget::ProfileCard(FALLOUT2));
+    launcher.pick_folder(Target::Field(Field::Master), installs.fallout2.clone());
+    launcher.activate(Widget::Save);
+    assert_eq!(
+        known(&launcher, KnownKind::Fallout2),
+        std::slice::from_ref(&installs.fallout2)
+    );
+
+    // The browser offers them, and a shortcut goes there.
+    launcher.open_browser(Target::Field(Field::Master));
+    let browser = launcher.browser.as_ref().unwrap();
+    let at = (browser.shortcuts().iter())
+        .position(|shortcut| shortcut.path == installs.fallout1)
+        .unwrap();
+    assert_eq!(launcher.activate(Widget::KnownPath(at)), None);
+    assert_eq!(launcher.focus, Widget::BrowseList);
+    assert_eq!(launcher.browser.as_ref().unwrap().dir, installs.fallout1);
+    launcher.activate(Widget::KnownPath(999));
+    assert_eq!(launcher.browser.as_ref().unwrap().dir, installs.fallout1);
+}
+
+/// An inline list becomes a load order on its first edit. Moved beside the
+/// settings it could not reach a folder outside them, as the settings can, so
+/// it goes in the per-user folder, and the game reads every layer it did.
+#[test]
+fn an_inline_list_becomes_a_load_order_that_still_reaches_its_layers() {
+    let temp = tempfile::tempdir().unwrap();
+    let (dir, root) = (temp.path().join("game"), temp.path().join("user"));
+    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(&root).unwrap();
+    let (inside, outside) = (dir.join("mods/one"), temp.path().join("elsewhere"));
+    mod_folder(&inside);
+    mod_folder(&outside);
+    let inline = Config {
+        mod_list: Some(ModList::Paths(vec![inside.clone(), outside.clone()])),
+        ..Config::default()
+    };
+    let opened = |user_root: Option<PathBuf>| {
+        let mut launcher = Launcher::new(setup(&dir, inline.clone()));
+        launcher.user_root = user_root;
+        launcher.revalidate_mods();
+        launcher
+    };
+
+    let mut launcher = opened(Some(root.clone()));
+    assert_eq!(launcher.mods.read_only, None);
+    assert!(launcher.mods.check.layers.iter().all(Check::is_ok));
+    // Unedited, it stays as the settings wrote it.
+    launcher.save().unwrap();
+    assert_eq!(launcher.config.mod_list, inline.mod_list);
+    assert_eq!(launcher.mods.file, None);
+
+    launcher.mods.list.selected = 1;
+    launcher.activate(Widget::LayerToggle);
+    assert!(!launcher.mods.entries[1].enabled);
+    let file = root.join("load_order.toml");
+    assert_eq!(launcher.mods.file, Some(file.clone()));
+    launcher.activate(Widget::LayerToggle);
+    launcher.mods.list.selected = 0;
+    launcher.activate(Widget::LayerDown);
+    assert!(launcher.mods.check.layers.iter().all(Check::is_ok));
+    assert_eq!(launcher.mods.check.stack.state, State::Ok);
+    launcher.save().unwrap();
+    assert_eq!(launcher.config.mod_list, Some(ModList::File(file.clone())));
+    let written = vault_formats::parse_load_order(&fs::read_to_string(&file).unwrap()).unwrap();
+    let paths: Vec<_> = written
+        .iter()
+        .flat_map(|entry| entry.path.clone())
+        .collect();
+    assert_eq!(paths, [outside.to_string_lossy(), inside.to_string_lossy()]);
+    assert!(!dir.join("load_order.toml").exists());
+
+    // With no per-user folder the refusal shows, and Play will not hide it.
+    let mut launcher = opened(None);
+    launcher.activate(Widget::LayerToggle);
+    assert_eq!(launcher.mods.file, None);
+    assert_eq!(
+        launcher.mods.entries[1].path,
+        Some(outside.to_string_lossy().into())
+    );
+    assert_eq!(launcher.mods.check.layers[1].state, State::Bad);
+    assert!(launcher.mods.ready().unwrap_err().starts_with("Mods:"));
+}
+
+#[test]
+fn an_inline_list_below_the_settings_stays_beside_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    mod_folder(&dir.join("mods/one"));
+    mod_folder(&dir.join("mods/two"));
+    let lists = vec![dir.join("mods/one"), dir.join("mods/two")];
+    let inline = Config {
+        mod_list: Some(ModList::Paths(lists)),
+        ..Config::default()
+    };
+    let mut launcher = Launcher::new(setup(dir, inline.clone()));
+    launcher.activate(Widget::LayerToggle);
+    assert_eq!(launcher.mods.entries, {
+        let mut off = layer("mods/one");
+        off.enabled = false;
+        [off, layer("mods/two")]
+    });
+    assert!(launcher.mods.check.stack.is_ok());
+    let path = launcher.save().unwrap();
+    let saved = Config::load(&path).unwrap();
+    assert_eq!(
+        saved.mod_list,
+        Some(ModList::File(dir.join("load_order.toml")))
+    );
+    let reloaded = Launcher::new(Setup {
+        settings_path: Some(path),
+        ..setup(dir, saved)
+    });
+    assert_eq!(reloaded.mods.entries, launcher.mods.entries);
+
+    // Every layer removed: nothing is listed, nothing stays dirty, and the
+    // inline list does not come back.
+    let mut launcher = Launcher::new(setup(dir, inline));
+    launcher.activate(Widget::LayerRemove);
+    launcher.activate(Widget::LayerRemove);
+    assert!(launcher.mods.entries.is_empty());
+    let path = launcher.save().unwrap();
+    assert!(!launcher.mods.dirty);
+    assert_eq!(Config::load(&path).unwrap().mod_list, None);
+}
+
+#[test]
+fn a_broken_load_order_stays_protected() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let file = dir.join("load_order.toml");
+    fs::write(&file, "this is = not [a load order").unwrap();
+    let config = Config {
+        mod_list: Some(ModList::File(file.clone())),
+        ..Config::default()
+    };
+    let mut launcher = Launcher::new(setup(dir, config));
+    assert!(launcher.mods.broken);
+    for widget in [Widget::LayerToggle, Widget::LayerUp, Widget::LayerRemove] {
+        launcher.activate(widget);
+    }
+    assert!(!launcher.add_layer("mods/one".into()));
+    assert!(
+        launcher.status.starts_with("Read only"),
+        "{}",
+        launcher.status
+    );
+    assert!(!launcher.mods.dirty);
+    launcher.save().unwrap();
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        "this is = not [a load order"
+    );
+    assert_eq!(launcher.config.mod_list, Some(ModList::File(file)));
+}
+
+/// Three profiles, one folder: each list is its own, and a file one profile
+/// lists is never another's to write, even when the settings share it.
+#[test]
+fn a_new_load_order_never_lands_on_another_profiles_file() {
+    use GameProfile::Fallout2;
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let settings = dir.join(config::FILE_NAME);
+    let mut config = Config {
+        game: Some(Fallout2),
+        ..Config::default()
+    };
+    config.add_custom_profile("ettu", Fallout2).unwrap();
+    let mut launcher = Launcher::new(Setup {
+        settings_path: Some(settings.clone()),
+        ..setup(dir, config)
+    });
+    let read = |name: &str| {
+        vault_formats::parse_load_order(&fs::read_to_string(dir.join(name)).unwrap()).unwrap()
+    };
+    assert!(launcher.add_layer("mods/two".into()));
+    launcher.save().unwrap();
+    launcher.activate(Widget::ProfileCard(ETTU));
+    assert!(launcher.mods.entries.is_empty());
+    assert!(launcher.add_layer("mods/ettu".into()));
+    launcher.save().unwrap();
+    assert_eq!(read("load_order.toml"), [layer("mods/two")]);
+    assert_eq!(read("load_order_ettu.toml"), [layer("mods/ettu")]);
+
+    // An unlisted file of that name stays too.
+    fs::write(dir.join("load_order_fallout1.toml"), "layers = []\n").unwrap();
+    launcher.activate(Widget::ProfileCard(FALLOUT1));
+    assert!(launcher.add_layer("mods/one".into()));
+    launcher.save().unwrap();
+    assert_eq!(
+        launcher.mods.file,
+        Some(dir.join("load_order_fallout1_2.toml"))
+    );
+    assert_eq!(read("load_order_fallout1.toml"), []);
+    assert_eq!(read("load_order_fallout1_2.toml"), [layer("mods/one")]);
+
+    // The settings give two profiles one file: an edit leaves the other's.
+    let shared = ModList::File(dir.join("load_order.toml"));
+    launcher.activate(Widget::ProfileCard(FALLOUT2));
+    launcher.config.custom_profiles[0].scope.mod_list = Some(shared);
+    launcher.activate(Widget::LayerRemove);
+    launcher.save().unwrap();
+    assert_eq!(
+        launcher.mods.file,
+        Some(dir.join("load_order_fallout2.toml"))
+    );
+    assert_eq!(read("load_order.toml"), [layer("mods/two")]);
+    assert_eq!(read("load_order_fallout2.toml"), []);
+}
+
+/// An Et Tu folder, as far as names go.
+fn et_tu_folder(dir: &Path) {
+    fs::create_dir_all(dir.join("mods/fallout1in2")).unwrap();
+    fs::write(dir.join("ddraw.ini"), "").unwrap();
+}
+
+#[test]
+fn auto_detect_fills_a_profile_from_its_folder() {
+    use GameProfile::{Fallout1, Fallout2};
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let installs = Installs::new(dir);
+    et_tu_folder(&installs.ettu);
+    let user = dir.join("user");
+    fs::create_dir_all(&user).unwrap();
+    let mut config = installs.config();
+    config.custom_profiles.clear();
+    config.known_paths.fallout1 = vec![installs.fallout1.clone()];
+    let mut launcher = Launcher::new(setup(dir, config));
+    launcher.user_root = Some(user.clone());
+
+    // An edition's own card cannot be given the other edition's data.
+    launcher.set_field(Field::Master, &installs.fallout2.join("master.dat"));
+    launcher.activate(Widget::AutoDetect);
+    assert_eq!(launcher.status_state, State::Bad);
+    assert!(
+        launcher.status.contains("select a Fallout 2"),
+        "{}",
+        launcher.status
+    );
+    assert_eq!(launcher.config.install_dir, None);
+
+    // A custom profile takes the edition of the data it is given.
+    launcher.set_field(Field::Master, &installs.fallout1.join("MASTER.DAT"));
+    launcher.activate(Widget::NewProfile);
+    assert_eq!(launcher.game(), Fallout1);
+    launcher.set_field(Field::Master, &installs.fallout2);
+    launcher.activate(Widget::AutoDetect);
+    assert_eq!(launcher.config.active_profile(), "profile-1");
+    assert_eq!(launcher.game(), Fallout2);
+    let edition = |launcher: &Launcher, name: &str| {
+        let customs = &launcher.config.custom_profiles;
+        customs.iter().find(|it| it.name == name).unwrap().edition
+    };
+    assert_eq!(edition(&launcher, "profile-1"), Fallout2);
+
+    // Et Tu's folder goes to Et Tu's own card, from any other.
+    launcher.set_field(Field::Master, &installs.ettu);
+    launcher.activate(Widget::AutoDetect);
+    assert_eq!(launcher.config.active_profile(), "ettu");
+    assert_eq!(launcher.game(), Fallout2);
+    assert_eq!(
+        launcher.path(Field::Master),
+        Some(installs.ettu.join("master.dat"))
+    );
+    assert_eq!(launcher.config.install_dir, Some(installs.ettu.clone()));
+    assert_eq!(launcher.config.sfall, Some(true));
+    assert_eq!(
+        launcher.config.secondary_dat_dirs,
+        std::slice::from_ref(&installs.fallout1)
+    );
+    let mods = installs.ettu.join("mods");
+    assert_eq!(launcher.mods.entries, [layer("ettu/mods")]);
+    assert_eq!(launcher.config.known_paths.list(KnownKind::Mods), [mods]);
+    assert_eq!(
+        launcher.config.known_paths.list(KnownKind::Fallout2),
+        [installs.ettu.clone(), installs.fallout2.clone()]
+    );
+    assert_eq!(launcher.status_state, State::Ok, "{}", launcher.status);
+    assert!(launcher.status.contains("Et Tu"), "{}", launcher.status);
+    assert_eq!(launcher.ready(), Ok(()));
+    // Again: the layer is listed once.
+    launcher.activate(Widget::AutoDetect);
+    assert_eq!(launcher.mods.entries.len(), 1);
+
+    let path = launcher.save().unwrap();
+    let saved = Config::load(&path).unwrap();
+    assert_eq!(saved.active_profile(), "ettu");
+    assert_eq!(saved.active_game(), Fallout2);
+    assert_eq!(saved.install_dir, Some(installs.ettu.clone()));
+    assert_eq!(
+        saved.profile(Fallout2).master_dat,
+        Some(installs.fallout2.join("master.dat"))
+    );
+    assert_eq!(
+        saved.secondary_dat_dirs,
+        std::slice::from_ref(&installs.fallout1)
+    );
+
+    // No ddraw.ini: `sfall` goes off, for the game that has it. In the
+    // browser it looks where the browser is, and the browser closes.
+    launcher.activate(Widget::ProfileCard(FALLOUT2));
+    launcher.config.sfall = Some(true);
+    launcher.open_browser(Target::Field(Field::Master));
+    launcher
+        .browser
+        .as_mut()
+        .unwrap()
+        .go(installs.fallout2.clone());
+    launcher.activate(Widget::AutoDetect);
+    assert!(launcher.browser.is_none());
+    assert_eq!(launcher.config.sfall, Some(false));
+    assert_eq!(launcher.config.install_dir, Some(installs.fallout2.clone()));
+    assert!(launcher.mods.entries.is_empty());
+
+    // A folder with nothing in it changes nothing.
+    let empty = dir.join("empty");
+    fs::create_dir_all(&empty).unwrap();
+    launcher.set_field(Field::Master, &empty);
+    launcher.activate(Widget::AutoDetect);
+    assert_eq!(launcher.status_state, State::Bad);
+    assert!(
+        launcher.status.starts_with("No game data"),
+        "{}",
+        launcher.status
+    );
+    assert_eq!(launcher.config.install_dir, Some(installs.fallout2.clone()));
+}
+
+/// Et Tu has a card before any setup, so the desktop menu's `--profile ettu`
+/// has somewhere to go, and pointing Auto-Detect at Et Tu's folder lands there.
+#[test]
+fn et_tu_is_a_built_in_profile_that_auto_detect_reaches() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let launcher = Launcher::new(setup(dir, Config::default()));
+    let cards = launcher.profile_cards();
+    let card = cards.iter().find(|card| card.name == "ettu").unwrap();
+    assert_eq!(card.title, "Fallout: Et Tu");
+    assert_eq!(card.edition, GameProfile::Fallout2);
+    assert!(!card.ready, "no data yet");
+    // An `ettu` table the player wrote is theirs.
+    let mut config = Config::default();
+    config
+        .add_custom_profile("ettu", GameProfile::Fallout2)
+        .unwrap();
+    let launcher = Launcher::new(setup(dir, config));
+    let cards = launcher.profile_cards();
+    assert_eq!(cards.iter().filter(|card| card.name == "ettu").count(), 1);
 }

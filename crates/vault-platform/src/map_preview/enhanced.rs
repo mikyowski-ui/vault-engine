@@ -545,6 +545,9 @@ impl MapPreview {
             self.pointer.world = false;
             return;
         };
+        if let Some(on) = settings.tactical_overlay {
+            self.qol_state.overlay = on;
+        }
         if settings.viewport == ViewportMode::Fixed {
             self.pointer.world = false;
         }

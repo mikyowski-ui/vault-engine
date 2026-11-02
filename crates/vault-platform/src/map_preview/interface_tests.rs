@@ -3849,7 +3849,11 @@ fn spec014_the_in_world_cursor_is_the_top_layer_over_the_map_only() {
     preview.hover(point);
     // SPEC-014 §3.27: movement mode's cursor snaps to the hovered hex and
     // carries the hex outline frame for the outline list.
-    let cursor = preview.cursor_objects(preview.view).unwrap();
+    let cursor = preview
+        .cursor_objects(preview.view)
+        .unwrap()
+        .view_sized([preview.view.width, preview.view.height])
+        .unwrap();
     assert_eq!(cursor.hex, hex);
     assert!(cursor.ring.is_some());
     assert!(cursor.art.pixels().contains(&9));

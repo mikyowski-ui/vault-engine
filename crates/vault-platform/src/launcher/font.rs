@@ -176,3 +176,39 @@ pub fn clip_end(text: &str, columns: usize) -> String {
     let head: String = text.chars().take(columns.saturating_sub(2)).collect();
     format!("{head}..")
 }
+
+/// The whole glyphs that fit `pixels` across.
+pub fn columns(pixels: i32) -> usize {
+    (pixels / ADVANCE).max(0) as usize
+}
+
+/// `text` broken at spaces into lines of at most `columns` glyphs, a word
+/// longer than a line cut at the line's end.
+pub fn wrap(text: &str, columns: usize) -> Vec<String> {
+    let columns = columns.max(1);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut used = 0;
+    for word in text.split_whitespace() {
+        let mut word: Vec<char> = word.chars().collect();
+        if used > 0 && used + 1 + word.len() > columns {
+            lines.push(std::mem::take(&mut line));
+            used = 0;
+        }
+        while word.len() > columns {
+            let rest = word.split_off(columns);
+            lines.push(word.into_iter().collect());
+            word = rest;
+        }
+        if used > 0 {
+            line.push(' ');
+            used += 1;
+        }
+        used += word.len();
+        line.extend(word);
+    }
+    if used > 0 {
+        lines.push(line);
+    }
+    lines
+}

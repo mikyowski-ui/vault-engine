@@ -14,6 +14,9 @@ use vault_formats::{
 
 /// SPEC-014 §3.33 the visited set: 40000 hexes, 8 per byte.
 pub const VISITED_BYTES: usize = 5000;
+/// An object's place in file order within an elevation: its hex, then its
+/// SPEC-014 §3.44 list position there, not flat, then latest insertion.
+type HexListPlace = (i32, bool, Option<u64>);
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Persistence {
@@ -294,9 +297,11 @@ impl WorldState {
             }],
         });
         // SPEC-003 §3.3: top-level objects are written by grid position
-        // 0-39999 within each elevation (insertion order within a hex),
-        // and temporary objects are excluded.
-        let mut roots: [Vec<(i32, MapObject)>; 3] = Default::default();
+        // 0-39999 within each elevation, and temporary objects are excluded.
+        // Within a hex they follow its SPEC-014 §3.44 list, flat objects
+        // first and then by latest insertion; a load inserts in file order,
+        // so it rebuilds that list.
+        let mut roots: [Vec<(HexListPlace, MapObject)>; 3] = Default::default();
         for (reference, object) in self.iter() {
             let Some(hex) = object.raw.hex else {
                 continue;
@@ -310,11 +315,13 @@ impl WorldState {
                 continue;
             }
             if let Some(tree) = self.object_tree(reference) {
-                roots[usize::from(object.raw.elevation)].push((hex, tree));
+                let flat = object.raw.flags.contains(BasicFlags::FLAT);
+                let place = (hex, !flat, self.insertion(reference));
+                roots[usize::from(object.raw.elevation)].push((place, tree));
             }
         }
         map.objects.elevations = roots.map(|mut roots| {
-            roots.sort_by_key(|(hex, _)| *hex);
+            roots.sort_by_key(|(place, _)| *place);
             roots.into_iter().map(|(_, tree)| tree).collect()
         });
         map.objects.total = map.objects.elevations.iter().map(Vec::len).sum();
@@ -503,5 +510,98 @@ impl WorldState {
             return true;
         }
         self.persist_current_map(false)
+    }
+}
+
+#[cfg(test)]
+mod hex_list_order_tests {
+    use crate::{
+        CharacterSheet, ObjectRef, WorldHost, WorldState,
+        assets::{VfsWorldAssets, WorldAssets},
+        fixture_state as fixture,
+        test_support::dir_assets,
+    };
+    use std::fs;
+    use vault_formats::{MapFile, pro::BasicFlags};
+
+    const HEX: i32 = 30150;
+    const ITEM: u32 = 0x0000_0001;
+    const SCENERY: u32 = 0x0200_0001;
+    const WALL: u32 = 0x0300_0001;
+
+    /// An object two hexes from `HEX`, unflagged, marked by its orientation:
+    /// a record's mark survives a load whatever identity the load gives it.
+    fn add(host: &mut WorldHost<VfsWorldAssets>, pid: u32, mark: u8) -> ObjectRef {
+        let prototype = host.assets.prototype(pid).unwrap();
+        let object = host.world.spawn(prototype, HEX + 2, 0).unwrap();
+        let found = host.world.get_mut(object).unwrap();
+        found.raw.flags = BasicFlags(0);
+        found.raw.orientation = mark;
+        object
+    }
+    /// The marks of the records on `HEX`, in file order.
+    fn written(map: &MapFile) -> Vec<u8> {
+        map.objects.elevations[0]
+            .iter()
+            .filter(|object| object.hex == Some(HEX))
+            .map(|object| object.orientation)
+            .collect()
+    }
+    /// The marks of the objects on `HEX`, in `references` order.
+    fn marks(host: &WorldHost<VfsWorldAssets>, references: &[ObjectRef]) -> Vec<u8> {
+        references
+            .iter()
+            .map(|reference| host.world.get(*reference).unwrap().raw.orientation)
+            .collect()
+    }
+
+    #[test]
+    fn spec003_saves_keep_the_hex_list_order_through_a_load() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture::write_corpus(dir.path());
+        let world = WorldState::new(CharacterSheet::default(), 1).unwrap();
+        let mut host = WorldHost::new(world, dir_assets(dir.path()));
+        host.load_campaign().unwrap();
+        host.load_map("maps/synthetic.map").unwrap();
+        assert!(host.world.objects_on_hex(HEX, 0).is_empty());
+        // In creation order, which is `iter` order: 0, 1, 2, 3.
+        let [first, second, third, flat] = [ITEM, SCENERY, WALL, ITEM]
+            .into_iter()
+            .zip(0..)
+            .map(|(pid, mark)| add(&mut host, pid, mark))
+            .collect::<Vec<_>>()[..]
+        else {
+            unreachable!()
+        };
+        // They reach the hex in another order, the flat one last.
+        for object in [third, first, second, flat] {
+            host.world.move_object(object, HEX, 0, false).unwrap();
+        }
+        host.world.set_flat(flat, true);
+        // SPEC-014 §3.44: flat objects first, then the oldest insertion.
+        let list = host.world.objects_on_hex(HEX, 0);
+        assert_eq!(marks(&host, &list), [3, 2, 0, 1]);
+        let saved = host.world.export_map(false);
+        assert_eq!(written(&saved), [3, 2, 0, 1]);
+
+        // A load inserts in file order, so it rebuilds the same list.
+        fs::write(dir.path().join("maps/reload.map"), saved.write().unwrap()).unwrap();
+        host.load_map("maps/reload.map").unwrap();
+        let list = host.world.objects_on_hex(HEX, 0);
+        assert_eq!(marks(&host, &list), [3, 2, 0, 1]);
+        let again = host.world.export_map(false);
+        assert_eq!(written(&again), [3, 2, 0, 1]);
+        let in_world_order: Vec<ObjectRef> = host
+            .world
+            .iter()
+            .filter(|(_, object)| object.raw.hex == Some(HEX))
+            .map(|(reference, _)| reference)
+            .collect();
+        assert_eq!(in_world_order, list);
+
+        // The loaded list goes on as a live one: a move goes to the end of
+        // its group, and the flat object keeps the front.
+        host.world.move_object(list[2], HEX, 0, false).unwrap();
+        assert_eq!(written(&host.world.export_map(false)), [3, 2, 1, 0]);
     }
 }

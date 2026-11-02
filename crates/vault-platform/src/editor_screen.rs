@@ -1897,9 +1897,7 @@ fn plain(file: &[u8]) -> Option<&str> {
 /// The loose file of that name in the root, matched without regard to
 /// case (the reference file system ignores case).
 fn loose_file(root: &Path, file: &[u8]) -> Option<PathBuf> {
-    let names = loose_names(root);
-    let name = names.iter().find(|name| name.eq_ignore_ascii_case(file))?;
-    Some(root.join(plain(name)?))
+    crate::config::entry_any_case(root, plain(file)?, Path::is_file)
 }
 
 /// "Exists": the file opens for reading, as a loose file in the root or as

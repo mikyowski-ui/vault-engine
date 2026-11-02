@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use vault_fixtures::{dat, dat2, gallery, state, vm};
 
 mod clean_room;
+mod install_desktop;
 mod wasm_check;
 
 #[derive(Parser)]
@@ -85,6 +86,15 @@ enum Task {
         #[arg(long, value_name = "PATH")]
         render_path: Option<String>,
     },
+    /// Put the release build in the Linux desktop menu for this user: the
+    /// binary in `~/.local/bin`, an icon, and a desktop entry with an action
+    /// for each game. It never builds: run `cargo build --release --package
+    /// vault-platform` first.
+    InstallDesktop {
+        /// Remove those three files instead.
+        #[arg(long)]
+        uninstall: bool,
+    },
 }
 
 /// The workspace root.
@@ -158,6 +168,12 @@ fn main() -> ExitCode {
             stage,
             render_path,
         } => capture_gallery(&output, &stage, render_path.as_deref()),
+        Task::InstallDesktop { uninstall } => if uninstall {
+            install_desktop::run_uninstall()
+        } else {
+            install_desktop::run()
+        }
+        .map_err(Into::into),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

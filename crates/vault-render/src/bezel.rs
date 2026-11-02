@@ -35,6 +35,10 @@ pub const FRAME: [u32; 2] = [640, 480];
 /// The largest bezel image side (the largest [`IndexedImage`] a layer
 /// takes, as the world canvas's).
 const MAX_SIDE: u32 = 4096;
+/// How far from the image's corner a frame is placed: far past any image,
+/// and small enough that a pixel's place relative to the frame cannot
+/// overflow.
+const HOLE_LIMIT: i64 = 1 << 32;
 /// The divisors of 160 (the greatest common divisor of 640 and 480): the
 /// bezel pixel sizes, in frame pixels, that keep the frame's edges on
 /// whole bezel pixels.
@@ -186,7 +190,21 @@ impl Place {
 /// The bezel for a frame whose top-left corner is bezel pixel `hole` in a
 /// `size` image, `unit` frame pixels to a bezel pixel (a divisor of 160).
 /// The frame's own area is filled with the darkest steel.
+///
+/// A zero side gives an empty image of that size, which holds no pixels and
+/// is the one [`IndexedImage`] that [`IndexedImage::new`] would refuse. A
+/// side past 4096 is cut to it, and a `hole` past `HOLE_LIMIT` is brought
+/// back to it: the frame is off the image either way.
 pub fn draw_bezel(size: [u32; 2], hole: [i64; 2], unit: u32, inks: BezelInks) -> IndexedImage {
+    if size.contains(&0) {
+        return IndexedImage {
+            width: size[0],
+            height: size[1],
+            pixels: Vec::new(),
+        };
+    }
+    let size = size.map(|side| side.min(MAX_SIDE));
+    let hole = hole.map(|place| place.clamp(-HOLE_LIMIT, HOLE_LIMIT));
     let unit = i64::from(unit.max(1));
     let scaled = |value: i64| (value / unit).max(1);
     let frame = FRAME.map(|side| i64::from(side) / unit);
@@ -374,7 +392,8 @@ pub fn bezel_layer(
 ) -> Option<(IndexedImage, [f32; 4])> {
     let [x, y, w, _] = frame_rect.map(f64::from);
     let per_frame = w / f64::from(FRAME[0]);
-    if per_frame.is_nan() || per_frame <= 0.0 || surface.contains(&0) {
+    let placed = [x, y, per_frame].iter().all(|value| value.is_finite());
+    if !placed || per_frame <= 0.0 || surface.contains(&0) {
         return None;
     }
     let [sw, sh] = surface.map(f64::from);
@@ -390,10 +409,14 @@ pub fn bezel_layer(
                 .ceil()
                 .max(0.0),
         ];
-        let size = [
-            before[0] as u32 + frame[0] + after[0] as u32,
-            before[1] as u32 + frame[1] + after[1] as u32,
-        ];
+        // Saturating: a tiny frame far from the corner asks for more pixels
+        // than a u32 holds, and is then only too large.
+        let side = |axis: usize| {
+            (before[axis] as u32)
+                .saturating_add(frame[axis])
+                .saturating_add(after[axis] as u32)
+        };
+        let size = [side(0), side(1)];
         if size.iter().any(|side| *side > MAX_SIDE) {
             continue;
         }
@@ -493,6 +516,77 @@ mod tests {
         assert!(image.width() <= 4096 && image.height() <= 4096);
         assert!(rect[2] >= 7680.0 - rect[0].abs());
         assert!(bezel_layer([0, 480], [0.0, 0.0, 640.0, 480.0], inks()).is_none());
+    }
+
+    #[test]
+    fn a_zero_side_draws_an_empty_image() {
+        for (size, hole) in [
+            ([0, 0], [0, 0]),
+            ([0, 480], [10, -10]),
+            ([640, 0], [-10, 10]),
+            ([0, 4096], [i64::MIN, i64::MAX]),
+            ([u32::MAX, 0], [0, 0]),
+        ] {
+            let image = draw_bezel(size, hole, 1, inks());
+            assert_eq!([image.width(), image.height()], size);
+            assert!(image.pixels().is_empty());
+        }
+    }
+
+    #[test]
+    fn tiny_images_draw_at_every_unit() {
+        for unit in [0, 1, 2, 5, 160, 640, 1000, u32::MAX] {
+            for size in [[1, 1], [1, 7], [7, 1], [2, 2], [3, 3]] {
+                for hole in [[0, 0], [-1, -1], [1, 1], [-700, 500], [700, -500]] {
+                    let image = draw_bezel(size, hole, unit, inks());
+                    assert_eq!([image.width(), image.height()], size);
+                    assert_eq!(image.pixels().len(), (size[0] * size[1]) as usize);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_single_pixel_inside_the_frame_is_the_darkest_steel() {
+        let image = draw_bezel([1, 1], [0, 0], 1, inks());
+        assert_eq!(image.pixels(), [10]);
+    }
+
+    #[test]
+    fn extreme_holes_do_not_overflow() {
+        for hole in [
+            [i64::MIN, i64::MIN],
+            [i64::MAX, i64::MAX],
+            [i64::MIN, i64::MAX],
+            [i64::MAX, i64::MIN],
+        ] {
+            let image = draw_bezel([16, 16], hole, 1, inks());
+            assert_eq!(image.pixels().len(), 256);
+            let wide = draw_bezel([16, 16], hole, 160, inks());
+            assert_eq!(wide.pixels().len(), 256);
+        }
+    }
+
+    #[test]
+    fn an_oversized_side_is_cut_to_the_largest_image() {
+        let image = draw_bezel([u32::MAX, 2], [0, 0], 1, inks());
+        assert_eq!([image.width(), image.height()], [MAX_SIDE, 2]);
+    }
+
+    #[test]
+    fn a_layer_needs_a_finite_frame_and_a_size_it_can_hold() {
+        // No panic on the u32 sum: the frame is tiny and far away.
+        assert!(bezel_layer([1920, 1080], [1e9, 1e9, 1e-6, 1.0], inks()).is_none());
+        for rect in [
+            [f32::NAN, 0.0, 640.0, 480.0],
+            [0.0, f32::INFINITY, 640.0, 480.0],
+            [0.0, 0.0, f32::INFINITY, 480.0],
+            [0.0, 0.0, f32::NAN, 480.0],
+            [0.0, 0.0, 0.0, 480.0],
+            [0.0, 0.0, -640.0, 480.0],
+        ] {
+            assert!(bezel_layer([1920, 1080], rect, inks()).is_none());
+        }
     }
 
     #[test]
