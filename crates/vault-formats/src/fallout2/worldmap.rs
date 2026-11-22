@@ -534,8 +534,8 @@ impl WorldmapTable {
                     notes.push(file, value.line, "walk_mask_name: not a Stem; none");
                 }
             }
-            for y in 0..SUBTILES[1] {
-                for x in 0..SUBTILES[0] {
+            for (y, row) in tile.subtiles.iter_mut().enumerate() {
+                for (x, subtile) in row.iter_mut().enumerate() {
                     let key = format!("{x}_{y}");
                     let Some(value) = section.get(&key) else {
                         notes.push(
@@ -554,7 +554,6 @@ impl WorldmapTable {
                         );
                         continue;
                     }
-                    let subtile = &mut tile.subtiles[y][x];
                     subtile.terrain = terrain_index(&items[0]).unwrap_or_else(|| {
                         notes.push(
                             file,

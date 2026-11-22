@@ -327,8 +327,8 @@ impl<A: WorldAssets> WorldHost<A> {
             0x8057 => self.library.border = [call.int(1), call.int(0)],
             0x8058 | 0x8059 => {
                 let mut images = vec![call.args[0].text.clone()];
-                for index in 1..4 {
-                    let value = call.args[index].value;
+                for arg in &call.args[1..4] {
+                    let value = arg.value;
                     if base_tag(value) == Value::INTEGER && value.payload != 0 {
                         return Err(VmError::Type(value.tag));
                     }
