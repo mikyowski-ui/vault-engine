@@ -33,6 +33,16 @@ pub struct PreviewArgs {
     /// off in a replay, which applies a logged `touch_ui` record.
     #[arg(skip)]
     pub touch_ui: bool,
+    /// Folders of another game's data a profile links (Et Tu's Fallout 1):
+    /// read where the game's own data has no such file.
+    #[arg(skip)]
+    pub linked_dirs: Vec<PathBuf>,
+    /// Go straight to the newest save.
+    #[arg(skip)]
+    pub resume_latest: bool,
+    /// The settings profile this session runs, which in-game saves go to.
+    #[arg(skip)]
+    pub profile_name: Option<String>,
     /// Where the F9 overlay exports the current setup as a mod (`None`: it
     /// does not, as in a replay).
     #[arg(skip)]
@@ -100,7 +110,8 @@ pub struct PreviewArgs {
         conflicts_with_all = ["preview_frm", "preview_map", "play_movie"]
     )]
     pub game: bool,
-    /// Directory holding `SAVEGAME/SLOTnn` (default: the current directory).
+    /// Directory holding `SAVEGAME/SLOTnn` (default: the per-user save folder
+    /// of the profile, or the current directory when it already holds saves).
     #[arg(long, value_name = "PATH")]
     pub save_dir: Option<PathBuf>,
     /// `fallout.cfg` read for preferences and written when they change.
@@ -490,6 +501,14 @@ impl AssetPreview {
     /// The `enhanced` preset's game speed (Alt+F, or its logged record):
     /// the game keeps it for every world it creates next, and gives it to
     /// the current one. Worlds under Vanilla ignore it.
+    /// The speed the world runs at, as its own window may have left it.
+    pub fn session_game_speed(&mut self) -> Option<crate::enhanced::GameSpeed> {
+        match self {
+            Self::Map(preview) => Some(preview.session_game_speed()),
+            Self::Game(game) => Some(game.world()?.session_game_speed()),
+            _ => None,
+        }
+    }
     pub fn set_game_speed(&mut self, speed: crate::enhanced::GameSpeed) {
         match self {
             Self::Map(preview) => preview.set_game_speed(speed),
@@ -643,11 +662,36 @@ impl PreviewArgs {
         if let Some(data) = &self.data {
             return Ok(data.clone());
         }
-        let base = self.base_source()?;
+        let base = self.linked_source(self.base_source()?)?;
         match &self.mods {
             Some(mods) => Self::mount_mods(base, mods),
             None => Ok(base),
         }
+    }
+    /// `base`, falling back to each linked folder's Fallout 1 data. A linked
+    /// folder that no longer holds any stops the start, with its name, since
+    /// the game would otherwise run with data missing.
+    fn linked_source(&self, base: Arc<dyn Vfs>) -> AppResult<Arc<dyn Vfs>> {
+        let mut source = base;
+        for dir in &self.linked_dirs {
+            let paths = crate::config::discover_game(
+                std::slice::from_ref(dir),
+                vault_core::GameProfile::Fallout1,
+            )
+            .ok_or_else(|| format!("linked data: no Fallout 1 data in {}", dir.display()))?;
+            let linked = PreviewArgs {
+                master_dat: paths.master_dat,
+                critter_dat: paths.critter_dat,
+                game_profile: vault_core::GameProfile::Fallout1,
+                ..Default::default()
+            }
+            .base_source()?;
+            source = Arc::new(LinkedVfs {
+                primary: source,
+                linked,
+            });
+        }
+        Ok(source)
     }
     /// `mods` mounted over `base`: a `load_order.toml`, or the settings'
     /// path list. The mod layers stay outermost, so the world sees them
@@ -657,7 +701,11 @@ impl PreviewArgs {
         mods: &crate::config::ModList,
     ) -> AppResult<Arc<dyn Vfs>> {
         let layered = match mods {
-            crate::config::ModList::File(path) => LayeredVfs::from_load_order(base, path),
+            crate::config::ModList::File(path) => {
+                let order = crate::mods::read_load_order(path)
+                    .map_err(|error| format!("mod_list: {error}"))?;
+                LayeredVfs::from_entries(base, &order.directory, &order.entries, order.policy)
+            }
             // Paths from the settings are the user's own (already resolved
             // against the settings file), so they may lie anywhere.
             crate::config::ModList::Paths(paths) => {
@@ -768,7 +816,9 @@ impl PreviewArgs {
             return Ok(None);
         };
         let storage = self.storage.as_deref().filter(|_| !self.headless);
-        crate::mods::mod_session(&crate::mods::layer_dirs(mods), storage, !self.headless)
+        let dirs =
+            crate::mods::enabled_layer_dirs(mods).map_err(|error| format!("mod_list: {error}"))?;
+        crate::mods::mod_session(&dirs, storage, !self.headless)
             .map_err(|error| format!("mod_list: {error}").into())
     }
     /// SPEC-024c §3.1: read once, under sfall mode only. With the mode off
@@ -803,6 +853,8 @@ impl PreviewArgs {
             game.preset = self.preset;
             game.enhanced = self.enhanced;
             game.touch_ui = self.touch_ui;
+            game.resume_latest = self.resume_latest;
+            game.profile_name = self.profile_name.clone();
             game.sfall = self.sfall;
             game.startup = startup;
             game.mod_session = mod_session;
@@ -832,6 +884,7 @@ impl PreviewArgs {
             map.storage = self.storage.clone();
             map.config_path = self.config.clone();
             crate::session::WorldOptions {
+                profile_name: self.profile_name.clone(),
                 headless: self.headless,
                 debug: self.debug,
                 enhanced: self.enhanced,
@@ -1010,6 +1063,42 @@ impl Preview {
 /// The VFS directory music tracks are requested from (SPEC-008 §3.10).
 const MUSIC_DIR: &str = "sound/music";
 
+/// `primary`, then `linked` for what it lacks: another game's data beneath a
+/// game's own, so nothing in the linked game overrides the running one.
+struct LinkedVfs {
+    primary: Arc<dyn Vfs>,
+    linked: Arc<dyn Vfs>,
+}
+
+impl Vfs for LinkedVfs {
+    fn read(&self, path: &str) -> Result<Vec<u8>, vault_formats::VfsError> {
+        self.primary.read(path).or_else(|_| self.linked.read(path))
+    }
+    fn read_bounded(
+        &self,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, vault_formats::VfsError> {
+        use vault_formats::VfsError;
+        match self.primary.read_bounded(path, max_bytes) {
+            // Too large is an answer: the file is there.
+            Err(VfsError::FileTooLarge { path, max_bytes }) => {
+                Err(VfsError::FileTooLarge { path, max_bytes })
+            }
+            Err(_) => self.linked.read_bounded(path, max_bytes),
+            found => found,
+        }
+    }
+    fn files(&self) -> Box<dyn Iterator<Item = &VfsPath> + '_> {
+        let own: std::collections::BTreeSet<&VfsPath> = self.primary.files().collect();
+        let extra = self.linked.files().filter(move |file| !own.contains(file));
+        Box::new(self.primary.files().chain(extra))
+    }
+    fn mod_layers(&self) -> usize {
+        self.primary.mod_layers()
+    }
+}
+
 /// A loose music directory beside the master database: `sound/music` or
 /// `data/sound/music`, matched without regard to case.
 pub(crate) fn music_dir(master: &Path) -> Option<PathBuf> {
@@ -1017,19 +1106,7 @@ pub(crate) fn music_dir(master: &Path) -> Option<PathBuf> {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         _ => PathBuf::from("."),
     };
-    let child = |dir: &Path, name: &str| -> Option<PathBuf> {
-        std::fs::read_dir(dir)
-            .ok()?
-            .flatten()
-            .find(|entry| {
-                entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|entry| entry.eq_ignore_ascii_case(name))
-                    && entry.path().is_dir()
-            })
-            .map(|entry| entry.path())
-    };
+    let child = |dir: &Path, name: &str| crate::config::entry_any_case(dir, name, Path::is_dir);
     [&["sound", "music"][..], &["data", "sound", "music"]]
         .iter()
         .find_map(|names| {
@@ -1576,5 +1653,50 @@ mod tests {
         args.message_id = None;
         args.font = Some("missing.fon".into());
         assert!(args.load().is_err());
+    }
+}
+
+#[cfg(test)]
+mod linked_tests {
+    use super::*;
+
+    /// A loose mount of `files`, with the folder that holds it.
+    fn memory(files: &[(&str, &[u8])]) -> (tempfile::TempDir, Arc<dyn Vfs>) {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bytes) in files {
+            let path = dir.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        let mount: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(dir.path()).unwrap());
+        (dir, mount)
+    }
+
+    /// The running game's data wins, and the linked game fills what it lacks.
+    #[test]
+    fn linked_data_sits_beneath_the_games_own() {
+        let (_own, primary) = memory(&[("maps/both.map", b"own")]);
+        let (_old, old) = memory(&[("maps/both.map", b"old"), ("maps/only.map", b"linked")]);
+        let linked = LinkedVfs {
+            primary,
+            linked: old,
+        };
+        assert_eq!(linked.read("maps/both.map").unwrap(), b"own");
+        assert_eq!(linked.read("maps/only.map").unwrap(), b"linked");
+        assert!(linked.read("maps/none.map").is_err());
+        assert_eq!(linked.read_bounded("maps/only.map", 64).unwrap(), b"linked");
+        assert_eq!(linked.files().count(), 2, "each file once");
+    }
+
+    #[test]
+    fn a_linked_folder_without_data_stops_the_start_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = PreviewArgs {
+            linked_dirs: vec![dir.path().to_path_buf()],
+            ..Default::default()
+        };
+        let (_empty, base) = memory(&[]);
+        let error = args.linked_source(base).err().unwrap().to_string();
+        assert!(error.contains(&dir.path().display().to_string()), "{error}");
     }
 }

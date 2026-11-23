@@ -1,6 +1,6 @@
 # SPEC-017: Fallout 2 Host Words and VM Deltas
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Section 8 revised (Revision 2) by the coordinator at the owner's request, 2026-10-25. Revision 3 (retail audit recorded; script gate open) by the coordinator, 2026-10-25. Revision 4 (the opt-in sfall word set, section 2) by Team A, 2026-10-30, on the owner's instruction.
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Section 8 revised (Revision 2) by the coordinator at the owner's request, 2026-10-25. Revision 3 (retail audit recorded; script gate open) by the coordinator, 2026-10-25. Revision 4 (the opt-in sfall word set, section 2) by Team A, 2026-10-30, on the owner's instruction. Revision 5 (Team A, 2026-11-01) changes `metarule` rule 49 during an explosion.
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-25.
 Sources:
@@ -72,6 +72,12 @@ SPEC-024b Decision D-3.
 
 No decompilation, disassembly, re-implementation source or game asset was used,
 and no engine Rust code was read.
+
+**Revision 5 (rule 49 during an explosion), 2026-11-01.** The Spec-Author sub-agent
+(Team A), on the owner's brief of the same day. The implementer found that the locked
+Temple of Trials doors of `arcaves.map` ask rule 49 about themselves inside
+`damage_p_proc`, and got -1. Section 5.1 and Vector Q change this. Team A read no map,
+script or engine code. No word number changes.
 
 ## Clean-Room Rules for Research Agents
 - Document ONLY binary file layouts (byte offsets, endianness, data types), mathematical formulas, state transitions, and observable behavior.
@@ -501,7 +507,7 @@ parameter still pops it. `[Must-match]`
 | 46 | `METARULE_CURRENT_TOWN` | ignored | I the current area (SPEC-018 §7.4; SPEC-019's current city), or -1 for none |
 | 47 | `METARULE_LANGUAGE_FILTER` | ignored | I the `language_filter` preference, 0 or 1 (SPEC-014 §2.3) |
 | 48 | `METARULE_VIOLENCE_FILTER` | ignored | I the `violence_level` preference, 0-3 (SPEC-014 §2.3) |
-| 49 | `METARULE_WEAPON_DAMAGE_TYPE` | item | I the weapon prototype's damage type (SPEC-011 numbering). A null or non-weapon item gives -1 with a diagnostic |
+| 49 | `METARULE_WEAPON_DAMAGE_TYPE` | object | During an explosion, I 6 as below. Otherwise I the weapon prototype's damage type (SPEC-011 numbering). A null or non-weapon item gives -1 with a diagnostic |
 | 50 | `METARULE_CRITTER_BARTERS` | critter | I 1 when the critter's prototype has critter flag `0x00000002`, "barter enabled" (SPEC-003 §2.4), else 0. Null or non-critter gives 0 |
 | 51 | `METARULE_CRITTER_KILL_TYPE` | critter | I the prototype's kill category (SPEC-003 §2.4, offset `0x198`; under Fallout 2 numbered 0-18 by SPEC-018 §7.3). Null or non-critter gives -1 with a diagnostic |
 | any other | — | ignored | I 0, as in SPEC-005. No diagnostic is needed |
@@ -510,6 +516,13 @@ parameter still pops it. `[Must-match]`
 - The rule numbers and results of 17-51 are `[Must-match]`.
 - The null and out-of-range results of 17-51 are `[Safe rule]`.
 - Under `fallout1`, rules 17-51 are "any other" and give I 0. `[Must-match]`
+
+**Rule 49 during an explosion (Revision 5).** It gives I 6, the explosion damage type (public name `DMG_explosion`), with no diagnostic, in either of these cases. `[Must-match]`, as an owner instruction.
+
+1. The parameter is the object whose `damage_p_proc` is running for an explosion notice of SPEC-013 section 3.10, so that `fixed_param` is 6.
+2. The parameter is the explosive object whose explosion is being resolved, such as armed Dynamite (PID 206) or armed Plastic Explosives (PID 209), from the moment its event fires until its explosion ends.
+
+Everything else follows the table. A real weapon gives its own damage type even during a notice, and an armed explosive whose event has not fired gives -1. The rule only reads state: it draws no number and changes nothing. `[Safe rule]`
 
 ### 5.2 `metarule3` (`0x80E1` under Fallout 2)
 
@@ -952,6 +965,18 @@ Fragment 3, `0x8210`:
 - On, with or without the enhanced preset: `sfall_ver_major` pops nothing and
   pushes I 4, so the final stack is I 100, I 0, I 4:
   `00 00 00 64 C0 01 00 00 00 00 C0 01 00 00 00 04 C0 01`.
+
+### 7.15 Vector Q: rule 49 inside a door's `damage_p_proc` (Revision 5)
+
+`tests/fixtures/spec013/metarule49-door.tsv` holds this fragment and its results. Its bytes are the door's `damage_p_proc` body: if `metarule(49, self_obj)` is 6, `destroy_object(self_obj)`.
+
+```text
+0000: C0 01 00 00 00 1E C0 01 00 00 00 31 80 BC 81 0B
+0010: C0 01 00 00 00 06 80 33 80 2F 80 BC 80 F4
+```
+
+- During a timed explosive's notice, the rule gives I 6 with no diagnostic, the branch at `0x18` is not taken, and the door is destroyed. The stack ends empty.
+- Outside a notice, the rule gives I -1 with one diagnostic, the branch goes to `0x1E`, and the door stays. The stack ends empty.
 
 ## 8. Corpus Audit and the Fallout 2 Gate
 
@@ -1460,6 +1485,11 @@ it touches, and SPEC-018 §10 lists them as R1-R6.
     consumed use decides it.
 35. **The model check prints a pass/fail line** (coordinator default). It
     stays a report outside the audit categories, which are unchanged.
+
+47. **Rule 49 gives 6 during an explosion** (owner instruction, brief of 2026-11-01): for the object whose notice is running, and for the explosive being resolved.
+48. **"Being resolved" runs from the event firing to the end of the explosion, and the notice case ends when `damage_p_proc` returns** (Team A default). A narrow window keeps every other call as it was.
+49. **The rule's public name stays `METARULE_WEAPON_DAMAGE_TYPE`** (Team A default). The brief's `METARULE_W_DAMAGE_TYPE` is the same rule, 49.
+50. **Rule 49 stays unknown under `fallout1`** (Team A default). This section's `fallout1` rule is `[Must-match]`, and the brief changes rule 49's result, not which profile has it. So a Fallout 1 door has to read `fixed_param`.
 
 ## 10. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included

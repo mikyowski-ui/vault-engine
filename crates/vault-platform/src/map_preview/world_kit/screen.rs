@@ -9,6 +9,7 @@ use super::{
 use crate::{AppResult, interface::Painter, map_preview::MapPreview};
 use std::ops::DerefMut;
 use vault_core::{
+    host_player::{Leg, TravelPass},
     ui::{ColorKey, cursor},
     worldmap::screen::{self, Marker},
 };
@@ -33,23 +34,6 @@ pub(crate) enum Hold<E> {
     Enter { until: u64, place: Option<usize> },
     /// The encounter flash from `start`; then the encounter map loads.
     Flash { start: u64, encounter: E },
-}
-
-/// One travel iteration's outcome, as the shared pass reads it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Leg<E> {
-    /// No travel is active.
-    Idle,
-    Moving,
-    /// Arrived or blocked: the party stops at rest; a town is never
-    /// entered automatically, and a hotspot chosen before the journey is
-    /// not used.
-    Stopped,
-    /// A queue handler stopped travel for the party's town or terrain.
-    Interrupted,
-    Encounter(E),
-    /// SPEC-019 §3.19.3 the tank ran dry (Fallout 2 only).
-    OutOfFuel,
 }
 
 /// A town map's pressed marker and held side-panel button.
@@ -132,9 +116,8 @@ pub(crate) trait WorldEdition {
     fn travel_to(preview: &mut MapPreview, target: [i32; 2]);
     /// Head for `place`'s jittered position; whether a journey started.
     fn travel_to_place(preview: &mut MapPreview, place: usize) -> bool;
-    fn travel_iteration(preview: &mut MapPreview) -> AppResult<Leg<Self::Encounter>>;
-    /// The travel-dot pixel the last iteration marked.
-    fn travel_mark(preview: &MapPreview) -> Option<[i32; 2]>;
+    /// One pass's travel iterations.
+    fn travel_pass(preview: &mut MapPreview) -> AppResult<TravelPass<Self::Encounter>>;
     /// Enter `place`, or drop to terrain for `None`.
     fn enter_location(preview: &mut MapPreview, place: Option<usize>);
     fn enter_encounter(preview: &mut MapPreview, encounter: Self::Encounter);
@@ -305,51 +288,44 @@ impl MapPreview {
         if !world.begin_pass(now, edge_pointer, bounds) {
             return Ok(false);
         }
-        let mut travelled = false;
-        for _ in 0..2 {
-            let leg = E::travel_iteration(self)?;
-            let mark = E::travel_mark(self);
-            let Some(world) = E::screen_mut(self) else {
-                return Ok(true);
-            };
-            if let Some(pixel) = mark {
-                world.mark(pixel);
+        let pass = E::travel_pass(self)?;
+        let travelled = pass.travelled;
+        let Some(world) = E::screen_mut(self) else {
+            return Ok(true);
+        };
+        for pixel in pass.marks.into_iter().flatten() {
+            world.mark(pixel);
+        }
+        match pass.last {
+            Leg::Idle | Leg::Moving => {}
+            Leg::Stopped => {
+                world.clear_dots();
+                world.journey = None;
             }
-            travelled |= !matches!(leg, Leg::Idle);
-            match leg {
-                Leg::Moving => continue,
-                Leg::Idle => break,
-                Leg::Stopped => {
-                    world.clear_dots();
-                    world.journey = None;
-                    break;
-                }
-                Leg::OutOfFuel => {
-                    world.clear_dots();
-                    world.journey = None;
-                    E::out_of_fuel(self);
-                    break;
-                }
-                Leg::Interrupted => {
-                    world.clear_dots();
-                    let place = E::party_place(self);
-                    E::enter_location(self, place);
+            Leg::OutOfFuel => {
+                world.clear_dots();
+                world.journey = None;
+                E::out_of_fuel(self);
+            }
+            Leg::Interrupted => {
+                world.clear_dots();
+                let place = E::party_place(self);
+                E::enter_location(self, place);
+                return Ok(true);
+            }
+            Leg::Encounter(encounter) => {
+                world.clear_dots();
+                world.journey = None;
+                if !E::flashes(encounter) {
+                    E::enter_encounter(self, encounter);
                     return Ok(true);
                 }
-                Leg::Encounter(encounter) => {
-                    world.clear_dots();
-                    world.journey = None;
-                    if !E::flashes(encounter) {
-                        E::enter_encounter(self, encounter);
-                        return Ok(true);
-                    }
-                    let position = E::position(self).unwrap_or([0, 0]);
-                    if let Some(world) = E::screen_mut(self) {
-                        world.view = bounds.centered(position);
-                        world.pending = Some(E::flashing(now, encounter));
-                    }
-                    return Ok(true);
+                let position = E::position(self).unwrap_or([0, 0]);
+                if let Some(world) = E::screen_mut(self) {
+                    world.view = bounds.centered(position);
+                    world.pending = Some(E::flashing(now, encounter));
                 }
+                return Ok(true);
             }
         }
         if E::campaign_checks(self)? {

@@ -44,13 +44,16 @@ pub(crate) struct Counter {
     pub roll: Option<Roll>,
 }
 impl Counter {
-    /// Advance to `now` toward `value`; returns whether the drawing changed.
+    /// Advance to `now` toward `value`, clamped first (§3.21), so `shown`
+    /// is the previous value P and a change the counter cannot show does
+    /// not roll. Returns whether the drawing changed.
     fn tick(
         &mut self,
         now: u64,
         value: i32,
         segments: impl Fn(i32, bar::Band) -> Vec<(i32, i32, bar::Band)>,
     ) -> bool {
+        let value = bar::counter_value(value);
         if let Some(roll) = &mut self.roll {
             let mut changed = false;
             while now >= roll.next {
@@ -212,9 +215,6 @@ impl Default for Hud {
 
 /// §3.26 `wait2.frm`: 6 frames at 10 fps.
 pub(crate) const WATCH_FRAMES: u32 = cursor::ANIMATED[1].1;
-
-/// A cap on the slot's reload loop (see `reload_from_slot`).
-const RELOAD_LIMIT: usize = 1000;
 
 /// A bar button's screen rectangle.
 fn bar_button_rect(button: BarButton) -> Rect {
@@ -425,7 +425,14 @@ impl MapPreview {
         let hp = self.host.world.hit_points(player).unwrap_or(0);
         let max = self.host.world.player_stat(7);
         let ac = self.host.world.player_stat(9);
-        let shown_hp = self.hud.hp.shown.unwrap_or(hp);
+        // The band is the true HP's once the counter shows it: a value
+        // past 999 is clamped for the digits only.
+        let shown_hp = self
+            .hud
+            .hp
+            .shown
+            .filter(|shown| *shown != bar::counter_value(hp))
+            .unwrap_or(hp);
         for ((glyphs, band), origin) in [
             (
                 self.hud.hp.glyphs(hp, bar::hp_band(shown_hp, max)),
@@ -624,6 +631,9 @@ impl MapPreview {
     /// panel animation defers keys, so it counts toward the 32 events
     /// (§3.21, §3.27). Game input acts on presses only.
     pub fn key_up(&mut self, key: KeyCode) {
+        if self.autoplay_key_up(key) {
+            return;
+        }
         self.enhanced_key_up(key);
         if !self.fade_blocks() && (self.keyboard_locked() || self.bar_blocks()) {
             self.hold_key(HeldKey::Release);
@@ -1068,16 +1078,8 @@ impl MapPreview {
             // book by the item-slot route, an explosive's Set Timer window
             // (SPEC-013 §3.10), a Motion Sensor's automap (§3.33), a drug,
             // a kit on the player, else the use procedure.
-            if self.host.world.combat {
-                let player = self.host.world.player;
-                let cost = self.host.hook_fixed_cost(player, 2, item);
-                let Some(state) = self.host.world.critter_state_mut(player) else {
-                    return;
-                };
-                if state.ap < cost {
-                    return;
-                }
-                state.ap -= cost;
+            if !self.host.player_spend_use_ap(item) {
+                return;
             }
             self.use_item_now(item, vault_core::BookRoute::ItemSlot);
             return;
@@ -1099,74 +1101,23 @@ impl MapPreview {
     /// when something loaded. Then the mode advances and the weapon's
     /// ready sound plays (SPEC-010).
     fn reload_from_slot(&mut self, weapon: ObjectRef) {
-        let player = self.host.world.player;
-        let combat = self.host.world.combat;
-        let cost = if combat {
-            self.host.hook_fixed_cost(player, 2, weapon)
-        } else {
-            2
-        };
-        if combat
-            && self
-                .host
-                .world
-                .critter_state(player)
-                .is_none_or(|state| state.ap < cost)
-        {
-            return;
-        }
-        let mut loaded = false;
-        // Each reload fills the magazine or uses up (and destroys) one unit,
-        // so the loop ends; the cap only bounds malformed empty packs.
-        for _ in 0..RELOAD_LIMIT {
-            match self.host.world.search_reload(player, weapon) {
-                Ok(true) => loaded = true,
-                Ok(false) => break,
-                Err(error) => {
+        match self.host.player_reload(weapon) {
+            vault_core::host_player::PlayerReload::ShortOfAp => return,
+            vault_core::host_player::PlayerReload::Ran { error } => {
+                if let Some(error) = error {
                     self.status = error.to_string().into_bytes();
-                    break;
                 }
             }
-        }
-        if loaded
-            && combat
-            && let Some(state) = self.host.world.critter_state_mut(player)
-        {
-            state.ap = (state.ap - cost).max(0);
         }
         let next = bar::next_weapon_mode(WeaponMode::Reload, |mode| self.slot_mode_available(mode));
         let hand = self.hand();
         self.hud.slots[hand].set(Some(weapon), next);
-        let name = self
-            .host
-            .weapon_sound_name(
-                vault_core::ai::READY_SOUND,
-                weapon,
-                hit_mode::RIGHT_PRIMARY,
-                0,
-            )
-            .unwrap_or_default();
-        self.host.world.emit(WorldEffect::WeaponSound {
-            object: player,
-            weapon,
-            effect: vault_core::ai::READY_SOUND,
-            name,
-        });
         self.drain_effects();
     }
     /// The player asks for combat when not in it (`a`, and the item slot's
     /// attack modes).
     fn request_combat(&mut self) {
-        if !self.host.world.combat {
-            let player = self.host.world.player;
-            self.host.world.pending_combat = Some(vault_core::combat_state::CombatRequest {
-                attacker: player,
-                defender: 0,
-                accuracy: 0,
-                damage: [0, i32::MAX],
-                flags: None,
-            });
-        }
+        self.host.player_request_combat();
     }
     /// The active hand: 0 left, 1 right.
     fn hand(&self) -> usize {
@@ -1406,55 +1357,15 @@ impl MapPreview {
     /// mode that is not aimed attacks at once, uncalled, and an aimed mode
     /// opens the called-shot window.
     pub(crate) fn attack_request(&mut self, target: ObjectRef) {
-        use vault_core::critical::state::INPUT_GATE;
-        let player = self.host.world.player;
-        let gate = self.host.world.combat_state.flags & INPUT_GATE != 0;
-        let Some((mode, aimed)) = self.slot_attack().filter(|_| gate) else {
+        use vault_core::host_player::PlayerAttack;
+        let Some((mode, aimed)) = self.slot_attack() else {
             return;
         };
-        let attack =
-            match self
-                .host
-                .world
-                .attack_profile(player, target, mode, location::UNCALLED, aimed)
-            {
-                Ok(attack) => attack,
-                Err(error) => {
-                    self.status = error.to_string().into_bytes();
-                    return;
-                }
-            };
-        // SPEC-024b §6.10: the hook runs before the cost meets the AP.
-        let mut attack = attack;
-        if self.host.hooks_on() {
-            attack.hooked_cost = Some(self.host.hook_ap_cost(player, &attack));
-        }
-        if let Err(refusal) = self.host.world.preflight(player, target, &attack) {
-            self.refuse_attack(refusal, attack.ap_cost(), mode);
-            return;
-        }
-        if !self.host.world.combat {
-            self.host.world.pending_combat = Some(vault_core::combat_state::CombatRequest {
-                attacker: player,
-                defender: target,
-                accuracy: 0,
-                damage: [0, i32::MAX],
-                flags: None,
-            });
-            self.hud.replay = Some(target);
-            return;
-        }
-        if aimed {
-            self.open_called(target, mode);
-            return;
-        }
-        // The kick draw follows the preflight (no draws).
-        match self
-            .host
-            .perform_attack(player, target, mode, location::UNCALLED, false)
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(refusal)) => self.refuse_attack(refusal, attack.ap_cost(), mode),
+        match self.host.player_attack(target, mode, aimed) {
+            Ok(PlayerAttack::Gated | PlayerAttack::Attacked) => {}
+            Ok(PlayerAttack::Refused { refusal, cost }) => self.refuse_attack(refusal, cost, mode),
+            Ok(PlayerAttack::CombatRequested) => self.hud.replay = Some(target),
+            Ok(PlayerAttack::Aimed) => self.open_called(target, mode),
             Err(error) => self.status = error.to_string().into_bytes(),
         }
     }
@@ -1609,15 +1520,8 @@ impl MapPreview {
                 if !self.action_allowed(target, ObjectAction::UseObject(item)) {
                     return;
                 }
-                if self.host.world.combat {
-                    let cost = self.host.hook_fixed_cost(player, 2, item);
-                    let Some(state) = self.host.world.critter_state_mut(player) else {
-                        return;
-                    };
-                    if state.ap < cost {
-                        return;
-                    }
-                    state.ap -= cost;
+                if !self.host.player_spend_use_ap(item) {
+                    return;
                 }
                 self.selected = Some(target);
                 self.interact(ObjectAction::UseObject(item));
@@ -1772,5 +1676,73 @@ impl MapPreview {
         self.preferences.brightness =
             vault_core::ui::options::brightness_step(self.preferences.brightness, up);
         self.store_preferences();
+    }
+}
+
+#[cfg(test)]
+mod counter_tests {
+    use super::{Counter, bar};
+
+    const MAX_HP: i32 = 30;
+
+    fn tick(counter: &mut Counter, now: u64, hp: i32) -> bool {
+        counter.tick(now, hp, |old, first| {
+            bar::roll_segments(old, hp, MAX_HP, first)
+        })
+    }
+    /// A counter that has drawn `shown`, with its next change animated.
+    fn rolling(shown: i32) -> Counter {
+        let mut counter = Counter::default();
+        tick(&mut counter, 0, shown);
+        counter.animate = true;
+        counter
+    }
+
+    #[test]
+    fn spec014_a_normal_roll_keeps_its_frames_and_its_wait() {
+        let mut counter = rolling(10);
+        assert!(tick(&mut counter, 1000, 5));
+        let roll = counter.roll.as_ref().unwrap();
+        // §3.21: t = trunc(250 / 6), and 10 to 9 carries in the tens cell.
+        assert_eq!((roll.delay, roll.next), (41, 1041));
+        assert_eq!(roll.frames.len(), 1 + 3 * 5 + 2);
+        assert!(!tick(&mut counter, 1040, 5), "the wait is not over");
+        assert!(tick(&mut counter, 1041, 5));
+        assert_eq!(counter.roll.as_ref().unwrap().index, 1);
+        // Every frame waits t, the last one included.
+        tick(&mut counter, 1000 + 41 * 17, 5);
+        assert!(counter.roll.is_some());
+        tick(&mut counter, 1000 + 41 * 18, 5);
+        assert!(counter.roll.is_none());
+        let (glyphs, _) = counter.glyphs(5, bar::Band::White);
+        assert_eq!(glyphs, bar::counter_glyphs(5));
+    }
+
+    #[test]
+    fn spec014_i32_min_rolls_to_the_clamped_value_at_once() {
+        for hp in [i32::MIN, i32::MIN + 1, -1_000_000_000] {
+            let mut counter = rolling(30);
+            tick(&mut counter, 1000, hp);
+            let roll = counter.roll.as_ref().unwrap();
+            assert_eq!(roll.delay, 0, "past 249 units the wait is 0");
+            assert!(roll.frames.len() < 7000);
+            assert_eq!(counter.shown, Some(-999));
+            // No wait: the next tick plays it to its last frame.
+            tick(&mut counter, 1000, hp);
+            assert!(counter.roll.is_none());
+            let (glyphs, _) = counter.glyphs(hp, bar::Band::Red);
+            assert_eq!(glyphs, bar::counter_glyphs(hp));
+        }
+    }
+
+    #[test]
+    fn spec014_a_change_the_counter_cannot_show_does_not_roll() {
+        let mut counter = rolling(i32::MAX);
+        assert_eq!(counter.shown, Some(999));
+        counter.animate = true;
+        // §3.21: V is clamped first, and a roll whose value does not change
+        // has no waits and blocks nothing.
+        assert!(!tick(&mut counter, 1000, 1_000_000));
+        assert!(counter.roll.is_none() && !counter.animate);
     }
 }

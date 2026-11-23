@@ -22,5 +22,5 @@ mod screen;
 mod view;
 
 pub(crate) use paint::{VIEW_CLIP, draw_indicator_box, inside, red_button, triangle_art};
-pub(crate) use screen::{Hold, Leg, TownPress, WorldEdition};
+pub(crate) use screen::{Hold, TownPress, WorldEdition};
 pub(crate) use view::{Bounds, WorldView};

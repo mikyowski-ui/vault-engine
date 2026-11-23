@@ -545,6 +545,9 @@ impl MapPreview {
             self.pointer.world = false;
             return;
         };
+        if let Some(on) = settings.tactical_overlay {
+            self.qol_state.overlay = on;
+        }
         if settings.viewport == ViewportMode::Fixed {
             self.pointer.world = false;
         }
@@ -759,10 +762,15 @@ impl MapPreview {
             return false;
         }
         let right = button == PointerButton::Right;
+        // Watch Mode's banner comes first, as it does in `click`.
+        if pressed && !right && at.ui.is_some_and(|ui| self.autoplay_click(ui)) {
+            return true;
+        }
         // The debug overlay's panel takes its own presses (it is drawn on
         // the interface frame over the world).
         if pressed
             && world_view
+            && !right
             && let Some(ui) = at.ui.filter(|ui| self.debug_panel_at(*ui))
         {
             self.debug_panel_press(ui);
@@ -1661,6 +1669,7 @@ impl MapPreview {
         }
         let scale = super::qol::overlay_scale(self.enhanced_zoom());
         self.draw_tactical(&mut canvas, view, scale);
+        self.draw_autoplay_world(&mut canvas, view, scale);
         Ok(canvas)
     }
     /// The world behind a window centered over the map

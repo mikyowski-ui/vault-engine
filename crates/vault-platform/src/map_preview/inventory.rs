@@ -649,60 +649,22 @@ impl MapPreview {
     /// §3.10, from either place); a Motion Sensor the automap; a kit on the
     /// player; a drug; else the item's use procedure.
     pub(super) fn use_item_now(&mut self, item: ObjectRef, route: vault_core::BookRoute) {
-        let player = self.host.world.player;
-        let pid = self.host.world.get(item).map_or(0, |o| o.raw.pid);
-        // SPEC-024b §6.15: before the item's own path. Opening a container
-        // in the window is no use.
-        let opens = matches!(self.item_kind(item), Some(ItemData::Container { .. }))
-            && matches!(self.screen, Screen::Inventory(_));
-        if !opens {
-            match self.host.hook_item_use(player, item) {
-                Ok(false) => {}
-                Ok(true) => {
-                    self.drain_effects();
-                    return;
-                }
-                Err(error) => {
-                    self.status = error.to_string().into_bytes();
-                    return;
-                }
-            }
-        }
-        if skills::skill_book(pid).is_some() {
-            if let Err(error) = self.host.read_book(item, route) {
+        use vault_core::host_player::ItemUse;
+        let in_inventory = matches!(self.screen, Screen::Inventory(_));
+        match self.host.player_use_item(item, route, in_inventory) {
+            Ok(ItemUse::Done) => self.drain_effects(),
+            Ok(ItemUse::Failed(error)) => {
                 self.status = error.to_string().into_bytes();
+                self.drain_effects();
             }
-            self.drain_effects();
-            return;
-        }
-        if matches!(self.item_kind(item), Some(ItemData::Container { .. }))
-            && matches!(self.screen, Screen::Inventory(_))
-        {
-            self.open_container(item);
-            return;
-        }
-        if skills::is_explosive(pid) {
-            if self.host.explosive_armable(item) {
+            Ok(ItemUse::OpenContainer) => self.open_container(item),
+            Ok(ItemUse::OpenTimer) => {
                 self.open_timer(item);
+                self.drain_effects();
             }
-            self.drain_effects();
-            return;
+            Ok(ItemUse::MotionSensor) => self.use_motion_sensor(item),
+            Err(error) => self.status = error.to_string().into_bytes(),
         }
-        if pid == MOTION_SENSOR {
-            self.use_motion_sensor(item);
-            return;
-        }
-        let result = if self.host.kit_skill(pid).is_some() {
-            self.host.use_kit(player, item, player).map(|_| ())
-        } else if matches!(self.item_kind(item), Some(ItemData::Drug(_))) {
-            self.host.use_drug(player, item).map(|_| ())
-        } else {
-            self.host.action(player, item, ObjectAction::Use)
-        };
-        if let Err(error) = result {
-            self.status = error.to_string().into_bytes();
-        }
-        self.drain_effects();
     }
     /// §3.34 the drop of `item`, lifted from `from`, on `target`.
     pub(crate) fn inventory_drop(&mut self, from: Slot, item: ObjectRef, target: DropTarget) {

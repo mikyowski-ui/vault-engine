@@ -8,12 +8,40 @@
 //! `5e-1`), or a one-line array of strings; `#` starts a comment.
 //! Relative paths are relative to the file's directory.
 //!
-//! The only tables are `[profiles.fallout1]` and `[profiles.fallout2]`,
-//! after the top-level keys: each game's last-used `master_dat`,
-//! `critter_dat` and `data_root`, so switching games keeps both sets. The
-//! top-level keys stay the active game's paths (a file from before
-//! profiles is read as it always was) and win over its table when both
-//! name paths.
+//! `[profiles.fallout1]` and `[profiles.fallout2]`, after the top-level keys,
+//! hold each game's last-used `master_dat`, `critter_dat` and `data_root`, so
+//! switching games keeps both sets, and each game's own `sfall` and `mod_list`
+//! (alias `load_order`), so a mod stack for one game never reaches the other.
+//! The top-level path keys stay the active game's paths (a file from before
+//! profiles is read as it always was) and win over its table when both name
+//! paths.
+//!
+//! `[profiles.<name>]` with any other name is a custom profile: `edition`, and
+//! its own `sfall` and `mod_list`. The top-level `profile = "<name>"` selects
+//! it, which replaces the edition table's `sfall` and `mod_list` whenever that
+//! edition runs and gives it its own save folder. The other edition keeps its
+//! own table.
+//!
+//! Any profile table may also hold `install_dir` (its own data, found by
+//! name), `secondary_dat_dirs` (another game's data it links, as Et Tu links
+//! Fallout 1's) and its own Enhanced settings ([`EnhancedProfile`]), which win
+//! over the top-level ones when it runs. `[presets.<name>]` holds saved custom
+//! presets, and `[known_paths]` every folder the launcher has remembered.
+//!
+//! **Keys from before scoping.** A top-level `mod_list` and `sfall` under
+//! `[scripting]` are still read, as a table's value: `sfall` belongs to
+//! Fallout 2, the one edition that runs it. `mod_list` belongs to Fallout 2
+//! too when `sfall = true` stands with it, else to the file's `game`. A value
+//! in that edition's table wins. The next commit moves them into the table,
+//! in place, and leaves any other line alone.
+//!
+//! **Commits edit in place** ([`Config::commit`], [`Config::save`]): a line
+//! changes only when its value did, with its comment and spacing kept, a new
+//! key joins the end of its table, and comments, key order, unknown keys and
+//! unknown tables stay. The one rewrite is of a file that no longer parses,
+//! which the launcher has already reported.
+//!
+//! Tables the engine does not know are kept unread.
 //!
 //! This is engine infrastructure, not part of any specification: it only
 //! decides which game data and display options the shell starts with.
@@ -25,8 +53,7 @@ use std::{
 use vault_core::GameProfile;
 use vault_render::{RenderPath, ScalingMode};
 
-/// The settings file's name, looked up beside the executable first and
-/// then in the working directory.
+/// The settings file's name, looked up by [`search_dirs`].
 pub const FILE_NAME: &str = "vault-engine.toml";
 
 /// The engine preset a configuration selects (the engine maps it to its
@@ -65,6 +92,8 @@ pub enum HotkeyHints {
 }
 
 impl HotkeyHints {
+    /// The launcher row's order (SPEC-020 §2.6).
+    pub const ALL: [Self; 3] = [Self::Once, Self::Always, Self::Off];
     pub fn parse(text: &str) -> Option<Self> {
         match text {
             "once" => Some(Self::Once),
@@ -200,10 +229,27 @@ impl Value {
             _ => None,
         }
     }
+    /// The value as the file writes it.
+    fn text(&self) -> String {
+        match self {
+            Self::String(text) => quote(text),
+            Self::Bool(flag) => flag.to_string(),
+            Self::Integer(number) => number.to_string(),
+            Self::Float(number) => float(*number),
+            Self::Array(items) => format!(
+                "[{}]",
+                items
+                    .iter()
+                    .map(|item| quote(item))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
 }
 
-/// `mod_list` (alias `load_order`): the mods in load order, or the path of
-/// a `load_order.toml` that lists them.
+/// `mod_list` (alias `load_order`) of a profile: the mods in load order, or
+/// the path of a `load_order.toml` that lists them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModList {
     Paths(Vec<PathBuf>),
@@ -245,6 +291,193 @@ impl GamePaths {
     }
 }
 
+/// What a profile scopes beyond its paths: the two settings that belong to
+/// one game's mod stack.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProfileScope {
+    /// `sfall` (SPEC-024b §3.1): opt-in sfall mode.
+    pub sfall: Option<bool>,
+    pub mod_list: Option<ModList>,
+    /// The folder this profile's own data is found in, by name.
+    pub install_dir: Option<PathBuf>,
+    /// Folders of another game's data this profile links.
+    pub secondary_dat_dirs: Vec<PathBuf>,
+    pub enhanced: EnhancedProfile,
+}
+
+/// A profile's or a preset's Enhanced and quality-of-life settings. A `None`
+/// leaves the top-level setting in force.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct EnhancedProfile {
+    pub preset: Option<Preset>,
+    pub viewport_mode: Option<ViewportMode>,
+    pub default_zoom: Option<f32>,
+    pub smooth_camera: Option<bool>,
+    pub roof_peek: Option<RoofPeek>,
+    pub ui_scale: Option<UiScale>,
+    pub game_speed: Option<GameSpeed>,
+    /// The tactical overlay (HP bars, AP badges and the rest), on from the
+    /// start of a session.
+    pub tactical_overlay: Option<bool>,
+}
+
+impl EnhancedProfile {
+    /// The keys it reads, as the top level spells them.
+    const KEYS: [&str; 8] = [
+        "preset",
+        "viewport_mode",
+        "default_zoom",
+        "smooth_camera",
+        "roof_peek",
+        "ui_scale",
+        "game_speed",
+        "tactical_overlay",
+    ];
+
+    /// Read `key = value`; `false` when the key is none of these.
+    fn assign(&mut self, key: &str, value: &Value) -> Result<bool, String> {
+        if !Self::KEYS.contains(&key) {
+            return Ok(false);
+        }
+        if key == "tactical_overlay" {
+            let Value::Bool(flag) = value else {
+                return Err("`tactical_overlay` expects true or false".into());
+            };
+            self.tactical_overlay = Some(*flag);
+            return Ok(true);
+        }
+        let mut parsed = Config::default();
+        parsed.assign(key, key, value.clone())?;
+        self.preset = parsed.preset.or(self.preset);
+        self.viewport_mode = parsed.viewport_mode.or(self.viewport_mode);
+        self.default_zoom = parsed.default_zoom.or(self.default_zoom);
+        self.smooth_camera = parsed.smooth_camera.or(self.smooth_camera);
+        self.roof_peek = parsed.roof_peek.or(self.roof_peek);
+        self.ui_scale = parsed.ui_scale.or(self.ui_scale);
+        self.game_speed = parsed.game_speed.or(self.game_speed);
+        Ok(true)
+    }
+
+    /// Its lines in `table`.
+    fn entries(&self, table: &str, list: &mut Vec<Entry>) {
+        let mut line = |key: &str, value: String| list.push(Entry::new(table, key, value));
+        if let Some(preset) = self.preset {
+            line("preset", quote(preset.name()));
+        }
+        if let Some(mode) = self.viewport_mode {
+            line("viewport_mode", quote(viewport_name(mode)));
+        }
+        if let Some(zoom) = self.default_zoom {
+            line("default_zoom", float(f64::from(zoom)));
+        }
+        if let Some(smooth) = self.smooth_camera {
+            line("smooth_camera", smooth.to_string());
+        }
+        if let Some(mode) = self.roof_peek {
+            line("roof_peek", quote(roof_peek_name(mode)));
+        }
+        match self.ui_scale {
+            Some(UiScale::Auto) => line("ui_scale", quote("auto")),
+            Some(UiScale::Scale(scale)) => line("ui_scale", float(f64::from(scale))),
+            None => {}
+        }
+        if let Some(speed) = self.game_speed {
+            line("game_speed", float(f64::from(speed.factor())));
+        }
+        if let Some(on) = self.tactical_overlay {
+            line("tactical_overlay", on.to_string());
+        }
+    }
+}
+
+/// `[presets.<name>]`: Enhanced settings the player saved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CustomPreset {
+    pub name: String,
+    pub settings: EnhancedProfile,
+}
+
+/// Which list of [`KnownPaths`] a path belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnownKind {
+    Fallout1,
+    Fallout2,
+    Mods,
+    Pinned,
+}
+
+/// `[known_paths]`: folders the launcher remembers, newest first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KnownPaths {
+    pub fallout1: Vec<PathBuf>,
+    pub fallout2: Vec<PathBuf>,
+    pub mods: Vec<PathBuf>,
+    pub pinned: Vec<PathBuf>,
+}
+
+impl KnownPaths {
+    /// The most any one list keeps.
+    pub const LIMIT: usize = 32;
+
+    pub fn list(&self, kind: KnownKind) -> &[PathBuf] {
+        match kind {
+            KnownKind::Fallout1 => &self.fallout1,
+            KnownKind::Fallout2 => &self.fallout2,
+            KnownKind::Mods => &self.mods,
+            KnownKind::Pinned => &self.pinned,
+        }
+    }
+
+    fn list_mut(&mut self, kind: KnownKind) -> &mut Vec<PathBuf> {
+        match kind {
+            KnownKind::Fallout1 => &mut self.fallout1,
+            KnownKind::Fallout2 => &mut self.fallout2,
+            KnownKind::Mods => &mut self.mods,
+            KnownKind::Pinned => &mut self.pinned,
+        }
+    }
+
+    /// Put `path` first in its list, once. Whether the list changed.
+    pub fn remember(&mut self, kind: KnownKind, path: &Path) -> bool {
+        let list = self.list_mut(kind);
+        if list.first().is_some_and(|first| first == path) {
+            return false;
+        }
+        list.retain(|known| known != path);
+        list.insert(0, path.to_path_buf());
+        list.truncate(Self::LIMIT);
+        true
+    }
+
+    /// Drop `path` from its list. Whether it was there.
+    pub fn forget(&mut self, kind: KnownKind, path: &Path) -> bool {
+        let list = self.list_mut(kind);
+        let before = list.len();
+        list.retain(|known| known != path);
+        list.len() != before
+    }
+}
+
+/// `[profiles.<name>]` for a name that is no edition's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CustomProfile {
+    pub name: String,
+    pub edition: GameProfile,
+    /// Empty while it is the active scope: see [`Config::mod_list`].
+    pub scope: ProfileScope,
+}
+
+/// The Et Tu profile's name, which `--profile` and the desktop menu use.
+pub const ETTU_PROFILE: &str = "ettu";
+
+/// A custom profile's name: a table name, and a folder name on any host.
+fn valid_profile_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
 /// One value for each game.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PerGame<T> {
@@ -274,9 +507,15 @@ pub struct Config {
     pub critter_dat: Option<PathBuf>,
     /// The loose data directory both databases consult first.
     pub data_root: Option<PathBuf>,
+    /// The active scope's mod list: its table's, read up as the active
+    /// game's paths are, and put back by [`Config::switch_game`]. A launch
+    /// reads this field, so it can only see the game it runs.
     pub mod_list: Option<ModList>,
     /// The game whose data this is; only Fallout 1 runs today.
     pub game: Option<GameProfile>,
+    /// `profile`: the custom profile its edition runs under, kept as
+    /// written. An edition's own name selects no custom profile.
+    pub profile: Option<String>,
     pub preset: Option<Preset>,
     pub scaling: Option<ScalingMode>,
     pub fullscreen: Option<bool>,
@@ -301,7 +540,7 @@ pub struct Config {
     /// a rewrite keeps the file's own line, and nothing the engine chose
     /// (such as `--render-path`) is ever written here, logged or saved.
     pub render_path: Option<RenderPath>,
-    /// `sfall` under `[scripting]` (SPEC-024b §3.1): opt-in sfall mode.
+    /// The active scope's `sfall` (SPEC-024b §3.1), like [`Self::mod_list`].
     pub sfall: Option<bool>,
     /// SPEC-020 §2.4: the edition a player last chose, kept as written, so
     /// that any other text counts as no choice.
@@ -315,6 +554,117 @@ pub struct Config {
     /// game's are the top-level fields, so its entry here stays empty;
     /// [`Config::switch_game`] moves them between the two.
     pub profiles: PerGame<GamePaths>,
+    /// Each edition's own `sfall` and `mod_list`. The active scope's are the
+    /// top-level fields, so its entry stays empty, as in [`Self::profiles`].
+    pub scopes: PerGame<ProfileScope>,
+    pub custom_profiles: Vec<CustomProfile>,
+    /// The active scope's data folder, like [`Self::mod_list`].
+    pub install_dir: Option<PathBuf>,
+    /// The active scope's linked folders, like [`Self::mod_list`].
+    pub secondary_dat_dirs: Vec<PathBuf>,
+    /// The active scope's Enhanced settings, like [`Self::mod_list`]. What a
+    /// launch reads is the top-level fields with these over them
+    /// ([`Self::scoped_to`]).
+    pub enhanced: EnhancedProfile,
+    pub custom_presets: Vec<CustomPreset>,
+    pub known_paths: KnownPaths,
+    /// The tables this engine does not know, each as its text: ignored, but
+    /// kept so that a full rewrite does not lose them either.
+    pub unknown_tables: Vec<String>,
+}
+
+/// A table of the settings file, as the parser walks it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Table {
+    Top,
+    Scripting,
+    Edition(GameProfile),
+    /// An index into [`Config::custom_profiles`].
+    Custom(usize),
+    /// An index into [`Config::custom_presets`].
+    CustomPreset(usize),
+    KnownPaths,
+    Unknown,
+}
+
+/// The name of a table that `line` opens, `[[array]]` or `[plain]`, with an
+/// optional comment after it. Inside an unknown table only such a line ends
+/// the table: its other lines need not be this subset's.
+fn table_name(line: &str) -> Option<&str> {
+    let (open, close) = if line.starts_with("[[") {
+        ("[[", "]]")
+    } else {
+        ("[", "]")
+    };
+    let (name, rest) = line.strip_prefix(open)?.split_once(close)?;
+    let rest = rest.trim_start();
+    let name = name.trim();
+    let plain = |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.');
+    (!name.is_empty() && name.bytes().all(plain) && (rest.is_empty() || rest.starts_with('#')))
+        .then_some(name)
+}
+
+/// Whether the engine reads a table of this name.
+fn known_table(name: &str) -> bool {
+    name == "scripting"
+        || name == "profiles"
+        || name == "known_paths"
+        || name.starts_with("profiles.")
+        || name.starts_with("presets.")
+}
+
+/// `key`'s array of paths.
+fn path_list(key: &str, value: &Value) -> Result<Vec<PathBuf>, String> {
+    match value {
+        Value::Array(paths) => Ok(paths.iter().map(Into::into).collect()),
+        _ => Err(format!("`{key}` expects an array of paths")),
+    }
+}
+
+/// Read `key = value` of a `[profiles.*]` table into `scope`; `false` when
+/// the key is no scoped setting.
+fn assign_scoped(scope: &mut ProfileScope, key: &str, value: &Value) -> Result<bool, String> {
+    let duplicate = || format!("duplicate key `{key}`");
+    match key {
+        "sfall" => {
+            if scope.sfall.is_some() {
+                return Err(duplicate());
+            }
+            match value {
+                Value::Bool(flag) => scope.sfall = Some(*flag),
+                _ => return Err("`sfall` expects true or false".into()),
+            }
+        }
+        "mod_list" | "load_order" => {
+            if scope.mod_list.is_some() {
+                return Err(duplicate());
+            }
+            scope.mod_list = Some(parse_mod_list(key, value.clone())?);
+        }
+        "install_dir" => {
+            if scope.install_dir.is_some() {
+                return Err(duplicate());
+            }
+            match value {
+                Value::String(path) => scope.install_dir = Some(path.into()),
+                _ => return Err("`install_dir` expects a path".into()),
+            }
+        }
+        "secondary_dat_dirs" => scope.secondary_dat_dirs = path_list(key, value)?,
+        _ => return scope.enhanced.assign(key, value),
+    }
+    Ok(true)
+}
+
+/// `mod_list`'s value.
+fn parse_mod_list(key: &str, value: Value) -> Result<ModList, String> {
+    match value {
+        Value::Array(paths) => Ok(ModList::Paths(paths.into_iter().map(Into::into).collect())),
+        Value::String(path) => Ok(ModList::File(path.into())),
+        Value::Bool(_) | Value::Integer(_) | Value::Float(_) => {
+            Err(format!("`{key}` expects an array of paths or a path"))
+        }
+    }
 }
 
 /// A malformed line of the settings file.
@@ -337,11 +687,13 @@ impl Config {
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
         let mut config = Self::default();
         let mut seen: Vec<&'static str> = Vec::new();
-        // The profile table being read, and the tables read.
-        let mut table: Option<GameProfile> = None;
+        // The table being read, and the tables read.
+        let mut table = Table::Top;
         let mut tables: Vec<GameProfile> = Vec::new();
         let mut scripting = false;
-        let mut in_scripting = false;
+        // Each custom profile's header line, and whether it named `edition`.
+        let mut custom: Vec<(usize, bool)> = Vec::new();
+        let mut profile_line = 0;
         for (index, raw) in text.lines().enumerate() {
             let line = index + 1;
             let error = |message: String| ConfigError { line, message };
@@ -351,10 +703,23 @@ impl Config {
                 raw
             };
             let trimmed = raw.trim();
+            if table == Table::Unknown && table_name(trimmed).is_none() {
+                if let Some(kept) = config.unknown_tables.last_mut() {
+                    kept.push_str(raw);
+                    kept.push('\n');
+                }
+                continue;
+            }
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
             if let Some(header) = trimmed.strip_prefix('[') {
+                if let Some(name) = table_name(trimmed).filter(|name| !known_table(name)) {
+                    tracing::debug!(table = name, "unknown settings table kept");
+                    config.unknown_tables.push(format!("{raw}\n"));
+                    table = Table::Unknown;
+                    continue;
+                }
                 let (name, rest) = header
                     .split_once(']')
                     .ok_or_else(|| error("unterminated table header".into()))?;
@@ -368,25 +733,59 @@ impl Config {
                         return Err(error(format!("duplicate table `[{name}]`")));
                     }
                     scripting = true;
-                    in_scripting = true;
-                    table = None;
+                    table = Table::Scripting;
                     continue;
                 }
-                in_scripting = false;
-                let game = name
-                    .strip_prefix("profiles.")
-                    .and_then(parse_game)
-                    .ok_or_else(|| {
-                        error(format!(
-                            "unsupported table `[{name}]` (only [profiles.fallout1], \
-                             [profiles.fallout2] and [scripting])"
-                        ))
-                    })?;
-                if tables.contains(&game) {
+                if name == "known_paths" {
+                    table = Table::KnownPaths;
+                    continue;
+                }
+                if let Some(preset) = name.strip_prefix("presets.") {
+                    if !valid_profile_name(preset) {
+                        return Err(error(format!("invalid preset name `{preset}`")));
+                    }
+                    if config.custom_presets.iter().any(|it| it.name == preset) {
+                        return Err(error(format!("duplicate table `[{name}]`")));
+                    }
+                    table = Table::CustomPreset(config.custom_presets.len());
+                    config.custom_presets.push(CustomPreset {
+                        name: preset.to_owned(),
+                        settings: EnhancedProfile::default(),
+                    });
+                    continue;
+                }
+                let unsupported = || {
+                    error(format!(
+                        "unsupported table `[{name}]` (a profile is [profiles.fallout1], \
+                         [profiles.fallout2] or [profiles.<name>] of letters, digits, `-` and `_`)"
+                    ))
+                };
+                let profile = name.strip_prefix("profiles.").ok_or_else(unsupported)?;
+                if let Some(game) = parse_game(profile) {
+                    if tables.contains(&game) {
+                        return Err(error(format!("duplicate table `[{name}]`")));
+                    }
+                    tables.push(game);
+                    table = Table::Edition(game);
+                    continue;
+                }
+                if !valid_profile_name(profile) {
+                    return Err(unsupported());
+                }
+                if config
+                    .custom_profiles
+                    .iter()
+                    .any(|other| other.name == profile)
+                {
                     return Err(error(format!("duplicate table `[{name}]`")));
                 }
-                tables.push(game);
-                table = Some(game);
+                table = Table::Custom(config.custom_profiles.len());
+                config.custom_profiles.push(CustomProfile {
+                    name: profile.to_owned(),
+                    edition: GameProfile::default(),
+                    scope: ProfileScope::default(),
+                });
+                custom.push((line, false));
                 continue;
             }
             let (key, rest) = trimmed
@@ -405,65 +804,175 @@ impl Config {
             if !(rest.is_empty() || rest.starts_with('#')) {
                 return Err(error(format!("unexpected `{rest}` after the value")));
             }
-            if in_scripting {
-                if key != "sfall" {
-                    return Err(error(format!("`{key}` is not a scripting setting (sfall)")));
+            match table {
+                Table::Unknown => {}
+                Table::KnownPaths => {
+                    let paths = path_list(key, &value).map_err(error)?;
+                    let known = &mut config.known_paths;
+                    match key {
+                        "fallout1" => known.fallout1 = paths,
+                        "fallout2" => known.fallout2 = paths,
+                        "mods" => known.mods = paths,
+                        "pinned" => known.pinned = paths,
+                        _ => {
+                            return Err(error(format!(
+                                "`{key}` is not a known_paths list (fallout1, fallout2, mods \
+                                 or pinned)"
+                            )));
+                        }
+                    }
                 }
-                if config.sfall.is_some() {
-                    return Err(error(format!("duplicate key `{key}`")));
+                Table::CustomPreset(at) => {
+                    let settings = &mut config.custom_presets[at].settings;
+                    if !settings.assign(key, &value).map_err(error)? {
+                        return Err(error(format!("`{key}` is not a preset setting")));
+                    }
                 }
-                match value {
-                    Value::Bool(flag) => config.sfall = Some(flag),
-                    _ => return Err(error("`sfall` expects true or false".into())),
+                Table::Scripting => {
+                    if key != "sfall" {
+                        return Err(error(format!("`{key}` is not a scripting setting (sfall)")));
+                    }
+                    if config.sfall.is_some() {
+                        return Err(error(format!("duplicate key `{key}`")));
+                    }
+                    match value {
+                        Value::Bool(flag) => config.sfall = Some(flag),
+                        _ => return Err(error("`sfall` expects true or false".into())),
+                    }
                 }
-                continue;
+                Table::Custom(at) => {
+                    let (_, named) = &mut custom[at];
+                    if key == "edition" {
+                        if *named {
+                            return Err(error(format!("duplicate key `{key}`")));
+                        }
+                        let edition = match &value {
+                            Value::String(text) => parse_game(text),
+                            _ => None,
+                        };
+                        config.custom_profiles[at].edition = edition.ok_or_else(|| {
+                            error("`edition` is \"fallout1\" or \"fallout2\"".into())
+                        })?;
+                        *named = true;
+                    } else if !assign_scoped(&mut config.custom_profiles[at].scope, key, &value)
+                        .map_err(error)?
+                    {
+                        return Err(error(format!(
+                            "`{key}` is not a custom profile setting (edition, sfall, \
+                             mod_list, install_dir, secondary_dat_dirs or an Enhanced \
+                             setting)"
+                        )));
+                    }
+                }
+                Table::Edition(game) => {
+                    if assign_scoped(config.scopes.get_mut(game), key, &value).map_err(error)? {
+                        continue;
+                    }
+                    let paths = config.profiles.get_mut(game);
+                    let (_, slot) = paths
+                        .entries_mut()
+                        .into_iter()
+                        .find(|(name, _)| *name == key)
+                        .ok_or_else(|| {
+                            error(format!(
+                                "`{key}` is not a profile setting (master_dat, critter_dat, \
+                                 data_root, sfall, mod_list, install_dir, secondary_dat_dirs \
+                                 or an Enhanced setting)"
+                            ))
+                        })?;
+                    if slot.is_some() {
+                        return Err(error(format!("duplicate key `{key}`")));
+                    }
+                    match value {
+                        Value::String(text) => *slot = Some(text.into()),
+                        _ => return Err(error(format!("`{key}` expects a string"))),
+                    }
+                }
+                Table::Top => {
+                    let canonical = match key {
+                        "load_order" => "mod_list",
+                        other => KNOWN
+                            .iter()
+                            .copied()
+                            .find(|known| *known == other)
+                            .unwrap_or(""),
+                    };
+                    if !canonical.is_empty() {
+                        if seen.contains(&canonical) {
+                            return Err(error(format!("duplicate key `{key}`")));
+                        }
+                        seen.push(canonical);
+                    } else if config.unknown.iter().any(|(name, _)| name == key) {
+                        return Err(error(format!("duplicate key `{key}`")));
+                    }
+                    if canonical == "profile" {
+                        profile_line = line;
+                    }
+                    config.assign(canonical, key, value).map_err(error)?;
+                }
             }
-            if let Some(game) = table {
-                let paths = config.profiles.get_mut(game);
-                let (_, slot) = paths
-                    .entries_mut()
-                    .into_iter()
-                    .find(|(name, _)| *name == key)
-                    .ok_or_else(|| {
-                        error(format!(
-                            "`{key}` is not a profile setting (master_dat, critter_dat or \
-                             data_root)"
-                        ))
-                    })?;
-                if slot.is_some() {
-                    return Err(error(format!("duplicate key `{key}`")));
-                }
-                match value {
-                    Value::String(text) => *slot = Some(text.into()),
-                    _ => return Err(error(format!("`{key}` expects a string"))),
-                }
-                continue;
-            }
-            let canonical = match key {
-                "load_order" => "mod_list",
-                other => KNOWN
-                    .iter()
-                    .copied()
-                    .find(|known| *known == other)
-                    .unwrap_or(""),
-            };
-            if !canonical.is_empty() {
-                if seen.contains(&canonical) {
-                    return Err(error(format!("duplicate key `{key}`")));
-                }
-                seen.push(canonical);
-            } else if config.unknown.iter().any(|(name, _)| name == key) {
-                return Err(error(format!("duplicate key `{key}`")));
-            }
-            config.assign(canonical, key, value).map_err(error)?;
         }
+        for (at, (line, named)) in custom.iter().enumerate() {
+            if !named {
+                let name = &config.custom_profiles[at].name;
+                return Err(ConfigError {
+                    line: *line,
+                    message: format!("`[profiles.{name}]` needs `edition`"),
+                });
+            }
+        }
+        if let Some(name) = &config.profile
+            && parse_game(name).is_none()
+            && !config.custom_profiles.iter().any(|it| it.name == *name)
+        {
+            return Err(ConfigError {
+                line: profile_line,
+                message: format!("`profile` names \"{name}\", which has no `[profiles.{name}]`"),
+            });
+        }
+        for kept in &mut config.unknown_tables {
+            kept.truncate(kept.trim_end().len());
+            kept.push('\n');
+        }
+        config.adopt_legacy_scope();
         // The active game's table fills the top-level paths only when they
         // name none; either way the top level holds them from here on.
         let stored = std::mem::take(config.profiles.get_mut(config.active_game()));
         if config.paths().is_empty() {
             config.set_paths(stored);
         }
+        let active = std::mem::take(config.home_mut(config.active_game()));
+        config.set_active_scope(active);
         Ok(config)
+    }
+
+    /// Give the top-level `mod_list` and `[scripting]`'s `sfall`, which the
+    /// parser left in the top-level fields, their edition: see the module's
+    /// notes. A value in that edition's table wins.
+    fn adopt_legacy_scope(&mut self) {
+        let sfall = self.sfall.take();
+        let mod_list = self.mod_list.take();
+        let list_game = if sfall == Some(true) {
+            GameProfile::Fallout2
+        } else {
+            self.active_game()
+        };
+        let own = self.scopes.get_mut(GameProfile::Fallout2);
+        if own.sfall.is_none() {
+            own.sfall = sfall;
+        } else if sfall.is_some() {
+            tracing::warn!("`sfall` under [scripting] ignored: [profiles.fallout2] sets it");
+        }
+        let own = self.scopes.get_mut(list_game);
+        if own.mod_list.is_none() {
+            own.mod_list = mod_list;
+        } else if mod_list.is_some() {
+            let table = game_name(list_game);
+            tracing::warn!(
+                table,
+                "top-level `mod_list` ignored: its profile table sets one"
+            );
+        }
     }
 
     fn assign(&mut self, canonical: &str, key: &str, value: Value) -> Result<(), String> {
@@ -479,23 +988,14 @@ impl Config {
             "master_dat" => self.master_dat = Some(string(value)?.into()),
             "critter_dat" => self.critter_dat = Some(string(value)?.into()),
             "data_root" => self.data_root = Some(string(value)?.into()),
-            "mod_list" => {
-                self.mod_list = Some(match value {
-                    Value::Array(paths) => {
-                        ModList::Paths(paths.into_iter().map(Into::into).collect())
-                    }
-                    Value::String(path) => ModList::File(path.into()),
-                    Value::Bool(_) | Value::Integer(_) | Value::Float(_) => {
-                        return Err(format!("`{key}` expects an array of paths or a path"));
-                    }
-                })
-            }
+            "mod_list" => self.mod_list = Some(parse_mod_list(key, value)?),
             "game" => {
                 let text = string(value)?;
                 self.game = Some(parse_game(&text).ok_or_else(|| {
                     format!("`game` is \"fallout1\" or \"fallout2\", not \"{text}\"")
                 })?);
             }
+            "profile" => self.profile = Some(string(value)?),
             "preset" => {
                 let text = string(value)?;
                 self.preset = Some(Preset::parse(&text).ok_or_else(|| {
@@ -582,12 +1082,12 @@ impl Config {
         Ok(())
     }
 
-    /// The file text: the known keys in a fixed order, then the unknown
-    /// ones, then each game's profile table that names a path (the active
-    /// game's repeating the top-level paths). A path that is not valid
-    /// UTF-8 cannot be written.
-    pub fn to_toml(&self) -> std::io::Result<String> {
-        let mut out = String::from("# Vault Engine launcher settings.\n");
+    /// Every `key = value` of the file, in the order a new file writes them:
+    /// the known keys, then the unknown ones, then each game's profile table
+    /// that names anything (the active game's repeating the top-level paths),
+    /// then each custom profile's. A path that is not valid UTF-8 cannot be
+    /// written.
+    fn entries(&self) -> std::io::Result<Vec<Entry>> {
         let path = |path: &Path| {
             path.to_str().map(quote).ok_or_else(|| {
                 std::io::Error::new(
@@ -596,28 +1096,41 @@ impl Config {
                 )
             })
         };
-        let mut tables = String::new();
-        if let Some(sfall) = self.sfall {
-            tables.push_str(&format!("\n[scripting]\nsfall = {sfall}\n"));
-        }
-        for game in GAMES {
-            let paths = self.profile(game);
-            if paths.is_empty() {
-                continue;
-            }
-            tables.push_str(&format!("\n[profiles.{}]\n", game_name(game)));
-            for (key, value) in paths.entries() {
-                if let Some(value) = value {
-                    tables.push_str(&format!("{key} = {}\n", path(value)?));
-                }
-            }
-        }
-        let mut line = |key: &str, value: String| {
-            out.push_str(key);
-            out.push_str(" = ");
-            out.push_str(&value);
-            out.push('\n');
+        let paths_text = |paths: &[PathBuf]| {
+            let items = paths
+                .iter()
+                .map(|item| path(item))
+                .collect::<std::io::Result<Vec<_>>>()?;
+            Ok::<String, std::io::Error>(format!("[{}]", items.join(", ")))
         };
+        let scoped = |table: &str, scope: &ProfileScope, list: &mut Vec<Entry>| {
+            if let Some(sfall) = scope.sfall {
+                list.push(Entry::new(table, "sfall", sfall.to_string()));
+            }
+            let text = match &scope.mod_list {
+                Some(ModList::Paths(paths)) => {
+                    let items = paths
+                        .iter()
+                        .map(|item| path(item))
+                        .collect::<std::io::Result<Vec<_>>>()?;
+                    Some(format!("[{}]", items.join(", ")))
+                }
+                Some(ModList::File(file)) => Some(path(file)?),
+                None => None,
+            };
+            list.extend(text.map(|text| Entry::new(table, "mod_list", text)));
+            if let Some(dir) = &scope.install_dir {
+                list.push(Entry::new(table, "install_dir", path(dir)?));
+            }
+            if !scope.secondary_dat_dirs.is_empty() {
+                let text = paths_text(&scope.secondary_dat_dirs)?;
+                list.push(Entry::new(table, "secondary_dat_dirs", text));
+            }
+            scope.enhanced.entries(table, list);
+            Ok::<(), std::io::Error>(())
+        };
+        let mut list = Vec::new();
+        let mut line = |key: &str, value: String| list.push(Entry::new("", key, value));
         for (key, value) in [
             ("master_dat", &self.master_dat),
             ("critter_dat", &self.critter_dat),
@@ -627,19 +1140,11 @@ impl Config {
                 line(key, path(value)?);
             }
         }
-        match &self.mod_list {
-            Some(ModList::Paths(paths)) => {
-                let items = paths
-                    .iter()
-                    .map(|item| path(item))
-                    .collect::<std::io::Result<Vec<_>>>()?;
-                line("mod_list", format!("[{}]", items.join(", ")));
-            }
-            Some(ModList::File(file)) => line("mod_list", path(file)?),
-            None => {}
-        }
         if let Some(game) = self.game {
             line("game", quote(game_name(game)));
+        }
+        if let Some(profile) = &self.profile {
+            line("profile", quote(profile));
         }
         if let Some(preset) = self.preset {
             line("preset", quote(preset.name()));
@@ -687,26 +1192,143 @@ impl Config {
             line("hotkey_hints", quote(hints.name()));
         }
         for (key, value) in &self.unknown {
-            line(
-                key,
-                match value {
-                    Value::String(text) => quote(text),
-                    Value::Bool(flag) => flag.to_string(),
-                    Value::Integer(number) => number.to_string(),
-                    Value::Float(number) => float(*number),
-                    Value::Array(items) => format!(
-                        "[{}]",
-                        items
-                            .iter()
-                            .map(|item| quote(item))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                },
-            );
+            if !list.iter().any(|entry| entry.key == *key) {
+                list.push(Entry::new("", key, value.text()));
+            }
         }
-        out.push_str(&tables);
+        let active_custom = self.selected(self.active_game());
+        for game in GAMES {
+            let table = format!("profiles.{}", game_name(game));
+            let active = game == self.active_game() && active_custom.is_none();
+            for (key, value) in self.profile(game).entries() {
+                if let Some(value) = value {
+                    list.push(Entry::new(&table, key, path(value)?));
+                }
+            }
+            if active {
+                scoped(&table, &self.active_scope(), &mut list)?;
+            } else {
+                scoped(&table, self.scopes.get(game), &mut list)?;
+            }
+        }
+        for (at, custom) in self.custom_profiles.iter().enumerate() {
+            let table = format!("profiles.{}", custom.name);
+            let edition = quote(game_name(custom.edition));
+            list.push(Entry::new(&table, "edition", edition));
+            if active_custom == Some(at) {
+                scoped(&table, &self.active_scope(), &mut list)?;
+            } else {
+                scoped(&table, &custom.scope, &mut list)?;
+            }
+        }
+        for preset in &self.custom_presets {
+            let table = format!("presets.{}", preset.name);
+            preset.settings.entries(&table, &mut list);
+        }
+        let known = &self.known_paths;
+        for (key, paths) in [
+            ("fallout1", &known.fallout1),
+            ("fallout2", &known.fallout2),
+            ("mods", &known.mods),
+            ("pinned", &known.pinned),
+        ] {
+            if !paths.is_empty() {
+                list.push(Entry::new("known_paths", key, paths_text(paths)?));
+            }
+        }
+        Ok(list)
+    }
+
+    /// The text of a new file: [`Self::entries`], then the unknown tables.
+    pub fn to_toml(&self) -> std::io::Result<String> {
+        let mut out = String::from("# Vault Engine launcher settings.\n");
+        let entries = self.entries()?;
+        let mut table = "";
+        for entry in &entries {
+            if entry.table != table {
+                table = &entry.table;
+                out.push_str(&format!("\n[{table}]\n"));
+            }
+            out.push_str(&format!("{} = {}\n", entry.key, entry.value));
+        }
+        for kept in &self.unknown_tables {
+            out.push('\n');
+            out.push_str(kept);
+        }
         Ok(out)
+    }
+
+    /// `text`, a file this engine can read, with this configuration's
+    /// differences from it edited in place. `None` for text that does not
+    /// parse, or if the edit would not read back as this configuration.
+    fn merged_text(&self, text: &str, base: &Path) -> std::io::Result<Option<String>> {
+        let Ok(old) = Self::parse(text) else {
+            return Ok(None);
+        };
+        let old = old.relative_to(base).relative_from(base);
+        let new = self.clone().relative_from(base);
+        let (before, after) = (old.entries()?, new.entries()?);
+        let mut lines = SettingsLines::new(text);
+        // The active game's paths sit at the top, or in its table when the
+        // file keeps none there. The other place is a repeat, or nothing,
+        // and adding one here would stop the table filling the top level.
+        let active = format!("profiles.{}", game_name(new.active_game()));
+        let at_top = PATH_KEYS.iter().any(|key| lines.find("", key).is_some());
+        for entry in &after {
+            let path_key = PATH_KEYS.contains(&entry.key.as_str());
+            let elsewhere = path_key
+                && if at_top {
+                    entry.table == active
+                } else {
+                    entry.table.is_empty()
+                };
+            match lines.find(&entry.table, &entry.key) {
+                Some(_) if before.contains(entry) => {}
+                Some(line) => lines.replace(line, &entry.value),
+                None if elsewhere => {}
+                None => lines.insert(entry),
+            }
+        }
+        for entry in &before {
+            let kept = after
+                .iter()
+                .any(|new| new.table == entry.table && new.key == entry.key);
+            let unknown =
+                entry.table.is_empty() && old.unknown.iter().any(|(k, _)| *k == entry.key);
+            if !kept
+                && !unknown
+                && let Some(line) = lines.find(&entry.table, &entry.key)
+            {
+                lines.remove(line);
+            }
+        }
+        // The keys from before scoping: their values went into a table above.
+        for (table, key) in [("", "mod_list"), ("scripting", "sfall")] {
+            if let Some(line) = lines.find(table, key) {
+                lines.remove(line);
+            }
+        }
+        let merged = lines.text();
+        let settled = |config: Self| Self {
+            unknown: Vec::new(),
+            unknown_tables: Vec::new(),
+            ..config
+        };
+        let reads_back = Self::parse(&merged)
+            .is_ok_and(|read| settled(read.relative_to(base).relative_from(base)) == settled(new));
+        Ok(reads_back.then_some(merged))
+    }
+
+    /// What goes in the file at `path`: its own text edited in place, or a
+    /// new text with the paths below its directory relative to it.
+    fn file_text(&self, path: &Path) -> std::io::Result<String> {
+        let base = path.parent().unwrap_or(Path::new(""));
+        if let Ok(Some(text)) = crate::storage::read_config_file(path)
+            && let Some(merged) = self.merged_text(&text, base)?
+        {
+            return Ok(merged);
+        }
+        self.clone().relative_from(base).to_toml()
     }
 
     /// Relative paths taken relative to `base` (the file's directory).
@@ -747,21 +1369,47 @@ impl Config {
         {
             visit(path);
         }
-        match &mut self.mod_list {
-            Some(ModList::Paths(paths)) => paths.iter_mut().for_each(visit),
-            Some(ModList::File(file)) => visit(file),
-            None => {}
+        let customs = self
+            .custom_profiles
+            .iter_mut()
+            .map(|custom| &mut custom.scope);
+        let scopes = [&mut self.scopes.fallout1, &mut self.scopes.fallout2]
+            .into_iter()
+            .chain(customs);
+        for scope in scopes {
+            if let Some(dir) = &mut scope.install_dir {
+                visit(dir);
+            }
+            scope.secondary_dat_dirs.iter_mut().for_each(&mut visit);
+        }
+        if let Some(dir) = &mut self.install_dir {
+            visit(dir);
+        }
+        self.secondary_dat_dirs.iter_mut().for_each(&mut visit);
+        for list in [
+            &mut self.mod_list,
+            &mut self.scopes.fallout1.mod_list,
+            &mut self.scopes.fallout2.mod_list,
+        ]
+        .into_iter()
+        .chain(
+            self.custom_profiles
+                .iter_mut()
+                .map(|custom| &mut custom.scope.mod_list),
+        ) {
+            match list {
+                Some(ModList::Paths(paths)) => paths.iter_mut().for_each(&mut visit),
+                Some(ModList::File(file)) => visit(file),
+                None => {}
+            }
         }
     }
 
-    /// Write the settings to `path`, replacing any file there; paths below
-    /// its directory are written relative to it, and unknown keys are kept.
+    /// Write the settings to `path`, editing any file there in place; paths
+    /// below its directory are written relative to it.
     pub fn save(&self, path: &Path) -> crate::AppResult<()> {
-        let base = path.parent().unwrap_or(Path::new(""));
         let text = self
-            .clone()
-            .relative_from(base)
-            .to_toml()
+            .file_text(path)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         write_replacing(path, text.as_bytes())
     }
@@ -772,14 +1420,10 @@ impl Config {
     pub fn commit(&self, path: &Path) -> Result<(), String> {
         use crate::storage::{Namespace, StorageBackend, StorageOp};
         let failed = |error: &dyn fmt::Display| format!("{}: {error}", path.display());
-        let base = path.parent().unwrap_or(Path::new(""));
-        let text = self
-            .clone()
-            .relative_from(base)
-            .to_toml()
-            .map_err(|error| failed(&error))?;
+        let text = self.file_text(path).map_err(|error| failed(&error))?;
         let (storage, key) =
             crate::storage::config_file(path).ok_or_else(|| failed(&"not a settings file"))?;
+        prepare_folder(path.parent().unwrap_or(Path::new("")));
         storage
             .commit(Namespace::Config, &[StorageOp::put(key, text.as_bytes())])
             .map_err(|error| failed(&error))
@@ -801,6 +1445,10 @@ impl Config {
         for (key, _) in &config.unknown {
             tracing::warn!(file = %path.display(), key, "unknown setting ignored");
         }
+        for table in &config.unknown_tables {
+            let table = table.lines().next().unwrap_or_default();
+            tracing::warn!(file = %path.display(), table, "unknown table ignored");
+        }
         let base = path.parent().unwrap_or(Path::new(""));
         Ok(config.relative_to(base))
     }
@@ -816,6 +1464,7 @@ impl Config {
             roof_peek: self.roof_peek.unwrap_or(default.roof_peek),
             ui_scale: self.ui_scale.map_or(default.ui_scale, UiScale::factor),
             navigation_only: false,
+            tactical_overlay: self.enhanced.tactical_overlay,
         }
     }
 
@@ -875,6 +1524,11 @@ impl Config {
     /// paths when it has none (a file from before profiles, launched with
     /// `--game-profile`).
     pub fn launch_paths(&self, game: GameProfile) -> GamePaths {
+        if let Some(dir) = self.scope(game).install_dir
+            && let Some(found) = discover_game(std::slice::from_ref(&dir), game)
+        {
+            return found;
+        }
         let paths = self.profile(game);
         if paths.is_empty() {
             self.paths()
@@ -883,26 +1537,337 @@ impl Config {
         }
     }
 
-    /// Make `game` the active game: the top-level paths are kept as the
-    /// old game's profile, and `game`'s profile becomes the top-level
-    /// paths (none when it has none yet).
+    /// The custom profile `game` runs under, by its place in
+    /// [`Self::custom_profiles`].
+    fn selected(&self, game: GameProfile) -> Option<usize> {
+        let name = self.profile.as_deref()?;
+        self.custom_profiles
+            .iter()
+            .position(|custom| custom.name == name && custom.edition == game)
+    }
+
+    /// Where `game`'s scope is kept while it is not the active one.
+    fn home_mut(&mut self, game: GameProfile) -> &mut ProfileScope {
+        match self.selected(game) {
+            Some(at) => &mut self.custom_profiles[at].scope,
+            None => self.scopes.get_mut(game),
+        }
+    }
+
+    fn active_scope(&self) -> ProfileScope {
+        ProfileScope {
+            sfall: self.sfall,
+            mod_list: self.mod_list.clone(),
+            install_dir: self.install_dir.clone(),
+            secondary_dat_dirs: self.secondary_dat_dirs.clone(),
+            enhanced: self.enhanced,
+        }
+    }
+
+    fn set_active_scope(&mut self, scope: ProfileScope) {
+        self.sfall = scope.sfall;
+        self.mod_list = scope.mod_list;
+        self.install_dir = scope.install_dir;
+        self.secondary_dat_dirs = scope.secondary_dat_dirs;
+        self.enhanced = scope.enhanced;
+    }
+
+    /// The profiles a player can choose, as (name, edition): both editions,
+    /// then the custom ones.
+    pub fn profile_names(&self) -> Vec<(String, GameProfile)> {
+        GAMES
+            .iter()
+            .map(|game| (game_name(*game).to_owned(), *game))
+            .chain(
+                self.custom_profiles
+                    .iter()
+                    .map(|custom| (custom.name.clone(), custom.edition)),
+            )
+            .collect()
+    }
+
+    /// The profile running now: its name, as [`Self::profile_names`] gives it.
+    pub fn active_profile(&self) -> &str {
+        self.scope_name(self.active_game())
+    }
+
+    /// Make the profile `name` active, keeping the one it replaces. Whether
+    /// such a profile exists.
+    pub fn select_profile(&mut self, name: &str) -> bool {
+        let Some((_, edition)) = self
+            .profile_names()
+            .into_iter()
+            .find(|(known, _)| known == name)
+        else {
+            return false;
+        };
+        self.switch_game(edition);
+        let old = self.active_scope();
+        *self.home_mut(edition) = old;
+        self.profile = (parse_game(name).is_none()).then(|| name.to_owned());
+        let new = std::mem::take(self.home_mut(edition));
+        self.set_active_scope(new);
+        true
+    }
+
+    /// Add an empty custom profile of `edition`.
+    pub fn add_custom_profile(&mut self, name: &str, edition: GameProfile) -> Result<(), String> {
+        if !valid_profile_name(name) || parse_game(name).is_some() {
+            return Err(format!("`{name}` cannot name a profile"));
+        }
+        if self.custom_profiles.iter().any(|it| it.name == name) {
+            return Err(format!("a profile named `{name}` exists"));
+        }
+        self.custom_profiles.push(CustomProfile {
+            name: name.to_owned(),
+            edition,
+            scope: ProfileScope::default(),
+        });
+        Ok(())
+    }
+
+    /// Keep `settings` as the custom preset `name`, replacing one of that name.
+    pub fn save_custom_preset(
+        &mut self,
+        name: &str,
+        settings: EnhancedProfile,
+    ) -> Result<(), String> {
+        if !valid_profile_name(name) {
+            return Err(format!("`{name}` cannot name a preset"));
+        }
+        match self.custom_presets.iter_mut().find(|it| it.name == name) {
+            Some(preset) => preset.settings = settings,
+            None => self.custom_presets.push(CustomPreset {
+                name: name.to_owned(),
+                settings,
+            }),
+        }
+        Ok(())
+    }
+
+    /// The profile `name`'s edition and Enhanced settings.
+    pub fn profile_enhanced(&self, name: &str) -> Option<(GameProfile, EnhancedProfile)> {
+        if self.active_profile() == name {
+            return Some((self.active_game(), self.enhanced));
+        }
+        if let Some(game) = parse_game(name) {
+            return Some((game, self.scopes.get(game).enhanced));
+        }
+        self.custom_profiles
+            .iter()
+            .find(|it| it.name == name)
+            .map(|custom| (custom.edition, custom.scope.enhanced))
+    }
+
+    /// The top-level settings with the active scope's Enhanced ones over them.
+    fn overlay_enhanced(&mut self) {
+        let own = self.enhanced;
+        self.preset = own.preset.or(self.preset);
+        self.viewport_mode = own.viewport_mode.or(self.viewport_mode);
+        self.default_zoom = own.default_zoom.or(self.default_zoom);
+        self.smooth_camera = own.smooth_camera.or(self.smooth_camera);
+        self.roof_peek = own.roof_peek.or(self.roof_peek);
+        self.ui_scale = own.ui_scale.or(self.ui_scale);
+        self.game_speed = own.game_speed.or(self.game_speed);
+    }
+
+    /// The `sfall` and `mod_list` a launch of `game` reads.
+    pub fn scope(&self, game: GameProfile) -> ProfileScope {
+        if game == self.active_game() {
+            return self.active_scope();
+        }
+        match self.selected(game) {
+            Some(at) => self.custom_profiles[at].scope.clone(),
+            None => self.scopes.get(game).clone(),
+        }
+    }
+
+    /// The name `game` runs under: its custom profile's, else its own. Its
+    /// saves live in a folder of this name.
+    pub fn scope_name(&self, game: GameProfile) -> &str {
+        match self.selected(game) {
+            Some(at) => &self.custom_profiles[at].name,
+            None => game_name(game),
+        }
+    }
+
+    /// These settings as a launch of `game` reads them: `game` active, on its
+    /// [`Self::launch_paths`], with its own scope. Nothing here changes.
+    pub fn scoped_to(&self, game: GameProfile) -> Self {
+        let mut scoped = self.clone();
+        scoped.choose_game(game, self.launch_paths(game));
+        scoped.overlay_enhanced();
+        scoped
+    }
+
+    /// Make `game` the active game: the top-level paths, `sfall` and
+    /// `mod_list` are kept as the old game's, and `game`'s become the
+    /// top-level ones (none when it has none yet).
     pub fn switch_game(&mut self, game: GameProfile) {
         let active = self.active_game();
         if game != active {
             *self.profiles.get_mut(active) = self.paths();
             let paths = std::mem::take(self.profiles.get_mut(game));
             self.set_paths(paths);
+            let old = self.active_scope();
+            *self.home_mut(active) = old;
+            let new = std::mem::take(self.home_mut(game));
+            self.set_active_scope(new);
         }
         self.game = Some(game);
     }
 }
 
-const KNOWN: [&str; 21] = [
+/// One `key = value` of the file; `table` is empty at the top.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Entry {
+    table: String,
+    key: String,
+    value: String,
+}
+
+impl Entry {
+    fn new(table: &str, key: &str, value: String) -> Self {
+        Self {
+            table: table.to_owned(),
+            key: key.to_owned(),
+            value,
+        }
+    }
+}
+
+/// The path keys a game keeps at the top and in its table.
+const PATH_KEYS: [&str; 3] = ["master_dat", "critter_dat", "data_root"];
+
+/// The lines of a settings file this engine parsed, as they stand, for
+/// editing one key at a time. A line keeps its own `\r`, and a new one takes
+/// the file's first line's ending.
+struct SettingsLines {
+    lines: Vec<String>,
+    byte_order_mark: bool,
+    crlf: bool,
+    final_newline: bool,
+}
+
+impl SettingsLines {
+    fn new(text: &str) -> Self {
+        let bare = text.strip_prefix('\u{feff}');
+        let body = bare.unwrap_or(text);
+        let mut lines: Vec<String> = body.split('\n').map(str::to_owned).collect();
+        let final_newline = body.is_empty() || body.ends_with('\n');
+        if final_newline {
+            lines.pop();
+        }
+        Self {
+            crlf: lines.first().is_some_and(|line| line.ends_with('\r')),
+            lines,
+            byte_order_mark: bare.is_some(),
+            final_newline,
+        }
+    }
+    fn text(&self) -> String {
+        let mut text = String::new();
+        if self.byte_order_mark {
+            text.push('\u{feff}');
+        }
+        text.push_str(&self.lines.join("\n"));
+        if self.final_newline && !self.lines.is_empty() {
+            text.push('\n');
+        }
+        text
+    }
+    /// Each line's table and, on a `key = value` line, its key with the alias
+    /// resolved. Blank lines, comments and an unknown table have none.
+    fn map(&self) -> Vec<Option<(String, Option<String>)>> {
+        let mut table = Some(String::new());
+        self.lines
+            .iter()
+            .map(|line| {
+                let trimmed = line.trim();
+                if let Some(name) = table_name(trimmed) {
+                    table = known_table(name).then(|| name.to_owned());
+                    return table.clone().map(|table| (table, None));
+                }
+                let key = trimmed.split_once('=').map(|(key, _)| key.trim());
+                let key = key.filter(|_| !trimmed.starts_with('#'))?;
+                let key = if key == "load_order" { "mod_list" } else { key };
+                Some((table.clone()?, Some(key.to_owned())))
+            })
+            .collect()
+    }
+    fn find(&self, table: &str, key: &str) -> Option<usize> {
+        self.map().iter().position(|line| {
+            line.as_ref()
+                .is_some_and(|(at, name)| at == table && name.as_deref() == Some(key))
+        })
+    }
+    fn added(&self, line: String) -> String {
+        if self.crlf { line + "\r" } else { line }
+    }
+    /// The line's value becomes `value`; its spacing and comment stay.
+    fn replace(&mut self, line: usize, value: &str) {
+        let text = &self.lines[line];
+        let Some(equals) = text.find('=') else {
+            return;
+        };
+        let after = &text[equals + 1..];
+        let start = text.len() - after.trim_start().len();
+        if let Ok((_, rest)) = parse_value(&text[start..]) {
+            self.lines[line] = format!("{}{value}{rest}", &text[..start]);
+        }
+    }
+    fn remove(&mut self, line: usize) {
+        self.lines.remove(line);
+    }
+    /// `entry` after the last key of its table; a new table goes at the end,
+    /// and a top-level key above the first table and the comment on it.
+    fn insert(&mut self, entry: &Entry) {
+        let line = self.added(format!("{} = {}", entry.key, entry.value));
+        let map = self.map();
+        let last = map.iter().rposition(|line| {
+            line.as_ref()
+                .is_some_and(|(table, _)| *table == entry.table)
+        });
+        if let Some(last) = last {
+            self.lines.insert(last + 1, line);
+        } else if entry.table.is_empty() {
+            let first = self
+                .lines
+                .iter()
+                .position(|line| table_name(line.trim()).is_some());
+            let mut at = first.unwrap_or(self.lines.len());
+            if first.is_some() {
+                while at > 0 && self.lines[at - 1].trim_start().starts_with('#') {
+                    at -= 1;
+                }
+            }
+            while at > 0 && self.lines[at - 1].trim().is_empty() {
+                at -= 1;
+            }
+            self.lines.insert(at, line);
+        } else {
+            if self
+                .lines
+                .last()
+                .is_some_and(|last| !last.trim().is_empty())
+            {
+                let blank = self.added(String::new());
+                self.lines.push(blank);
+            }
+            let header = self.added(format!("[{}]", entry.table));
+            self.lines.push(header);
+            self.lines.push(line);
+        }
+    }
+}
+
+const KNOWN: [&str; 22] = [
     "master_dat",
     "critter_dat",
     "data_root",
     "mod_list",
     "game",
+    "profile",
     "preset",
     "scaling",
     "fullscreen",
@@ -1109,8 +2074,8 @@ fn parse_string(text: &str) -> Result<Option<(String, &str)>, String> {
     Err("unterminated string".into())
 }
 
-/// The directories the settings file is looked up in: beside the
-/// executable, then the working directory.
+/// The directories the settings file is looked up in, and where a new one
+/// goes, in order ([`ordered_dirs`]).
 pub fn search_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(dir) = std::env::current_exe()
@@ -1124,7 +2089,34 @@ pub fn search_dirs() -> Vec<PathBuf> {
     {
         dirs.push(dir);
     }
-    dirs
+    ordered_dirs(dirs, crate::storage::user_config_root())
+}
+
+/// A settings file in a `local` folder (beside the executable, then the
+/// working directory) always wins, so an existing or portable file stays the
+/// one read and rewritten, wherever it is. With none there the platform's own
+/// folder comes first, for reading and for a new file, and the local folders
+/// are where a new file goes when it cannot.
+fn ordered_dirs(mut local: Vec<PathBuf>, platform: Option<PathBuf>) -> Vec<PathBuf> {
+    let Some(platform) = platform.filter(|dir| !local.contains(dir)) else {
+        return local;
+    };
+    if find(&local).is_some() {
+        local.push(platform);
+    } else {
+        local.insert(0, platform);
+    }
+    local
+}
+
+/// The platform's settings folder is the engine's own, so a write makes it.
+/// Any other settings folder is found, never made (SPEC-023 §3.10 rule 2).
+fn prepare_folder(dir: &Path) {
+    if crate::storage::user_config_root().as_deref() == Some(dir)
+        && let Err(error) = std::fs::create_dir_all(dir)
+    {
+        tracing::debug!(dir = %dir.display(), %error, "settings folder not made");
+    }
 }
 
 /// The first settings file in `dirs`.
@@ -1198,9 +2190,32 @@ pub fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// An entry of `dir` named `name` without regard to ASCII case, a
-/// directory or a file as asked.
-fn entry(dir: &Path, name: &str, directory: bool) -> Option<PathBuf> {
+/// Put `settings` in the table of the profile `name` of the settings file at
+/// `path`, and change nothing else: other profiles, comments and unknown keys
+/// stay, and the active profile stays active. An in-game change comes here,
+/// since it holds no `Config` of its own.
+pub fn save_profile_enhanced(
+    path: &Path,
+    name: &str,
+    settings: EnhancedProfile,
+) -> Result<(), String> {
+    let mut config = Config::load(path).map_err(|error| error.to_string())?;
+    if config.active_profile() == name {
+        config.enhanced = settings;
+    } else if let Some(game) = parse_game(name) {
+        config.scopes.get_mut(game).enhanced = settings;
+    } else if let Some(custom) = config.custom_profiles.iter_mut().find(|it| it.name == name) {
+        custom.scope.enhanced = settings;
+    } else {
+        return Err(format!("the settings have no profile named `{name}`"));
+    }
+    config.commit(path)
+}
+
+/// The entry of `dir` named `name` without regard to ASCII case: the canonical
+/// lookup, for a game's data arrives in any case. Of several, the first by
+/// name, because directory order is the file system's.
+pub fn entry_any_case(dir: &Path, name: &str, keep: impl Fn(&Path) -> bool) -> Option<PathBuf> {
     let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .flatten()
@@ -1211,17 +2226,21 @@ fn entry(dir: &Path, name: &str, directory: bool) -> Option<PathBuf> {
                 .is_some_and(|entry| entry.eq_ignore_ascii_case(name))
         })
         .map(|entry| entry.path())
-        .filter(|path| {
-            if directory {
-                path.is_dir()
-            } else {
-                path.is_file()
-            }
-        })
+        .filter(|path| keep(path))
         .collect();
-    // Directory order is the file system's: the choice must not be.
     found.sort();
     found.into_iter().next()
+}
+
+/// [`entry_any_case`], a directory or a file as asked.
+fn entry(dir: &Path, name: &str, directory: bool) -> Option<PathBuf> {
+    entry_any_case(dir, name, |path| {
+        if directory {
+            path.is_dir()
+        } else {
+            path.is_file()
+        }
+    })
 }
 
 /// Game data in the first of `dirs` holding both `MASTER.DAT` and
@@ -1271,6 +2290,7 @@ pub fn discover_games(dirs: &PerGame<Vec<PathBuf>>) -> PerGame<GamePaths> {
 /// and renamed over it, so a failed write leaves the old file whole.
 pub fn write_replacing(path: &Path, bytes: &[u8]) -> crate::AppResult<()> {
     use crate::storage::{Namespace, StorageBackend, StorageOp};
+    prepare_folder(path.parent().unwrap_or(Path::new("")));
     // SPEC-023 §3.10: one batch with one put, so a failed write leaves the
     // old file whole. A name that is no `config` key is written as it was.
     if let Some((storage, key)) = crate::storage::config_file(path) {
@@ -1308,6 +2328,7 @@ pub fn persist(config: &Config, dirs: &[PathBuf]) -> Option<PathBuf> {
     };
     for dir in dirs {
         let path = dir.join(FILE_NAME);
+        prepare_folder(dir);
         let storage = FsStorage::config_at(dir);
         let put = [StorageOp::put(FILE_NAME, text.as_bytes())];
         let written = match storage.read(Namespace::Config, FILE_NAME) {
@@ -1439,7 +2460,10 @@ future_list = []
             "{text}"
         );
         assert!(text.contains("mod_list = \"load_order.toml\"\n"), "{text}");
-        assert!(text.contains("audio = true\nnew = [\"x\"]\n"), "{text}");
+        assert!(
+            text.starts_with("audio = true\nmaster_dat = \"MASTER.DAT\"\nnew = [\"x\"]\n"),
+            "{text}"
+        );
         assert_eq!(Config::load(&path).unwrap(), config);
         // No temporary file is left behind, and a missing directory fails.
         assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
@@ -1461,7 +2485,6 @@ future_list = []
         assert_eq!(line("debug = true\nfullscreen = yes"), 2);
         assert!(message("debug = true\nfullscreen = yes").starts_with("line 2: unsupported value"));
         assert_eq!(line("\n\nmaster_dat"), 3);
-        assert_eq!(line("[section]"), 1);
         assert_eq!(line("master_dat = \"unterminated"), 1);
         assert_eq!(line("master_dat = \"C:\\Games\""), 1);
         assert!(message("master_dat = \"C:\\Games\"").contains("invalid escape"));
@@ -1518,6 +2541,7 @@ future_float = 5e-1
                 roof_peek: RoofPeek::CursorXray,
                 ui_scale: Some(2.0),
                 navigation_only: false,
+                tactical_overlay: None,
             }
         );
         // The writer keeps every key, numbers as numbers (floats with a
@@ -1747,6 +2771,109 @@ future_float = 5e-1
         );
     }
 
+    /// Wave 3's tables survive a round trip, each profile keeps its own settings,
+    /// and a launch reads the running profile's over the top level.
+    #[test]
+    fn profiles_presets_and_known_paths_round_trip() {
+        let text = concat!(
+            "game = \"fallout2\"\n",
+            "profile = \"ettu\"\n",
+            "preset = \"vanilla\"\n",
+            "# a comment that stays\n",
+            "[profiles.fallout1]\n",
+            "viewport_mode = \"fixed_640x480\"\n",
+            "[profiles.ettu]\n",
+            "edition = \"fallout2\"\n",
+            "install_dir = \"/games/ettu\"\n",
+            "secondary_dat_dirs = [\"/games/fallout1\"]\n",
+            "sfall = true\n",
+            "preset = \"enhanced\"\n",
+            "tactical_overlay = true\n",
+            "[presets.mine]\n",
+            "roof_peek = \"cursor_xray\"\n",
+            "[known_paths]\n",
+            "fallout1 = [\"/games/fallout1\"]\n",
+            "pinned = [\"/games\"]\n",
+        );
+        let config = Config::parse(text).unwrap();
+        assert_eq!(config.active_profile(), "ettu");
+        assert_eq!(
+            config.install_dir.as_deref(),
+            Some(Path::new("/games/ettu"))
+        );
+        assert_eq!(
+            config.secondary_dat_dirs,
+            [PathBuf::from("/games/fallout1")]
+        );
+        assert_eq!(config.enhanced.preset, Some(Preset::Enhanced));
+        assert_eq!(
+            config.custom_presets[0].settings.roof_peek,
+            Some(RoofPeek::CursorXray)
+        );
+        assert_eq!(config.known_paths.pinned, [PathBuf::from("/games")]);
+        let scoped = config.scoped_to(GameProfile::Fallout2);
+        assert_eq!(scoped.preset, Some(Preset::Enhanced), "the profile wins");
+        assert_eq!(scoped.enhanced_settings().tactical_overlay, Some(true));
+        let other = config.scoped_to(GameProfile::Fallout1);
+        assert_eq!(
+            other.preset,
+            Some(Preset::Vanilla),
+            "the other game keeps its own"
+        );
+        assert_eq!(other.sfall, None, "sfall stays with Et Tu");
+        let again = Config::parse(&config.to_toml().unwrap()).unwrap();
+        assert_eq!(again, config);
+    }
+
+    #[test]
+    fn selecting_a_profile_keeps_the_one_it_replaces() {
+        let mut config = Config::parse(concat!(
+            "game = \"fallout2\"\n",
+            "[profiles.fallout2]\n",
+            "sfall = true\n",
+            "[profiles.ettu]\n",
+            "edition = \"fallout2\"\n",
+        ))
+        .unwrap();
+        assert!(config.select_profile("ettu"));
+        assert_eq!(config.sfall, None);
+        config.sfall = Some(false);
+        assert!(config.select_profile("fallout1"));
+        assert_eq!(config.active_game(), GameProfile::Fallout1);
+        assert!(config.select_profile("fallout2"));
+        assert_eq!(config.sfall, Some(true), "its own table came back");
+        assert!(config.select_profile("ettu"));
+        assert_eq!(config.sfall, Some(false), "and Et Tu's");
+        assert!(!config.select_profile("gone"));
+    }
+
+    #[test]
+    fn saving_a_named_profile_leaves_the_rest_of_the_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault-engine.toml");
+        let text = concat!(
+            "game = \"fallout1\"\n",
+            "# keep me\n",
+            "[profiles.fallout2]\n",
+            "viewport_mode = \"fixed_640x480\" # and me\n",
+            "[profiles.ettu]\n",
+            "edition = \"fallout2\"\n",
+        );
+        std::fs::write(&path, text).unwrap();
+        let settings = EnhancedProfile {
+            tactical_overlay: Some(true),
+            ..EnhancedProfile::default()
+        };
+        save_profile_enhanced(&path, "ettu", settings).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("# keep me"), "{saved}");
+        assert!(saved.contains("# and me"), "{saved}");
+        let config = Config::parse(&saved).unwrap();
+        assert_eq!(config.active_game(), GameProfile::Fallout1, "still active");
+        assert_eq!(config.profile_enhanced("ettu").unwrap().1, settings);
+        assert!(save_profile_enhanced(&path, "gone", settings).is_err());
+    }
+
     #[test]
     fn discovery_finds_the_databases_in_any_case_and_saves_them_once() {
         let temp = tempfile::tempdir().unwrap();
@@ -1861,9 +2988,11 @@ future_float = 5e-1
         for (text, message) in [
             (
                 "[profiles.fallout3]",
-                "line 1: unsupported table `[profiles.fallout3]`",
+                "line 1: `[profiles.fallout3]` needs `edition`",
             ),
             ("[profiles]", "unsupported table"),
+            ("[profiles.a.b]", "unsupported table"),
+            ("[[profiles.a]]", "unexpected `]`"),
             ("[profiles.fallout1", "unterminated table header"),
             (
                 "[profiles.fallout1] x",
@@ -1996,17 +3125,553 @@ future_float = 5e-1
     }
 
     #[test]
-    fn sfall_sits_in_its_own_table_and_round_trips() {
+    fn sfall_goes_to_the_games_table_and_round_trips() {
         let config = Config::parse("game = \"fallout2\"\n[scripting]\nsfall = true\n").unwrap();
         assert_eq!(config.sfall, Some(true));
         assert_eq!(Config::parse("").unwrap().sfall, None);
         let written = config.to_toml().unwrap();
-        assert!(written.contains("[scripting]\nsfall = true\n"), "{written}");
+        assert!(
+            written.contains("[profiles.fallout2]\nsfall = true\n"),
+            "{written}"
+        );
+        assert!(!written.contains("[scripting]"), "{written}");
         assert_eq!(Config::parse(&written).unwrap().sfall, Some(true));
         let message = |text: &str| Config::parse(text).unwrap_err().to_string();
         assert!(message("[scripting]\nsfall = 1").contains("expects true or false"));
         assert!(message("[scripting]\nother = true").contains("not a scripting setting"));
         assert!(message("[scripting]\n[scripting]").contains("duplicate table"));
         assert!(message("[scripting]\nsfall = true\nsfall = false").contains("duplicate key"));
+    }
+
+    const ETTU: &str = "game = \"fallout2\"\n\n[profiles.fallout1]\nmaster_dat = \"/fo1/m.dat\"\n\n\
+                        [profiles.fallout2]\nmaster_dat = \"/fo2/m.dat\"\nsfall = true\n\
+                        mod_list = [\"/mods/ettu\"]\n";
+
+    /// The risk this scoping closes: Fallout 2's sfall and Et Tu cannot reach
+    /// a launch of Fallout 1, in either direction of a switch or a file.
+    #[test]
+    fn fallout2s_sfall_and_mods_never_reach_fallout1() {
+        use GameProfile::{Fallout1, Fallout2};
+        let ettu = Some(ModList::Paths(vec!["/mods/ettu".into()]));
+        let mut config = Config::parse(ETTU).unwrap();
+        assert_eq!((config.sfall, &config.mod_list), (Some(true), &ettu));
+        assert_eq!(config.scopes, PerGame::default(), "held at the top");
+        assert_eq!(config.scope(Fallout1), ProfileScope::default());
+        // A launch that names the other game, with nothing changed here.
+        let before = config.clone();
+        let fallout1 = config.scoped_to(Fallout1);
+        assert_eq!(config, before);
+        assert_eq!((fallout1.sfall, fallout1.mod_list.clone()), (None, None));
+        assert_eq!(fallout1.active_game(), Fallout1);
+        assert_eq!(fallout1.master_dat, Some("/fo1/m.dat".into()));
+        // A switch, through the file, and back.
+        config.switch_game(Fallout1);
+        assert_eq!((config.sfall, config.mod_list.clone()), (None, None));
+        assert_eq!(config.scope(Fallout2).sfall, Some(true));
+        assert_eq!(config.scope(Fallout2).mod_list, ettu);
+        let read = Config::parse(&config.to_toml().unwrap()).unwrap();
+        assert_eq!(read, config);
+        assert_eq!((read.sfall, read.mod_list.clone()), (None, None));
+        config.switch_game(Fallout2);
+        assert_eq!(config, before);
+        // Each game has its own list: a change to one stays there.
+        config.mod_list = Some(ModList::File("fallout2.toml".into()));
+        config.switch_game(Fallout1);
+        config.mod_list = Some(ModList::File("fallout1.toml".into()));
+        let read = Config::parse(&config.to_toml().unwrap()).unwrap();
+        assert_eq!(
+            read.scope(Fallout1).mod_list,
+            Some(ModList::File("fallout1.toml".into()))
+        );
+        assert_eq!(
+            read.scope(Fallout2).mod_list,
+            Some(ModList::File("fallout2.toml".into()))
+        );
+        // `load_order` is `mod_list` here too, and each once.
+        let table = "[profiles.fallout2]\nload_order = \"a.toml\"\nmod_list = []\n";
+        assert!(
+            Config::parse(table)
+                .unwrap_err()
+                .to_string()
+                .contains("line 3: duplicate key")
+        );
+    }
+
+    #[test]
+    fn a_custom_profile_runs_under_its_edition_and_no_other() {
+        use GameProfile::{Fallout1, Fallout2};
+        let text = "profile = \"ettu\"\ngame = \"fallout2\"\n\n[profiles.fallout2]\n\
+                    master_dat = \"/fo2/m.dat\"\nmod_list = [\"/mods/plain\"]\n\n\
+                    [profiles.ettu]\nedition = \"fallout2\"\nsfall = true\n\
+                    mod_list = \"ettu.toml\"\n\n\
+                    [profiles.other]\nedition = \"fallout2\"\nsfall = false\n";
+        let mut config = Config::parse(text).unwrap();
+        assert_eq!(config.scope_name(Fallout2), "ettu");
+        assert_eq!(config.scope_name(Fallout1), "fallout1");
+        // Its edition runs its settings, on the edition's paths.
+        assert_eq!(config.sfall, Some(true));
+        assert_eq!(config.mod_list, Some(ModList::File("ettu.toml".into())));
+        assert_eq!(config.master_dat, Some("/fo2/m.dat".into()));
+        assert_eq!(Config::parse(&config.to_toml().unwrap()).unwrap(), config);
+        // The other edition keeps its own, and it comes back after a switch.
+        config.switch_game(Fallout1);
+        assert_eq!((config.sfall, config.mod_list.clone()), (None, None));
+        assert_eq!(config.scope(Fallout2).sfall, Some(true));
+        assert_eq!(Config::parse(&config.to_toml().unwrap()).unwrap(), config);
+        config.switch_game(Fallout2);
+        assert_eq!(config, Config::parse(text).unwrap());
+        // A custom profile of the other edition is not selected here.
+        let other = text.replace(
+            "profile = \"ettu\"\ngame = \"fallout2\"",
+            "profile = \"ettu\"",
+        );
+        let other = Config::parse(&other).unwrap();
+        assert_eq!(other.active_game(), Fallout1);
+        assert_eq!(other.sfall, None);
+        assert_eq!(other.scoped_to(Fallout2).sfall, Some(true));
+        // An edition's own name selects nothing, and a table name is checked.
+        let plain = text.replace("profile = \"ettu\"", "profile = \"fallout2\"");
+        let plain = Config::parse(&plain).unwrap();
+        assert_eq!(plain.scope_name(Fallout2), "fallout2");
+        assert_eq!(
+            plain.mod_list,
+            Some(ModList::Paths(vec!["/mods/plain".into()]))
+        );
+        let error = |text: &str| Config::parse(text).unwrap_err().to_string();
+        for (text, message) in [
+            (
+                "profile = \"gone\"",
+                "line 1: `profile` names \"gone\", which has no `[profiles.gone]`",
+            ),
+            (
+                "[profiles.ettu]\nsfall = true",
+                "line 1: `[profiles.ettu]` needs `edition`",
+            ),
+            (
+                "[profiles.ettu]\nedition = \"tactics\"",
+                "line 2: `edition` is",
+            ),
+            (
+                "[profiles.ettu]\nedition = \"fallout2\"\nedition = \"fallout2\"",
+                "line 3: duplicate key",
+            ),
+            (
+                "[profiles.ettu]\nedition = \"fallout2\"\nmaster_dat = \"a\"",
+                "line 3: `master_dat` is not a custom profile setting",
+            ),
+            (
+                "[profiles.ettu]\nedition = \"fallout2\"\n[profiles.ettu]",
+                "line 3: duplicate table",
+            ),
+            (
+                "[profiles.fallout2]\nedition = \"fallout2\"",
+                "not a profile setting",
+            ),
+        ] {
+            assert!(error(text).contains(message), "{text}: {}", error(text));
+        }
+        // Relative lists follow the file, in every table.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(FILE_NAME);
+        std::fs::write(&path, text).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(
+            loaded.mod_list,
+            Some(ModList::File(temp.path().join("ettu.toml")))
+        );
+    }
+
+    /// A legacy `key`'s edition: each row is the file, then where `mod_list`
+    /// and `sfall` land.
+    #[test]
+    fn keys_from_before_scoping_are_read_by_the_rule() {
+        use GameProfile::{Fallout1, Fallout2};
+        let list = Some(ModList::Paths(vec!["/m".into()]));
+        let sfall2 = "[scripting]\nsfall = true\n";
+        for (text, list_game, sfall) in [
+            ("mod_list = [\"/m\"]\n", Fallout1, None),
+            ("load_order = [\"/m\"]\n", Fallout1, None),
+            ("game = \"fallout1\"\nmod_list = [\"/m\"]\n", Fallout1, None),
+            ("game = \"fallout2\"\nmod_list = [\"/m\"]\n", Fallout2, None),
+            // Sfall runs only under Fallout 2, whatever `game` says, and the
+            // list that stands with it goes along: this is the file a refused
+            // switch left, with `game` already moved on.
+            (
+                &format!("game = \"fallout1\"\nmod_list = [\"/m\"]\n{sfall2}"),
+                Fallout2,
+                Some(true),
+            ),
+            (
+                &format!("mod_list = [\"/m\"]\n{sfall2}"),
+                Fallout2,
+                Some(true),
+            ),
+            // With `sfall = false` it says nothing of the list.
+            (
+                "game = \"fallout1\"\nmod_list = [\"/m\"]\n[scripting]\nsfall = false\n",
+                Fallout1,
+                Some(false),
+            ),
+        ] {
+            let config = Config::parse(text).unwrap();
+            assert_eq!(config.scope(list_game).mod_list, list, "{text}");
+            let other = if list_game == Fallout1 {
+                Fallout2
+            } else {
+                Fallout1
+            };
+            assert_eq!(config.scope(other).mod_list, None, "{text}");
+            assert_eq!(config.scope(Fallout1).sfall, None, "{text}");
+            assert_eq!(config.scope(Fallout2).sfall, sfall, "{text}");
+            // A launch on the file's own game reads what it always did.
+            assert_eq!(Config::parse(&config.to_toml().unwrap()).unwrap(), config);
+        }
+        // A value in the edition's table wins.
+        let config = Config::parse(
+            "game = \"fallout2\"\nmod_list = [\"/old\"]\n[scripting]\nsfall = false\n\
+             [profiles.fallout2]\nsfall = true\nmod_list = [\"/new\"]\n",
+        )
+        .unwrap();
+        assert_eq!(config.sfall, Some(true));
+        assert_eq!(config.mod_list, Some(ModList::Paths(vec!["/new".into()])));
+    }
+
+    /// `text` at a settings path, the change made, committed, and the file.
+    fn committed(text: &str, change: impl FnOnce(&mut Config)) -> String {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(FILE_NAME);
+        std::fs::write(&path, text).unwrap();
+        let mut config = Config::load(&path).unwrap();
+        change(&mut config);
+        config.commit(&path).unwrap();
+        // A change may name a path relative to the file, as a new key would.
+        assert_eq!(
+            Config::load(&path).unwrap().relative_from(temp.path()),
+            config.relative_from(temp.path()),
+            "it reads back"
+        );
+        std::fs::read_to_string(&path).unwrap()
+    }
+
+    /// The lines of `new` that differ from `old`, position by position, with
+    /// the two the same length.
+    fn changed_lines(old: &str, new: &str) -> Vec<(String, String)> {
+        assert_eq!(old.lines().count(), new.lines().count(), "{new}");
+        old.lines()
+            .zip(new.lines())
+            .filter(|(old, new)| old != new)
+            .map(|(old, new)| (old.to_owned(), new.to_owned()))
+            .collect()
+    }
+
+    const COMMENTED: &str = r#"# My Fallout setup. Hands off, launcher.
+
+master_dat = 'MASTER.DAT'    # keep the literal quotes
+# the music is loose
+critter_dat="CRITTER.DAT"
+game = "fallout1"   # first run
+
+audio = true        # the neighbours are out
+future_key = "kept" # a key this build does not know
+preset = "vanilla"
+  scaling   =   "integer"   # odd spacing, on purpose
+
+[my_tool.options]   # another program's table
+values = { inline = "tables are not this subset" }
+list = [
+    "several",
+    "lines", # with a comment
+]
+number = 0x10
+
+[profiles.fallout2]
+# Fallout 2 lives on the other disk
+master_dat = "/mnt/games/fo2/master.dat"  # big
+critter_dat = "/mnt/games/fo2/critter.dat"
+load_order = "fo2.toml"   # spelled the old way
+sfall = true
+
+[[history]]
+at = 2026-10-31T10:00:00Z
+"#;
+
+    #[test]
+    fn a_commit_changes_only_the_edited_line() {
+        // Nothing changed: not one byte.
+        assert_eq!(committed(COMMENTED, |_| {}), COMMENTED);
+        // One value: its own line, with its comment and spacing.
+        let written = committed(COMMENTED, |config| config.audio = Some(false));
+        assert_eq!(
+            changed_lines(COMMENTED, &written),
+            [(
+                "audio = true        # the neighbours are out".to_owned(),
+                "audio = false        # the neighbours are out".to_owned(),
+            )]
+        );
+        let written = committed(COMMENTED, |config| {
+            config.scaling = Some(ScalingMode::AspectFit);
+        });
+        assert_eq!(
+            changed_lines(COMMENTED, &written),
+            [(
+                "  scaling   =   \"integer\"   # odd spacing, on purpose".to_owned(),
+                "  scaling   =   \"aspect_fit\"   # odd spacing, on purpose".to_owned(),
+            )]
+        );
+        // A value in a table, by its old spelling.
+        let written = committed(COMMENTED, |config| {
+            config.scopes.fallout2.mod_list = Some(ModList::Paths(vec!["mods/a".into()]));
+        });
+        assert_eq!(
+            changed_lines(COMMENTED, &written),
+            [(
+                "load_order = \"fo2.toml\"   # spelled the old way".to_owned(),
+                "load_order = [\"mods/a\"]   # spelled the old way".to_owned(),
+            )]
+        );
+        // A path that names the same file is no change: only the other line
+        // moves, and the literal quotes stay.
+        let written = committed(COMMENTED, |config| {
+            let master = config.master_dat.clone();
+            config.master_dat = master.map(|path| path.parent().unwrap().join("MASTER.DAT"));
+            config.debug = Some(true);
+        });
+        assert!(
+            written.contains("master_dat = 'MASTER.DAT'    # keep"),
+            "{written}"
+        );
+    }
+
+    #[test]
+    fn a_commit_adds_and_drops_keys_and_leaves_the_rest() {
+        // A new key joins the end of the top level, above the tables.
+        let written = committed(COMMENTED, |config| {
+            config.last_played = Some("fallout2".into());
+        });
+        assert_eq!(
+            written,
+            COMMENTED.replace("on purpose\n", "on purpose\nlast_played = \"fallout2\"\n")
+        );
+        // A new key in a table joins its end.
+        let written = committed(COMMENTED, |config| {
+            config.profiles.fallout2.data_root = Some("fo2/data".into());
+        });
+        assert_eq!(
+            written,
+            COMMENTED.replace("sfall = true\n", "sfall = true\ndata_root = \"fo2/data\"\n")
+        );
+        // A dropped key takes its line and no other.
+        let written = committed(COMMENTED, |config| config.audio = None);
+        assert_eq!(
+            written,
+            COMMENTED.replace("audio = true        # the neighbours are out\n", "")
+        );
+        // A table that does not exist yet goes at the end.
+        let written = committed(COMMENTED, |config| {
+            config.scopes.fallout2.sfall = None;
+            config.mod_list = Some(ModList::File("fo1.toml".into()));
+        });
+        assert!(
+            written.ends_with(
+                "at = 2026-10-31T10:00:00Z\n\n[profiles.fallout1]\nmod_list = \"fo1.toml\"\n"
+            ),
+            "{written}"
+        );
+        assert!(!written.contains("sfall"), "{written}");
+        // A file with no top-level key takes one above its first table, and
+        // the comment on that table stays on it.
+        let written = committed(
+            "# title\n\n# paths\n[profiles.fallout2]\nsfall = true\n",
+            |config| {
+                config.audio = Some(false);
+            },
+        );
+        assert_eq!(
+            written,
+            "# title\naudio = false\n\n# paths\n[profiles.fallout2]\nsfall = true\n"
+        );
+    }
+
+    #[test]
+    fn a_commit_keeps_the_files_line_endings_and_mark() {
+        let text = "\u{feff}# crlf\r\naudio = true # a\r\n\r\n[other]\r\nx = {}\r\n";
+        let written = committed(text, |config| {
+            config.audio = Some(false);
+            config.debug = Some(true);
+        });
+        assert_eq!(
+            written,
+            "\u{feff}# crlf\r\naudio = false # a\r\ndebug = true\r\n\r\n[other]\r\nx = {}\r\n"
+        );
+        // No newline at the end stays so.
+        assert_eq!(
+            committed("audio = true", |c| c.audio = Some(false)),
+            "audio = false"
+        );
+        // An empty file takes the new keys.
+        assert_eq!(committed("", |c| c.audio = Some(false)), "audio = false\n");
+    }
+
+    /// A choice commits `game` and the paths move as they must: the file's
+    /// comments stay, and what it held for the old game goes to its table.
+    #[test]
+    fn a_game_switch_keeps_both_games_paths_through_an_edit() {
+        let text = "# mine\nmaster_dat = \"fo1/m.dat\" # one\ncritter_dat = \"fo1/c.dat\"\n\
+                    game = \"fallout1\"\n";
+        let written = committed(text, |config| {
+            let paths = GamePaths {
+                master_dat: Some("fo2/m.dat".into()),
+                critter_dat: Some("fo2/c.dat".into()),
+                data_root: None,
+            };
+            config.choose_game(GameProfile::Fallout2, paths);
+        });
+        assert_eq!(
+            written,
+            "# mine\nmaster_dat = \"fo2/m.dat\" # one\ncritter_dat = \"fo2/c.dat\"\n\
+             game = \"fallout2\"\n\n[profiles.fallout1]\nmaster_dat = \"fo1/m.dat\"\n\
+             critter_dat = \"fo1/c.dat\"\n"
+        );
+        // A file that keeps its paths only in tables keeps them there.
+        let tables = "game = \"fallout1\"\n[profiles.fallout1]\nmaster_dat = \"fo1/m.dat\"\n\
+                      critter_dat = \"fo1/c.dat\"\n[profiles.fallout2]\ndata_root = \"fo2\"\n";
+        assert_eq!(committed(tables, |_| {}), tables);
+        let written = committed(tables, |config| {
+            config.data_root = Some("fo1/data".into());
+        });
+        assert_eq!(
+            written,
+            tables.replace(
+                "critter_dat = \"fo1/c.dat\"\n",
+                "critter_dat = \"fo1/c.dat\"\ndata_root = \"fo1/data\"\n"
+            )
+        );
+        let written = committed(tables, |config| {
+            config.switch_game(GameProfile::Fallout2);
+        });
+        assert_eq!(
+            written,
+            tables.replace("game = \"fallout1\"", "game = \"fallout2\"")
+        );
+    }
+
+    /// The legacy keys move once, on the first commit, comments staying, and
+    /// the file then reads the same whichever game is active.
+    #[test]
+    fn a_commit_moves_keys_from_before_scoping_into_their_table() {
+        let text = "# Et Tu setup\ngame = \"fallout2\"\n# the stack\nmod_list = \"ettu.toml\" # mine\n\
+                    audio = true\n\n[scripting]\n# needed by the mod\nsfall = true\n\n\
+                    [profiles.fallout1]\nmaster_dat = \"/fo1/m.dat\"\n";
+        let written = committed(text, |config| {
+            config.switch_game(GameProfile::Fallout1);
+        });
+        assert_eq!(
+            written,
+            "# Et Tu setup\ngame = \"fallout1\"\n# the stack\n\
+             audio = true\n\n[scripting]\n# needed by the mod\n\n\
+             [profiles.fallout1]\nmaster_dat = \"/fo1/m.dat\"\n\n\
+             [profiles.fallout2]\nsfall = true\nmod_list = \"ettu.toml\"\n"
+        );
+        let read = Config::parse(&written).unwrap();
+        assert_eq!((read.sfall, read.mod_list.clone()), (None, None));
+        assert_eq!(read.scope(GameProfile::Fallout2).sfall, Some(true));
+        // A commit with nothing changed moves them too, and the moved file
+        // is then stable.
+        let moved = committed(text, |_| {});
+        assert!(
+            !moved.contains("[scripting]\n# needed by the mod\nsfall"),
+            "{moved}"
+        );
+        assert_eq!(committed(&moved, |_| {}), moved);
+        // Without a legacy key, nothing is moved.
+        assert_eq!(committed(ETTU, |_| {}), ETTU);
+    }
+
+    #[test]
+    fn unknown_tables_and_keys_are_kept_and_ignored() {
+        let text = "audio = true\nfuture = 1\n\n[tool]\nvalue = { a = 1 }\n\n# of the next\n\
+                    [[list]]\n\"quoted key\" = 1\n[profiles.fallout2]\nsfall = true\n[z]\nend = true\n";
+        let config = Config::parse(text).unwrap();
+        assert_eq!(config.scope(GameProfile::Fallout2).sfall, Some(true));
+        assert_eq!(config.unknown, [("future".to_owned(), Value::Integer(1))]);
+        assert_eq!(
+            config.unknown_tables,
+            [
+                "[tool]\nvalue = { a = 1 }\n\n# of the next\n",
+                "[[list]]\n\"quoted key\" = 1\n",
+                "[z]\nend = true\n",
+            ]
+        );
+        // A full rewrite keeps them too.
+        assert_eq!(Config::parse(&config.to_toml().unwrap()).unwrap(), config);
+        assert_eq!(committed(text, |_| {}), text);
+        // A malformed header still fails outside such a table, and a line
+        // that only looks like one does not end it.
+        assert!(Config::parse("[a b]").is_err());
+        let inside = Config::parse("[tool]\nx = [\n  [\"a\", \"b\"],\n]\naudio = false\n").unwrap();
+        assert_eq!(inside.audio, None);
+    }
+
+    /// A file that does not parse was reported when it was read. Save writes
+    /// a whole new one over it, as it always did.
+    #[test]
+    fn a_file_that_does_not_parse_is_rewritten() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(FILE_NAME);
+        std::fs::write(&path, "# lost\naudio = [\n").unwrap();
+        let config = Config {
+            audio: Some(true),
+            ..Config::default()
+        };
+        config.commit(&path).unwrap();
+        assert_eq!(Config::load(&path).unwrap(), config);
+        std::fs::write(&path, b"audio = \xff\n").unwrap();
+        config.save(&path).unwrap();
+        assert_eq!(Config::load(&path).unwrap(), config);
+    }
+
+    /// A file an edit could not express leaves the file valid: the stale
+    /// table line would otherwise fill the top level on the next read.
+    #[test]
+    fn an_edit_that_would_not_read_back_is_a_rewrite() {
+        let text =
+            "master_dat = \"/fo1/m.dat\" # note\n[profiles.fallout1]\ncritter_dat = \"/x\"\n";
+        let written = committed(text, |config| config.master_dat = None);
+        assert!(!written.contains("critter_dat"), "{written}");
+    }
+
+    #[test]
+    fn a_local_settings_file_wins_and_the_platform_folder_comes_first_otherwise() {
+        let temp = tempfile::tempdir().unwrap();
+        let (exe, cwd, platform) = (
+            temp.path().join("exe"),
+            temp.path().join("cwd"),
+            temp.path().join("platform"),
+        );
+        for dir in [&exe, &cwd, &platform] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let local = vec![exe.clone(), cwd.clone()];
+        let ordered = || ordered_dirs(local.clone(), Some(platform.clone()));
+        // No file anywhere: a new one goes to the platform's folder.
+        assert_eq!(ordered(), [platform.clone(), exe.clone(), cwd.clone()]);
+        let config = Config::default();
+        assert_eq!(persist(&config, &ordered()), Some(platform.join(FILE_NAME)));
+        assert_eq!(find(&ordered()), Some(platform.join(FILE_NAME)));
+        // An old file in the working directory is found, first, and stays.
+        let old = cwd.join(FILE_NAME);
+        std::fs::write(&old, "audio = false\n").unwrap();
+        assert_eq!(ordered(), [exe.clone(), cwd.clone(), platform.clone()]);
+        assert_eq!(find(&ordered()), Some(old.clone()));
+        assert!(platform.join(FILE_NAME).is_file(), "nothing is moved");
+        // A folder the host cannot name, or the one already listed, adds
+        // nothing.
+        assert_eq!(ordered_dirs(local.clone(), None), local);
+        assert_eq!(ordered_dirs(local.clone(), Some(cwd.clone())), local);
+        // Saves go on to the next folder when the platform's cannot take it.
+        std::fs::remove_file(&old).unwrap();
+        std::fs::remove_file(platform.join(FILE_NAME)).unwrap();
+        std::fs::remove_dir(&platform).unwrap();
+        assert_eq!(persist(&config, &ordered()), Some(exe.join(FILE_NAME)));
     }
 }

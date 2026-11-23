@@ -1978,3 +1978,281 @@ fn spec007_a_scripted_request_lasts_only_for_the_first_turn() {
 fn player_of(host: &crate::WorldHost<TestAssets>) -> ObjectRef {
     host.world.player
 }
+
+// The Vault 13 cave rat fight: combat that a critter script starts.
+
+use crate::{
+    combat_state::NoAi,
+    fixture_state::{instruction, push},
+    test_support::{gvar, npc_prototype, program, record, request, stream},
+};
+use vault_formats::Fid;
+
+/// The gvar `use_skill_on_p_proc` counts: the skill-on stage ran.
+const STAGE: usize = 0;
+/// `dude_obj` (SPEC-005 0x80BF).
+fn dude_obj() -> Vec<u8> {
+    instruction(0x80bf)
+}
+/// `attack` (SPEC-005 0x80D0) on `target`, with accuracy 50 and damage 1-10;
+/// the final pair differs, so the request sets no special mode.
+fn attack(target: Vec<u8>) -> Vec<u8> {
+    [
+        target,
+        push(0),
+        push(0),
+        push(50),
+        push(1),
+        push(10),
+        push(0),
+        push(1),
+        instruction(0x80d0),
+    ]
+    .concat()
+}
+/// An FRM of four still frames per direction at 10 fps, each moving by
+/// `shifts[direction]`.
+fn four_frames(shifts: [[i16; 2]; 6]) -> Arc<vault_formats::FrmArchive> {
+    const FRAMES: u32 = 4;
+    let mut bytes = 4_u32.to_be_bytes().to_vec();
+    bytes.extend(10_u16.to_be_bytes());
+    bytes.extend(0_u16.to_be_bytes());
+    bytes.extend((FRAMES as u16).to_be_bytes());
+    bytes.extend([0; 24]);
+    for direction in 0..7 {
+        bytes.extend((direction * FRAMES * 13).to_be_bytes());
+    }
+    for [x, y] in shifts {
+        for _ in 0..FRAMES {
+            bytes.extend(1_u16.to_be_bytes());
+            bytes.extend(1_u16.to_be_bytes());
+            bytes.extend(1_u32.to_be_bytes());
+            bytes.extend(x.to_be_bytes());
+            bytes.extend(y.to_be_bytes());
+            bytes.push(1);
+        }
+    }
+    Arc::new(vault_formats::FrmArchive::parse(&bytes).unwrap())
+}
+/// `count` hexes from the player's 20100 in `direction`.
+fn hexes_from_player(direction: u8, count: usize) -> i32 {
+    (0..count).fold(20100, |hex, _| routing::step(hex, direction))
+}
+/// The player mid-way through a Lockpick on a chest `distance` hexes away,
+/// in real time, with a rat at some distance off the route. The rat's
+/// `critter_p_proc` attacks the player; only a tick runs it.
+struct Lockpicking {
+    host: crate::WorldHost<TestAssets>,
+    rat: ObjectRef,
+    chest: ObjectRef,
+}
+fn lockpicking(distance: usize) -> Lockpicking {
+    use crate::{host_choreography::Playback, motion::HEX_STEPS, skills::skill};
+    let mut world = world();
+    world.gvars = Some(vec![0; 4]);
+    // Only the rat's record is in the critter stream.
+    world.drop_player_script();
+    let player = world.player;
+    let rat = fighter(&mut world, hexes_from_player(4, 4), 12, 0);
+    let chest = place(
+        &mut world,
+        patched(0, 1, &[], &[]),
+        hexes_from_player(1, distance),
+    );
+    world.get_mut(chest).unwrap().raw.flags = BasicFlags(0);
+    let mut lock = world.get(chest).unwrap().lock().unwrap();
+    lock.0 |= LockFlags::LOCKED.0;
+    world.get_mut(chest).unwrap().set_lock(lock);
+    let mut assets = TestAssets::all_art()
+        .with_messages("misc.msg", b"{2000}{}{You cannot get there.}\n")
+        .with_program(
+            "rat.int",
+            program(&[
+                (b"start", Vec::new()),
+                (b"critter_p_proc", attack(dude_obj())),
+                (
+                    b"use_skill_on_p_proc",
+                    crate::test_support::count(STAGE as i32),
+                ),
+            ]),
+        );
+    // A quarter hex a frame, as the walk rules' fixture: four frames a hex.
+    let walking = HEX_STEPS.map(|[x, y]| [(x / 4) as i16, (y / 4) as i16]);
+    assets
+        .art
+        .insert(Fid::new(1, 0, 1, 0, 0).0, four_frames(walking));
+    assets
+        .art
+        .insert(Fid::new(1, 0, 11, 0, 0).0, four_frames([[0; 2]; 6]));
+    let mut host = crate::WorldHost::new(world, assets);
+    host.playback = Playback::RealTime;
+    host.combat_ai = Box::new(NoAi);
+    for (object, stream) in [(rat, 4), (chest, 3)] {
+        let script = host.world.add_script(object, 0, stream, 0).unwrap();
+        // The first request runs the initial stream, not a procedure.
+        let _ = host.dispatch(request(script, crate::ScriptEvent::Start));
+    }
+    assert!(
+        host.use_skill_on(player, chest, skill::LOCKPICK).unwrap(),
+        "accepted out of combat"
+    );
+    assert!(host.owns_motion(player));
+    host.world.effects.clear();
+    Lockpicking { host, rat, chest }
+}
+
+#[test]
+fn spec013_a_lockpick_left_alone_reaches_its_stage() {
+    // The control for the cancellation below: nothing cancels it, and the
+    // chest's `use_skill_on_p_proc` runs after the approach and the reach.
+    let Lockpicking { mut host, .. } = lockpicking(3);
+    let player = player_of(&host);
+    let mut now = 0;
+    while host.owns_motion(player) {
+        // `step_motions` plays the sequence and runs no critter script.
+        host.step_motions(now);
+        now += 100;
+        assert!(now < 10_000, "the sequence ends");
+    }
+    assert_eq!(gvar(&host, STAGE), 1);
+    assert_eq!(
+        host.world.get(player).unwrap().raw.hex,
+        Some(hexes_from_player(1, 2)),
+        "the approach ended next to the chest"
+    );
+    assert!(!host.world.combat);
+}
+
+#[test]
+fn spec013_a_script_attack_cancels_a_lockpick_in_progress() {
+    // During the approach (three hexes off, one hex walked), then during
+    // the reach itself (next to the chest, the animation under way).
+    for (distance, played_to, hex) in [
+        (3, 400, hexes_from_player(1, 1)),
+        (1, 100, hexes_from_player(1, 0)),
+    ] {
+        let Lockpicking {
+            mut host,
+            rat,
+            chest,
+        } = lockpicking(distance);
+        let player = player_of(&host);
+        let lock = host.world.get(chest).unwrap().lock();
+        host.step_motions(played_to);
+        assert_eq!(gvar(&host, STAGE), 0, "the stage follows the animation");
+        assert!(host.owns_motion(player), "distance {distance}: under way");
+        let walked = host.world.get(player).unwrap().raw.hex;
+        assert_eq!(walked, Some(hex), "distance {distance}");
+
+        // The rat's `critter_p_proc` requests combat in this tick; the
+        // request pass starts it, which stops every sequence (SPEC-007
+        // §3.3), and the rat's turn passes to the player's.
+        host.tick(played_to + 1).unwrap();
+        assert!(host.world.combat, "distance {distance}: combat started");
+        let combat = &host.world.combat_state;
+        assert_eq!(combat.list[..combat.active], [rat, player]);
+        assert!(combat.player_turn);
+        assert_eq!(host.world.get(rat).unwrap().opponent, player);
+
+        // The sequence is gone, not suspended: the player stands where the
+        // cancel found it, holds nothing, and input is not locked.
+        assert!(host.motions.is_empty() && host.running_motions.is_empty());
+        assert!(!host.moving(player) && !host.owns_motion(player));
+        assert!(!host.presenting());
+        assert_eq!(host.combat_lock.count, 0);
+        let object = &host.world.get(player).unwrap().raw;
+        assert_eq!(Fid(object.art_id).animation(), 0, "standing again");
+        assert_eq!(object.displacement, [0, 0]);
+        // SPEC-013 §3.2: the request charges no AP, and the turn starts full.
+        assert_eq!(ap(&host.world, player), host.world.maximum_ap(player));
+        // SPEC-007 §3.11.3: the forced adjacency check reports nothing when
+        // an external stop runs it; the approach did not fail.
+        let printed = host
+            .world
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, crate::WorldEffect::Message(_)));
+        assert!(!printed, "distance {distance}: no message");
+
+        // Nothing resumes: the stage never runs and the lock is untouched.
+        host.tick(played_to + 5000).unwrap();
+        assert_eq!(gvar(&host, STAGE), 0, "distance {distance}: no stage");
+        assert_eq!(host.world.get(chest).unwrap().lock(), lock);
+        assert_eq!(host.world.get(player).unwrap().raw.hex, walked);
+    }
+}
+
+#[test]
+fn spec006_an_attack_in_map_enter_p_proc_starts_combat_on_the_first_tick() {
+    let script = 0x0400_0001_u32;
+    let mut host = cave_with_a_rat(script);
+    host.combat_ai = Box::new(NoAi);
+    host.load_map("maps/cave.map").unwrap();
+
+    // SPEC-006 §3.5 step 8 ran the broadcast: the load only records the
+    // request, and no turn runs while the map loads.
+    let player = player_of(&host);
+    let rat = host.world.scripts[&script].owner;
+    let request = host.world.pending_combat.expect("the request survives");
+    assert_eq!(
+        (request.attacker, request.defender),
+        (rat, player),
+        "self attacks dude_obj"
+    );
+    assert_eq!((request.accuracy, request.damage), (50, [1, 10]));
+    assert!(!host.world.combat);
+
+    // The first tick's request pass starts combat and reaches the player.
+    host.tick(0).unwrap();
+    assert!(host.world.combat, "combat on the first tick");
+    assert!(host.world.pending_combat.is_none());
+    let combat = &host.world.combat_state;
+    assert_eq!(combat.list[..combat.active], [rat, player]);
+    assert!(combat.player_turn, "the rat's turn passed to the player");
+    assert_eq!(host.world.get(rat).unwrap().opponent, player);
+    assert_eq!(ap(&host.world, player), host.world.maximum_ap(player));
+}
+
+#[test]
+fn spec006_map_enter_combat_starts_under_the_default_ai_too() {
+    // The host's own SPEC-009 AI drives the rat, as in play.
+    let script = 0x0400_0001_u32;
+    let mut host = cave_with_a_rat(script);
+    host.load_map("maps/cave.map").unwrap();
+    let rat = host.world.scripts[&script].owner;
+    host.tick(0).unwrap();
+    assert!(host.world.combat, "combat on the first tick");
+    assert!(host.world.pending_combat.is_none());
+    let combat = &host.world.combat_state;
+    assert!(combat.list.contains(&rat));
+    assert!(combat.list.contains(&player_of(&host)));
+}
+
+/// A cave map holding one critter whose script (`script`) attacks the player
+/// from `map_enter_p_proc`.
+fn cave_with_a_rat(script: u32) -> crate::WorldHost<TestAssets> {
+    use crate::world::{empty_map, object_record};
+    use vault_formats::map::ScriptPrefix;
+    let mut map = empty_map();
+    let mut object = object_record(0x0100_0001, 1);
+    object.hex = Some(20102);
+    object.script_id = script as i32;
+    map.objects.elevations[0].push(object);
+    map.scripts[4] = stream(vec![record(script, 0, ScriptPrefix::None)]);
+    let mut assets = TestAssets {
+        any_map: Some(map),
+        ..TestAssets::default()
+    }
+    .with_program(
+        "rat.int",
+        program(&[
+            (b"start", Vec::new()),
+            (b"map_enter_p_proc", attack(dude_obj())),
+        ]),
+    );
+    assets.by_type.insert(1, npc_prototype());
+    let mut world = WorldState::new(CharacterSheet::default(), 1).unwrap();
+    world.gvars = Some(vec![0; 4]);
+    world.drop_player_script();
+    crate::WorldHost::new(world, assets)
+}

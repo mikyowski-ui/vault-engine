@@ -20,6 +20,15 @@ const MAX_DEPTH: usize = 341;
 const MAX_POPS: u8 = 8;
 /// The host words inference covers (§8.3).
 pub const GAME_WORDS: std::ops::RangeInclusive<u16> = 0x80a1..=0x8183;
+/// The fewest steps [`Image::step_budget`] gives a program.
+pub const MIN_STEPS: u64 = 250_000;
+/// The steps [`Image::step_budget`] gives per instruction. A real script
+/// takes about one, because a unit ends where the next body starts and few
+/// merges re-explore anything, so the budget grows with the code it covers.
+pub const STEPS_PER_INSTRUCTION: u64 = 16;
+/// The most steps [`Image::step_budget`] gives, however large the file. Each
+/// step costs time, and may record a whole model stack, so this bounds both.
+pub const MAX_STEPS: u64 = 1_000_000;
 
 /// A unit (§8.2): its start address, entry depth and declared argument
 /// count.
@@ -36,9 +45,12 @@ pub enum Finding {
     ReservedWord,
     UnexpectedFrame,
     DataDependent,
+    /// The program's step budget ran out in this unit, or before it, so the
+    /// model could not finish it ([`Image::step_budget`]).
+    StepBudget,
 }
 impl Finding {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Underflow,
         Self::Overflow,
         Self::MergeConflict,
@@ -47,6 +59,7 @@ impl Finding {
         Self::ReservedWord,
         Self::UnexpectedFrame,
         Self::DataDependent,
+        Self::StepBudget,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -58,6 +71,7 @@ impl Finding {
             Self::ReservedWord => "reserved word",
             Self::UnexpectedFrame => "unexpected frame",
             Self::DataDependent => "data-dependent",
+            Self::StepBudget => "step budget",
         }
     }
 }
@@ -217,6 +231,14 @@ impl Image {
             empty_bodies: 0,
         }
     }
+    /// The steps a whole program may take through the model, over all its
+    /// units. §8.2's walk always ends, but a hostile program can make it
+    /// quadratic: each merge can re-explore a loop, and every unit can walk
+    /// the same code. It counts steps, so a program gets one answer on every
+    /// run and host, and running out is a [`Finding::StepBudget`].
+    pub fn step_budget(&self) -> u64 {
+        (self.boundaries.len() as u64 * STEPS_PER_INSTRUCTION).clamp(MIN_STEPS, MAX_STEPS)
+    }
     /// The instruction word at each boundary of the linear decode, in
     /// address order.
     pub fn linear_words(&self) -> impl Iterator<Item = u16> + '_ {
@@ -361,13 +383,20 @@ pub fn analyse_unit(image: &Image, table: &Table, unit: Unit) -> UnitReport {
     explore(image, table, unit, false)
 }
 
+/// §8.2 one unit on its own, with the program's whole budget.
+fn explore(image: &Image, table: &Table, unit: Unit, breadth_first: bool) -> UnitReport {
+    explore_within(image, table, unit, breadth_first, &mut image.step_budget())
+}
+
 /// §8.2 one unit, exploring the worklist's newest address first, or with
-/// `breadth_first` its oldest.
-fn explore(
+/// `breadth_first` its oldest. Each address taken from the worklist spends
+/// one step of `budget`, and with none left the unit stops with a finding.
+fn explore_within(
     image: &Image,
     table: &Table,
     (start, depth, arguments): Unit,
     breadth_first: bool,
+    budget: &mut u64,
 ) -> UnitReport {
     let mut walk = Walk {
         states: BTreeMap::new(),
@@ -390,6 +419,11 @@ fn explore(
     let mut evidence: BTreeMap<u32, (u16, Vec<Option<bool>>)> = BTreeMap::new();
     let mut reached: BTreeMap<u32, u16> = BTreeMap::new();
     while let Some(at) = walk.next() {
+        let Some(left) = budget.checked_sub(1) else {
+            walk.find(at, Finding::StepBudget, 0);
+            break;
+        };
+        *budget = left;
         let State {
             mut stack,
             mut framed,
@@ -662,12 +696,14 @@ pub fn exceptions(words: &WordSet) -> &'static [Exception] {
     }
 }
 
-/// The findings of each unit of `image` under `table`.
+/// The findings of each unit of `image` under `table`. The units share one
+/// step budget, so each unit it does not reach has a finding of its own.
 pub fn analyse(image: &Image, table: &Table) -> Vec<UnitReport> {
+    let mut budget = image.step_budget();
     image
         .units
         .iter()
-        .map(|unit| analyse_unit(image, table, *unit))
+        .map(|unit| explore_within(image, table, *unit, false, &mut budget))
         .collect()
 }
 

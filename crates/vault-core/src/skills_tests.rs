@@ -356,7 +356,8 @@ fn spec013_fixture_c_explosive_timers_and_detonation() {
     );
 
     // Detonation: draw 40 against explosion DT 4 and DR 20 gives 29 and
-    // knockback 2; a critter on an adjacent hex takes nothing.
+    // knockback 2. R1-rev10: a critter on an adjacent hex takes its own
+    // draw, where R1 gave it nothing.
     assert_eq!(skills::explosion_damage(40, 4, 20, false), (29, 2));
     assert_eq!(skills::explosion_damage(40, 4, 20, true), (29, 0));
     assert_eq!(skills::explosion_damage(3, 4, 20, false), (0, 0));
@@ -364,13 +365,17 @@ fn spec013_fixture_c_explosive_timers_and_detonation() {
     let center = HexGrid::step(20100, 1, 3).unwrap();
     let victim = critter(&mut host, center, &[(23, 4), (30, 20)]);
     let bystander = critter(&mut host, HexGrid::step(center, 1, 1).unwrap(), &[]);
+    set_hp(&mut host.world, bystander, 50);
+    let player = host.world.player;
+    let away = HexGrid::step(center, 4, 6).unwrap();
+    host.world.move_object(player, away, 0, false).unwrap();
     let dynamite = items::spawn(&mut host, skills::DYNAMITE_ARMED);
     host.world.move_object(dynamite, center, 0, false).unwrap();
     host.world
         .queue
         .insert(host.world.clock.ticks, 0, dynamite, EventKind::Other(11))
         .unwrap();
-    host.world.rng.script(&[40]);
+    host.world.rng.script(&[40, 30]);
     host.process_queue().unwrap();
     assert_script_used(&host);
     assert_eq!(messages(&mut host), ["premature"]);
@@ -378,19 +383,18 @@ fn spec013_fixture_c_explosive_timers_and_detonation() {
         host.world.get(dynamite).is_none(),
         "the explosive is destroyed"
     );
-    // The animated explosion is in progress: the damage, computed with the
-    // one draw, is applied after the art has played (here there is no art,
-    // so it plays out on the first poll).
+    // The animated explosion is in progress: the damage, computed with one
+    // draw per victim, is applied after the art has played (here there is
+    // no art, so it plays out on the first poll).
     assert!(host.world.explosion.is_some());
     assert_eq!(hp(&host, victim), 30);
     assert!(host.step_explosions(0).unwrap());
     assert!(host.world.explosion.is_none());
     assert_eq!(hp(&host, victim), 1);
-    assert_eq!(hp(&host, bystander), 30);
+    assert_eq!(hp(&host, bystander), 20);
     assert_eq!(host.world.get(victim).unwrap().opponent, host.world.player);
     assert!(host.world.pending_combat.is_some());
     // Map exit detonates a carried explosive at once, without 4000.
-    let player = host.world.player;
     let carried = items::carry(&mut host, player, skills::DYNAMITE_ARMED, 1);
     host.world
         .queue
@@ -467,7 +471,6 @@ fn spec013_explosion_retry_scripted_requests_and_scenery_notice() {
         source: None,
         art: host.explosion_art(0, 0, skills::explosion_art::ROCKET, 0),
         notified: false,
-        fixed: 0,
     });
     assert!(!host.service_explosion_request().unwrap());
     assert_eq!(host.world.pending_explosion, Some(request));
@@ -916,6 +919,53 @@ fn spec013_skill_gate_jam_check_and_defaults() {
     object.set_lock(lock);
     assert!(host.use_skill_on(player, container, 11).unwrap());
     assert_eq!(messages(&mut host), ["jammed"]);
+}
+
+#[test]
+fn spec013_lockpick_in_active_combat_is_refused_with_902_at_no_ap() {
+    use crate::combat_state::{CombatProgress, NoAi};
+    use vault_formats::pro::LockFlags;
+    let mut host = host();
+    let player = host.world.player;
+    let rat = critter(&mut host, adjacent(1), &[]);
+    let chest = items::spawn(&mut host, items::CONTAINER);
+    host.world
+        .move_object(chest, adjacent(2), 0, false)
+        .unwrap();
+    let object = host.world.get_mut(chest).unwrap();
+    let mut lock = object.lock().unwrap();
+    lock.0 |= LockFlags::LOCKED.0;
+    object.set_lock(lock);
+    // Real combat, on the player's turn with AP to spend.
+    host.start_combat(rat, player).unwrap();
+    assert_eq!(
+        host.advance_combat(&mut NoAi).unwrap(),
+        CombatProgress::PlayerTurn
+    );
+    let ap = host.world.action_points(player);
+    assert!(ap > 0);
+    host.world.effects.clear();
+
+    assert!(
+        !host
+            .use_skill_on(player, chest, skills::skill::LOCKPICK)
+            .unwrap(),
+        "refused"
+    );
+    // The fixture's `proto.msg` 902 reads "not in combat".
+    assert_eq!(messages(&mut host), ["not in combat"]);
+    assert_eq!(host.world.action_points(player), ap, "no AP charged");
+    assert!(host.motions.is_empty() && !host.owns_motion(player));
+    assert!(host.world.combat_state.player_turn, "the turn goes on");
+    assert_eq!(host.world.get(chest).unwrap().lock(), Some(lock));
+
+    // §3.2: the refusal is displayed only when the actor is the player.
+    assert!(
+        !host
+            .use_skill_on(rat, chest, skills::skill::LOCKPICK)
+            .unwrap()
+    );
+    assert!(messages(&mut host).is_empty());
 }
 
 #[test]
@@ -1538,81 +1588,101 @@ fn door_open(host: &WorldHost<ItemAssets>, door: ObjectRef) -> bool {
         .contains(vault_formats::pro::LockFlags::OPEN)
 }
 
-/// SPEC-011 §3.24 and SPEC-013 §3.10 under `fallout2`: the fixture's every
-/// row, with one damage draw per victim and fixed parameter 6.
+/// SPEC-011 §3.24 and SPEC-013 §3.10 (R1-rev10), under both profiles: every
+/// row of `armed-explosive-door-rev10.tsv`, with one damage draw per victim
+/// and fixed parameter 6.
 #[test]
-fn spec013_r1_rev9_an_armed_explosive_opens_a_scripted_door_under_fallout2() {
-    let mut scene = blast_scene(true);
-    let [b_at, c_at] =
-        [scene.b, scene.c].map(|critter| scene.host.world.get(critter).unwrap().raw.hex.unwrap());
-    fire(&mut scene, &[40, 30]);
-    let Blast {
-        host,
-        player_hp,
-        b,
-        c,
-        e,
-        d1,
-        d2,
-        s1,
-        s2,
-        ..
-    } = &scene;
-    let player = host.world.player;
-    // B: 40 - 4 = 36, less trunc(36 x 20 / 100) = 7: 29, and C takes 30.
-    assert_eq!((hp(host, *b), hp(host, *c)), (1, 20));
-    let moved = |critter: ObjectRef, from: i32| {
-        let at = host.world.get(critter).unwrap().raw.hex.unwrap();
-        HexGrid::angular_distance(from, at).unwrap()
-    };
-    assert_eq!((moved(*b, b_at), moved(*c, c_at)), (2, 3), "knockback");
-    assert_eq!((hp(host, player), hp(host, *e)), (*player_hp, 30));
-    // Attribution for each victim, and one combat request, from the first.
-    assert_eq!(host.world.get(*b).unwrap().opponent, player);
-    assert_eq!(host.world.get(*c).unwrap().opponent, player);
-    assert_eq!(host.world.pending_combat.as_ref().unwrap().attacker, *b);
-    // D1 ran once, told the damage type and the source, and opened itself.
-    assert_eq!(gvar_of(host, BLAST_FIXED), 6);
-    assert_eq!(gvar_of(host, BLAST_SOURCE), player as i32);
-    assert_eq!(gvar_of(host, BLAST_DOORS as usize), 2, "D1 and S1");
-    assert!(door_open(host, *d1), "the passage opens");
-    assert_eq!(
-        host.world
-            .movement_blocker(host.world.get(*d1).unwrap().raw.hex.unwrap(), 0, 0),
-        None
-    );
-    assert!(!door_open(host, *d2), "no script, no effect");
-    assert_eq!((notices(host, *s1), notices(host, *s2)), (1, 0));
+fn spec013_r1_rev10_an_armed_explosive_opens_a_scripted_door_under_both_profiles() {
+    for fallout2 in [true, false] {
+        let mut scene = blast_scene(fallout2);
+        let [b_at, c_at] = [scene.b, scene.c]
+            .map(|critter| scene.host.world.get(critter).unwrap().raw.hex.unwrap());
+        fire(&mut scene, &[40, 30]);
+        let Blast {
+            host,
+            player_hp,
+            b,
+            c,
+            e,
+            d1,
+            d2,
+            s1,
+            s2,
+            ..
+        } = &scene;
+        let player = host.world.player;
+        // B: 40 - 4 = 36, less trunc(36 x 20 / 100) = 7: 29, and C takes 30.
+        assert_eq!((hp(host, *b), hp(host, *c)), (1, 20));
+        let moved = |critter: ObjectRef, from: i32| {
+            let at = host.world.get(critter).unwrap().raw.hex.unwrap();
+            HexGrid::angular_distance(from, at).unwrap()
+        };
+        assert_eq!((moved(*b, b_at), moved(*c, c_at)), (2, 3), "knockback");
+        assert_eq!((hp(host, player), hp(host, *e)), (*player_hp, 30));
+        // Attribution for each victim, and one combat request, from the first.
+        assert_eq!(host.world.get(*b).unwrap().opponent, player);
+        assert_eq!(host.world.get(*c).unwrap().opponent, player);
+        assert_eq!(host.world.pending_combat.as_ref().unwrap().attacker, *b);
+        // D1 ran once, told the damage type and the source, and opened itself.
+        assert_eq!(gvar_of(host, BLAST_FIXED), 6);
+        assert_eq!(gvar_of(host, BLAST_SOURCE), player as i32);
+        assert_eq!(gvar_of(host, BLAST_DOORS as usize), 2, "D1 and S1");
+        assert!(door_open(host, *d1), "the passage opens");
+        assert_eq!(
+            host.world
+                .movement_blocker(host.world.get(*d1).unwrap().raw.hex.unwrap(), 0, 0),
+            None
+        );
+        assert!(!door_open(host, *d2), "no script, no effect");
+        assert_eq!((notices(host, *s1), notices(host, *s2)), (1, 0));
+    }
 }
 
-/// The same scene under `fallout1`: nobody blocks the center, so nothing
-/// is drawn or damaged, and D1's test for 6 fails on R1's fixed parameter.
+/// The `scripted` row: the same scene from an explosion request. The doors
+/// learn the damage type, with no source, and damage stays on the center.
 #[test]
-fn spec013_r1_rev9_fallout1_keeps_the_center_only_rule() {
-    let mut scene = blast_scene(false);
-    fire(&mut scene, &[]);
-    let Blast {
-        host,
-        player_hp,
-        b,
-        c,
-        e,
-        d1,
-        d2,
-        s1,
-        s2,
-        ..
-    } = &scene;
-    let player = host.world.player;
-    assert_eq!((hp(host, *b), hp(host, *c), hp(host, *e)), (30, 50, 30));
-    assert_eq!(hp(host, player), *player_hp);
-    assert!(host.world.pending_combat.is_none());
-    assert_eq!(gvar_of(host, BLAST_FIXED), 0);
-    assert_eq!(gvar_of(host, BLAST_SOURCE), player as i32);
-    assert_eq!(gvar_of(host, BLAST_DOORS as usize), 2);
-    assert!(!door_open(host, *d1), "this script tests for 6");
-    assert!(!door_open(host, *d2));
-    assert_eq!((notices(host, *s1), notices(host, *s2)), (1, 0));
+fn spec013_r1_rev10_a_scripted_explosion_passes_6_and_stays_center_only() {
+    for fallout2 in [true, false] {
+        let mut scene = blast_scene(fallout2);
+        let center = scene.host.world.get(scene.explosive).unwrap().raw.hex;
+        let host = &mut scene.host;
+        let event = host
+            .world
+            .queue
+            .events()
+            .find(|event| event.object == scene.explosive)
+            .map(|event| event.id)
+            .unwrap();
+        host.world.queue.remove(event);
+        host.world.pending_explosion = Some(crate::world::ExplosionRequest {
+            hex: center.unwrap(),
+            elevation: 0,
+            min: 30,
+            max: 50,
+        });
+        host.world.trace.clear();
+        assert!(host.service_explosion_request().unwrap());
+        assert_eq!(host.world.resolving, None, "an explosive's window only");
+        assert!(host.step_explosions(0).unwrap());
+        let Blast {
+            host,
+            b,
+            c,
+            e,
+            d1,
+            d2,
+            s1,
+            s2,
+            ..
+        } = &scene;
+        assert_eq!((hp(host, *b), hp(host, *c), hp(host, *e)), (30, 50, 30));
+        assert!(host.world.pending_combat.is_none());
+        assert_eq!(gvar_of(host, BLAST_FIXED), 6);
+        assert_eq!(gvar_of(host, BLAST_SOURCE), 0);
+        assert!(door_open(host, *d1), "the script saw 6");
+        assert!(!door_open(host, *d2));
+        assert_eq!((notices(host, *s1), notices(host, *s2)), (1, 0));
+    }
 }
 fn gvar_of(host: &WorldHost<ItemAssets>, index: usize) -> i32 {
     crate::test_support::gvar(host, index)
@@ -1660,6 +1730,245 @@ fn spec013_r1_rev9_a_script_destroys_a_door_and_the_passage_opens() {
             "other: {other}"
         );
     }
+}
+
+const RULE_49_DOOR: &str = include_str!("../../../tests/fixtures/spec013/metarule49-door.tsv");
+/// The bytes of Vector Q in `metarule49-door.tsv`.
+fn rule_49_fragment() -> Vec<u8> {
+    let row = RULE_49_DOOR
+        .lines()
+        .find(|line| line.starts_with("fragment\t"))
+        .unwrap();
+    row.split('\t')
+        .nth(2)
+        .unwrap()
+        .split_whitespace()
+        .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+        .collect()
+}
+/// A program of a `start`, a counting `destroy_p_proc`, and a `damage_p_proc`
+/// that counts its calls and then runs Vector Q. The vector's branch target
+/// is measured from its own first byte, so it moves with the body.
+fn rule_49_door() -> vault_vm::IntProgram {
+    use crate::fixture_state::{program, returning};
+    let counted = crate::test_support::count(BLAST_DOORS);
+    let build = |fragment: &[u8]| {
+        let procedures: [(&[u8], Vec<u8>); 3] = [
+            (b"start", returning(Vec::new())),
+            (
+                b"destroy_p_proc",
+                returning(crate::test_support::count(BLAST_DESTROYED)),
+            ),
+            (
+                b"damage_p_proc",
+                returning([counted.as_slice(), fragment].concat()),
+            ),
+        ];
+        vault_vm::IntProgram::parse(&program(&[], &procedures)).unwrap()
+    };
+    let mut fragment = rule_49_fragment();
+    let parsed = build(&fragment);
+    let index = parsed.find_procedure(b"damage_p_proc", true).unwrap();
+    // The body's own opening word comes before the count.
+    let at = parsed.procedures()[index].body as usize + 2 + counted.len();
+    let target = u32::from_be_bytes(fragment[2..6].try_into().unwrap());
+    assert_eq!(target as usize, fragment.len(), "the end of the fragment");
+    fragment[2..6].copy_from_slice(&(target + at as u32).to_be_bytes());
+    build(&fragment)
+}
+struct Rule49 {
+    host: WorldHost<ItemAssets>,
+    explosive: ObjectRef,
+    start: u64,
+    d3: ObjectRef,
+    d4: ObjectRef,
+    d3_script: u32,
+    d4_script: u32,
+}
+/// The explosive armed, dropped, and the player gone. Door D3 stands at
+/// distance 2 and door D4 at distance 4, both running `program`.
+fn rule_49_scene(fallout2: bool, program: vault_vm::IntProgram) -> Rule49 {
+    let center = 20100;
+    let mut host = blast_host(fallout2, program);
+    let start = host.world.clock.ticks;
+    let explosive = armed(&mut host, 1);
+    let player = host.world.player;
+    host.world.drop_item(player, explosive, 1).unwrap();
+    let away = HexGrid::step(center, 0, 6).unwrap();
+    host.world.move_object(player, away, 0, false).unwrap();
+    let d3 = scenery_door(&mut host, HexGrid::step(center, 0, 2).unwrap());
+    let d3_script = host.world.add_script(d3, 0, 3, 0).unwrap();
+    let d4 = scenery_door(&mut host, HexGrid::step(center, 3, 4).unwrap());
+    let d4_script = host.world.add_script(d4, 0, 3, 0).unwrap();
+    host.world.effects.clear();
+    Rule49 {
+        host,
+        explosive,
+        start,
+        d3,
+        d4,
+        d3_script,
+        d4_script,
+    }
+}
+fn rule_49_notes(host: &WorldHost<ItemAssets>) -> usize {
+    let noted = |effect: &&WorldEffect| matches!(effect, WorldEffect::Diagnostic(text) if text.contains("metarule 49"));
+    host.world.effects.iter().filter(noted).count()
+}
+/// Runs a door's `damage_p_proc` outside any notice, as another script's
+/// request would, with fixed parameter 6 so only the notice can tell it.
+fn outside_a_notice(host: &mut WorldHost<ItemAssets>, script: u32) {
+    let started = crate::test_support::request(script, crate::ScriptEvent::Start);
+    if !host.world.scripts.get(&script).unwrap().initialized {
+        host.dispatch(started).unwrap();
+    }
+    let mut request = crate::test_support::request(script, crate::ScriptEvent::Damage);
+    request.fixed = 6;
+    host.dispatch(request).unwrap();
+}
+
+/// SPEC-017 Vector Q: a door whose `damage_p_proc` asks `metarule` 49 about
+/// itself. An armed explosive fires beside it: under `fallout2` the rule
+/// gives 6 with no diagnostic, and the door destroys itself and skips its
+/// `destroy_p_proc`. Under `fallout1` rule 49 is unknown, and gives 0.
+#[test]
+fn spec017_vector_q_a_door_asking_rule_49_destroys_itself_in_a_blast() {
+    for fallout2 in [true, false] {
+        let mut scene = rule_49_scene(fallout2, rule_49_door());
+        let hex = scene.host.world.get(scene.d3).unwrap().raw.hex.unwrap();
+        assert!(scene.host.world.movement_blocker(hex, 0, 0).is_some());
+        let host = &mut scene.host;
+        host.world.clock.ticks = scene.start + 100;
+        host.world.trace.clear();
+        host.process_queue().unwrap();
+        assert!(host.step_explosions(0).unwrap());
+        assert_eq!(rule_49_notes(host), 0, "fallout2: {fallout2}");
+        assert_eq!(gvar_of(host, BLAST_DOORS as usize), 1, "D3 alone ran");
+        assert_eq!(gvar_of(host, BLAST_DESTROYED as usize), 0);
+        assert_eq!(notices(host, scene.d4_script), 0);
+        assert!(host.world.get(scene.d4).is_some(), "D4 is out of reach");
+        assert_eq!(host.world.get(scene.d3).is_none(), fallout2);
+        assert_eq!(host.world.movement_blocker(hex, 0, 0).is_none(), fallout2);
+        assert_eq!(host.world.notified, None);
+        assert_eq!(host.world.resolving, None);
+    }
+}
+
+/// Vector Q's `outside` row: the same fragment in any other call gives -1
+/// with one diagnostic under `fallout2`, and the door stays.
+#[test]
+fn spec017_rule_49_outside_a_notice_is_the_table() {
+    for (fallout2, notes) in [(true, 1), (false, 0)] {
+        let mut scene = rule_49_scene(fallout2, rule_49_door());
+        let host = &mut scene.host;
+        outside_a_notice(host, scene.d3_script);
+        assert_eq!(gvar_of(host, BLAST_DOORS as usize), 1);
+        assert!(host.world.get(scene.d3).is_some());
+        assert_eq!(rule_49_notes(host), notes);
+    }
+}
+
+const RULE_EXPLOSIVE: usize = 8;
+const RULE_WEAPON: usize = 9;
+const RULE_SELF: usize = 10;
+const ASK_EXPLOSIVE: usize = 11;
+const ASK_WEAPON: usize = 12;
+/// A door that records rule 49 for the explosive, a weapon and itself.
+fn rule_49_recorder() -> vault_vm::IntProgram {
+    use crate::fixture_state::{instruction, push};
+    let rule = |object: Vec<u8>| [push(49), object, instruction(0x810b)].concat();
+    let held = |slot: usize| [push(slot as i32), instruction(0x80c5)].concat();
+    door_program(
+        [
+            store(RULE_EXPLOSIVE, rule(held(ASK_EXPLOSIVE))),
+            store(RULE_WEAPON, rule(held(ASK_WEAPON))),
+            store(RULE_SELF, rule(instruction(0x80bc))),
+        ]
+        .concat(),
+    )
+}
+fn rule_49_results(host: &WorldHost<ItemAssets>) -> [i32; 3] {
+    [RULE_EXPLOSIVE, RULE_WEAPON, RULE_SELF].map(|slot| gvar_of(host, slot))
+}
+/// A scene whose door asks about its explosive and a loaded weapon, with
+/// that weapon's damage type, which must not be 6 for this to tell.
+fn rule_49_asking(fallout2: bool) -> (Rule49, i32) {
+    let mut scene = rule_49_scene(fallout2, rule_49_recorder());
+    let host = &mut scene.host;
+    let weapon = items::spawn(host, items::WEAPON_W);
+    let gvars = host.world.gvars.as_mut().unwrap();
+    gvars[ASK_EXPLOSIVE] = scene.explosive as i32;
+    gvars[ASK_WEAPON] = weapon as i32;
+    let damage = match &host.world.item_data(weapon).unwrap().data {
+        vault_formats::pro::ItemData::Weapon(weapon) => weapon.damage_type,
+        _ => panic!("a weapon"),
+    };
+    assert_ne!(damage, 6);
+    (scene, damage)
+}
+
+/// Vector Q's `explosive` rows. Before its event fires an armed explosive
+/// gives -1. While it detonates it gives 6, though it is already erased, and
+/// a real weapon still gives its own type. Once the explosion ends, and once
+/// a notice's procedure returns, the table holds again.
+#[test]
+fn spec017_rule_49_on_the_explosive_and_a_weapon_during_the_notice() {
+    let (mut scene, damage) = rule_49_asking(true);
+    let host = &mut scene.host;
+    outside_a_notice(host, scene.d3_script);
+    assert_eq!(rule_49_results(host), [-1, damage, -1]);
+    assert_eq!(rule_49_notes(host), 2);
+    host.world.effects.clear();
+
+    host.world.gvars.as_mut().unwrap()[RULE_SELF] = 0;
+    host.world.clock.ticks = scene.start + 100;
+    host.process_queue().unwrap();
+    assert!(host.world.get(scene.explosive).is_none());
+    assert!(host.step_explosions(0).unwrap());
+    assert_eq!(rule_49_results(host), [6, damage, 6]);
+    assert_eq!(rule_49_notes(host), 0);
+
+    outside_a_notice(host, scene.d3_script);
+    assert_eq!(rule_49_results(host), [-1, damage, -1]);
+    assert_eq!(rule_49_notes(host), 2);
+
+    let (mut scene, _) = rule_49_asking(false);
+    let host = &mut scene.host;
+    outside_a_notice(host, scene.d3_script);
+    assert_eq!(rule_49_results(host), [0, 0, 0]);
+    host.world.clock.ticks = scene.start + 100;
+    host.process_queue().unwrap();
+    assert!(host.step_explosions(0).unwrap());
+    assert_eq!(rule_49_results(host), [0, 0, 0]);
+    assert_eq!(rule_49_notes(host), 0);
+}
+
+/// An unanimated detonation, at a map exit, resolves inside one call: the
+/// rule holds through its notice, and the window closes with it. A
+/// detonation that meets another in progress waits, and has not started.
+#[test]
+fn spec017_rule_49_follows_each_detonation_path() {
+    let (mut scene, _) = rule_49_asking(true);
+    let host = &mut scene.host;
+    host.skill_map_exit().unwrap();
+    assert_eq!(rule_49_results(host)[0], 6);
+    assert_eq!(rule_49_results(host)[2], 6);
+    assert_eq!(host.world.resolving, None);
+
+    let (mut scene, _) = rule_49_asking(true);
+    let host = &mut scene.host;
+    let first = items::spawn(host, skills::DYNAMITE_ARMED);
+    let armed_at = host.world.clock.ticks;
+    host.world
+        .queue
+        .insert(armed_at, 50, first, EventKind::Other(8))
+        .unwrap();
+    host.world.clock.ticks = scene.start + 100;
+    host.process_queue().unwrap();
+    assert_eq!(host.world.resolving, Some(first));
+    assert!(host.world.get(scene.explosive).is_some(), "kept to retry");
+    outside_a_notice(host, scene.d3_script);
+    assert_eq!(rule_49_results(host)[0], -1, "it has not started");
 }
 
 /// R1-rev9: the blast's victims, by hex distance, then hex, then list order,

@@ -22,13 +22,14 @@
 use super::{
     MapPreview, Screen,
     world_kit::{
-        Bounds, Hold, Leg, TownPress, WorldEdition, WorldView, inside, red_button, triangle_art,
+        Bounds, Hold, TownPress, WorldEdition, WorldView, inside, red_button, triangle_art,
     },
 };
 use crate::{AppResult, interface::Painter};
 use std::ops::{Deref, DerefMut};
 use vault_core::{
-    TravelOutcome, WorldMapExit,
+    WorldMapExit,
+    host_player::TravelPass,
     ui::Rect,
     worldmap::{
         self, COLUMNS, Encounter, ROWS, TOWNS, TownButton, TownEntry, VIEWPORT_ORIGIN,
@@ -216,17 +217,8 @@ impl WorldEdition for Fallout1 {
     fn travel_to_place(preview: &mut MapPreview, town: usize) -> bool {
         preview.travel_to_town(town)
     }
-    fn travel_iteration(preview: &mut MapPreview) -> AppResult<Leg<Encounter>> {
-        Ok(match preview.host.travel_iteration()? {
-            TravelOutcome::Idle => Leg::Idle,
-            TravelOutcome::Moving => Leg::Moving,
-            TravelOutcome::Arrived | TravelOutcome::Blocked => Leg::Stopped,
-            TravelOutcome::Interrupted(_) => Leg::Interrupted,
-            TravelOutcome::Encounter(encounter) => Leg::Encounter(encounter),
-        })
-    }
-    fn travel_mark(preview: &MapPreview) -> Option<[i32; 2]> {
-        preview.host.world.world_map.mark
+    fn travel_pass(preview: &mut MapPreview) -> AppResult<TravelPass<Encounter>> {
+        Ok(preview.host.world_travel_pass()?)
     }
     fn enter_location(preview: &mut MapPreview, town: Option<usize>) {
         preview.enter_location(town);
@@ -445,13 +437,40 @@ impl MapPreview {
         match town {
             Some(town) => self.enter_world_town(town),
             None => {
-                let entered = self
-                    .host
-                    .terrain_dropout()
-                    .and_then(|encounter| self.host.enter_encounter(encounter));
+                let entered = self.host.player_enter_terrain();
                 self.leave_world(entered);
             }
         }
+    }
+    /// The bot heads for town `place`.
+    pub(super) fn bot_head_for_town(&mut self, place: usize) -> vault_core::autoplay::BotOutcome {
+        use vault_core::autoplay::BotOutcome;
+        if place >= TOWNS.len() || !self.host.world.world_map.town_enabled(place) {
+            return BotOutcome::Refused(format!("town {place} is not known"));
+        }
+        let travelling = self.host.world.world_map.travel.is_some();
+        self.world_map_head_for::<Fallout1>(place, travelling);
+        BotOutcome::Done
+    }
+    /// The bot enters where the party stands.
+    pub(super) fn bot_enter_town(&mut self) -> vault_core::autoplay::BotOutcome {
+        self.world_map_entry::<Fallout1>(screen::ENTER_MS);
+        vault_core::autoplay::BotOutcome::Done
+    }
+    /// The bot takes the town map's marker `index`.
+    pub(super) fn bot_take_town_marker(
+        &mut self,
+        index: usize,
+    ) -> vault_core::autoplay::BotOutcome {
+        use vault_core::autoplay::BotOutcome;
+        let Screen::Town(town) = &self.screen else {
+            return BotOutcome::Refused("no town map is open".to_owned());
+        };
+        if index >= town.buttons.len() {
+            return BotOutcome::Refused(format!("marker {index} is not on the map"));
+        }
+        Fallout1::town_choice(self, index);
+        BotOutcome::Done
     }
     /// The town of the party's cell.
     fn party_town(&self) -> Option<usize> {
@@ -459,11 +478,8 @@ impl MapPreview {
     }
     /// Head for town `town`'s jittered center (SPEC-008 §3.7).
     fn travel_to_town(&mut self, town: usize) -> bool {
-        match worldmap::town_target(town, &mut self.host.world.rng) {
-            Ok(target) => {
-                self.host.travel_to(target);
-                true
-            }
+        match self.host.player_head_for_town(town) {
+            Ok(()) => true,
             Err(error) => {
                 self.status = error.to_string().into_bytes();
                 false

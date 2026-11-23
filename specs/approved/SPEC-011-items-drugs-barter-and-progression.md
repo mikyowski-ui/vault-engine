@@ -585,6 +585,7 @@ Added by Team A on the owner's brief of 2026-11-01. It states how SPEC-013 secti
 2. **Moves.** Dropping it onto a map hex, or moving it to a container or another critter, by any path, changes neither the event nor its tick. The event is never cancelled or queued again by a move, and it fires at its scheduled tick, at the center hex found at that moment.
 3. **The same object.** A move carries the armed object itself. The clone that removing from a stack makes (section 3.13) never stands in for it, or the event would lose its owner. An armed explosive is therefore always one unit: arming from a stack first splits one unit off, and the rest stay unarmed.
 4. **What stays.** The in-use flag moves with it, so it does not stack (section 3.13) and barter refuses it (section 3.19). A save keeps the event and its owner (SPEC-008). Leaving the map keeps SPEC-013 section 3.10's map-exit rule, so one left on the ground detonates on the map being left.
+5. **Damage type.** While its explosion is being resolved, an armed explosive (PID 206 or 209) reports explosion damage to `metarule` 49 under `fallout2` (SPEC-017 section 5.1). Before its event fires, it does not. `[Must-match]`
 
 ## 4. Synthetic Test Fixtures (Hex / Text)
 
@@ -782,4 +783,5 @@ Update notes (2026-11-01, Team A): section 3.24 and Fixture L, on the owner's br
 | ID | Decision | Class | Why |
 | --- | --- | --- | --- |
 | D-1 | The event stays bound to the explosive through a drop or a transfer, and fires at its scheduled tick | Owner instruction (brief of 2026-11-01) | The brief's requirement. It follows SPEC-013's owner and center-hex rules |
+| D-3 | Rule 5: an active explosive reports damage type 6 only while its explosion is resolved | Owner instruction (brief of 2026-11-01), with Team A's window | The brief names armed Dynamite and Plastic Explosives. SPEC-017 Decision 48 sets the window |
 | D-2 | An armed explosive is always one unit, and a move carries the object itself | Team A default | The clone of section 3.13 has a new identity, so a clone would orphan the event |

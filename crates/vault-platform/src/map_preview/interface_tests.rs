@@ -3849,7 +3849,11 @@ fn spec014_the_in_world_cursor_is_the_top_layer_over_the_map_only() {
     preview.hover(point);
     // SPEC-014 §3.27: movement mode's cursor snaps to the hovered hex and
     // carries the hex outline frame for the outline list.
-    let cursor = preview.cursor_objects(preview.view).unwrap();
+    let cursor = preview
+        .cursor_objects(preview.view)
+        .unwrap()
+        .view_sized([preview.view.width, preview.view.height])
+        .unwrap();
     assert_eq!(cursor.hex, hex);
     assert!(cursor.ring.is_some());
     assert!(cursor.art.pixels().contains(&9));
@@ -4047,3 +4051,186 @@ fn enhanced_push_reaches_strangers_only_in_a_debug_session() {
 
 #[path = "fallout2_tests.rs"]
 mod fallout2;
+
+/// A rifle (5 of 10 rounds) in the right hand with two packs of its
+/// ammunition, for the characterization scenarios.
+fn loaded_rifle(preview: &mut MapPreview) -> vault_core::ObjectRef {
+    use vault_formats::pro::BasicFlags;
+    let player = preview.host.world.player;
+    let mut weapon = super::fixture::prototype(0, 3);
+    super::fixture::word(&mut weapon, 0, 0x0000_0010);
+    super::fixture::word(&mut weapon, 0x18, 0x76);
+    super::fixture::word(&mut weapon, 0x34, -1);
+    super::fixture::word(&mut weapon, 0x39 + 32, 4);
+    super::fixture::word(&mut weapon, 0x39 + 36, 5);
+    super::fixture::word(&mut weapon, 0x39 + 52, 1);
+    super::fixture::word(&mut weapon, 0x39 + 60, 10);
+    let mut ammo = super::fixture::prototype(0, 4);
+    super::fixture::word(&mut ammo, 0, 0x0000_0011);
+    super::fixture::word(&mut ammo, 0x39, 1);
+    super::fixture::word(&mut ammo, 0x39 + 4, 5);
+    let spawn = |preview: &mut MapPreview, bytes: &[u8], quantity| {
+        let prototype = Arc::new(vault_formats::Prototype::parse(bytes).unwrap());
+        let item = preview.host.world.spawn(prototype, 0, 0).unwrap();
+        preview
+            .host
+            .world
+            .add_item(player, item, quantity, true)
+            .unwrap();
+        item
+    };
+    let gun = spawn(preview, &weapon, 1);
+    spawn(preview, &ammo, 2);
+    preview.host.world.get_mut(gun).unwrap().raw.state = ObjectState::Other {
+        word: 0,
+        detail: vault_formats::map::ObjectDetail::Weapon {
+            rounds: 5,
+            ammo_pid: 0x11,
+        },
+    };
+    preview
+        .host
+        .world
+        .equip_slot(player, gun, BasicFlags::RIGHT_HAND.0)
+        .unwrap();
+    preview.host.world.active_hand = 1;
+    gun
+}
+
+/// Pins the slot's reload out of and in combat, with the 2 AP refused and
+/// then spent.
+#[test]
+fn characterization_reload() {
+    use crate::map_preview::test_support::Recorder;
+    use vault_core::ui::bar::WeaponMode;
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let mut rows = Recorder::new("reload");
+    let player = preview.host.world.player;
+    let gun = loaded_rifle(&mut preview);
+    preview.image().unwrap();
+    for _ in 0..6 {
+        if preview.slot_mode() == WeaponMode::Reload {
+            break;
+        }
+        preview.step(KeyCode::KeyN);
+    }
+    rows.row("reload-mode", &preview);
+    preview.host.world.combat = true;
+    preview.host.world.combat_state.player_turn = true;
+    preview.host.world.critter_state_mut(player).unwrap().ap = 1;
+    preview.tap([360, 440]);
+    rows.row("short-of-ap", &preview);
+    assert_eq!(preview.host.world.loaded(gun).0, 5);
+    preview.host.world.critter_state_mut(player).unwrap().ap = 5;
+    preview.tap([360, 440]);
+    rows.row("reloaded", &preview);
+    assert_eq!(preview.host.world.loaded(gun).0, 10);
+    rows.check();
+}
+
+/// Pins the item slot's 2 AP and the Set Timer window.
+#[test]
+fn characterization_item_use() {
+    use crate::map_preview::test_support::Recorder;
+    use vault_formats::pro::BasicFlags;
+    let dir = corpus();
+    let mut preview = world(dir.path());
+    let mut rows = Recorder::new("item-use");
+    let player = preview.host.world.player;
+    let dynamite = carried(&mut preview, vault_core::skills::DYNAMITE as i32);
+    preview
+        .host
+        .world
+        .equip_slot(player, dynamite, BasicFlags::RIGHT_HAND.0)
+        .unwrap();
+    preview.host.world.active_hand = 1;
+    preview.image().unwrap();
+    preview.host.world.combat = true;
+    preview.host.world.combat_state.player_turn = true;
+    preview.host.world.critter_state_mut(player).unwrap().ap = 1;
+    preview.tap([360, 440]);
+    rows.row("short-of-ap", &preview);
+    assert!(preview.hud.timer.is_none());
+    preview.host.world.critter_state_mut(player).unwrap().ap = 5;
+    preview.tap([360, 440]);
+    rows.row("opens-timer", &preview);
+    assert!(preview.hud.timer.is_some());
+    rows.check();
+}
+
+/// Pins a crosshair click out of combat, its replay on the first turn, and
+/// a plain attack in combat, whose hit roll draws from the world's stream.
+#[test]
+fn characterization_attack() {
+    use crate::map_preview::test_support::Recorder;
+    let dir = corpus();
+    // SPEC-007 §3.10.1: an attack whose art is missing does not register.
+    for suffix in [
+        "aq", "an", "ao", "ap", "ar", "ba", "bb", "bo", "bp", "ch", "cj",
+    ] {
+        std::fs::copy(
+            dir.path().join("art/critters/sampleaa.frm"),
+            dir.path().join(format!("art/critters/sample{suffix}.frm")),
+        )
+        .unwrap();
+    }
+    let mut preview = world(dir.path());
+    let mut rows = Recorder::new("attack");
+    preview.host.playback = vault_core::host_choreography::Playback::Instant;
+    let hex = beside_npc(&mut preview);
+    let player = preview.host.world.player;
+    preview.host.world.critter_state_mut(player).unwrap().ap = 8;
+    preview.hud.mode = Mode::Crosshair;
+    preview.tap(on_hex(&preview, hex));
+    rows.row("click-starts-combat", &preview);
+    let mut now = 16;
+    for _ in 0..60 {
+        now += 50;
+        preview.tick(now).unwrap();
+        rows.row("first-turn", &preview);
+    }
+    // A plain click in combat attacks at once.
+    let spent = preview.host.world.critter_state(player).unwrap().ap;
+    preview.hud.mode = Mode::Crosshair;
+    preview.host.world.combat_state.player_turn = true;
+    preview.tap(on_hex(&preview, hex));
+    rows.row("attacks", &preview);
+    assert!(preview.host.world.critter_state(player).unwrap().ap < spent);
+    rows.check();
+}
+
+/// A step opens a requested window whether or not the session draws, so a
+/// headless run and a watched one see the same screens on the same step.
+#[test]
+fn characterization_windows_open_without_drawing() {
+    let run = |drawn: bool| {
+        let dir = corpus();
+        let mut preview = world(dir.path());
+        let player = preview.host.world.player;
+        let npc = npc(&preview);
+        if let Some(ObjectState::Critter(state)) =
+            preview.host.world.get_mut(npc).map(|o| &mut o.raw.state)
+        {
+            state.results.0 |= effect::DEAD;
+        }
+        preview.tick(16).unwrap();
+        preview.host.world.pending_loot = Some(LootRequest {
+            looter: player,
+            target: npc,
+            steal: false,
+        });
+        assert!(preview.tick(32).unwrap(), "the window asks for a redraw");
+        if drawn {
+            preview.image().unwrap();
+        }
+        (
+            matches!(preview.screen, Screen::Loot(_)),
+            preview.host.world.state_hash(),
+            preview.host.world.rng.clone(),
+        )
+    };
+    let (open, ..) = run(false);
+    assert!(open);
+    assert_eq!(run(false), run(true));
+}

@@ -1,6 +1,6 @@
 # SPEC-023: In-Memory VFS Mounting and Portable Storage
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revisions 2 and 3 (Team A, 2026-10-30) and Revision 4 (Team A, 2026-11-01); see "Revision history".
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revisions 2 and 3 (Team A, 2026-10-30) and Revisions 4 and 5 (Team A, 2026-11-01); see "Revision history".
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-27.
 Sources:
@@ -97,6 +97,7 @@ re-implementation source or game asset was used.
 
 ### Revision history
 
+- **Revision 5 (2026-11-01).** Team A, on the owner's brief of the same day: section 3.10's `preset` commit and quiet hints with no settings file.
 - **Revision 4 (2026-11-01).** Team A, on the owner's brief of the same day: the settings keys and the warm switch of SPEC-020 Phase L1 (sections 3.10 and 3.15). No format, key rule or vector changes.
 - **Revision 1 (2026-10-27).** First approved text.
 - **Revision 2 (2026-10-30).** Adds the offline-safe `wasm32-unknown-unknown`
@@ -544,6 +545,11 @@ canonical keys. `[Must-match]`
    SPEC-020 sections 2.4 and 2.6. Setting `game` and `last_played` together is one
    commit. A start named by flags writes neither. A failed commit is a diagnostic,
    and the session goes on. `[Must-match]`
+7. **Revision 5.** A selector toggle (SPEC-020 section 2.4) adds `preset` to that one
+   commit. With no `vault-engine.toml`, finishing the hotkey hints commits nothing
+   and writes no diagnostic: `hotkey_hints` stays in memory until the next commit of
+   the settings. A settings file that exists and fails to commit is still a
+   diagnostic. `[Safe rule]`
 
 ### 3.11 The `savegame` Namespace and Slot Images
 
@@ -1248,6 +1254,13 @@ Revision 3 adds these decisions.
 | D-40 | The last-played edition is stored in `StorageBackend` settings | Owner instruction (brief of 2026-11-01) | The brief's requirement |
 | D-41 | Both keys live in `vault-engine.toml`, not in a new `config` file | Team A default | The file already keeps a game's choices, and unknown keys survive older builds |
 | D-42 | A warm switch keeps the backend and drops the `Vfs` | Team A default | The backend holds no game data (D-11), and the mount is what names an edition |
+
+### Decisions of Revision 5
+
+| ID | Decision | Class | Why |
+| --- | --- | --- | --- |
+| D-43 | With no settings file, `hotkey_hints` stays in memory until settings are saved | Owner instruction (brief of 2026-11-01) | The brief's requirement |
+| D-44 | The preset joins the same commit as `game` and `last_played` | Team A default | One choice should be one write |
 
 ## 7. Clean-Room Verification Checklist
 

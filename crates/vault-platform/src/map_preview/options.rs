@@ -2,13 +2,45 @@
 //! quit confirmation and the preferences screen (knobs, switches, sliders,
 //! the speed-up checkbox, Default, Done and Cancel), with preferences applied
 //! to the world and written to `fallout.cfg` when a path is configured.
+//!
+//! **The Enhanced window** (engine extension, not part of any specification).
+//! Under the `enhanced` preset the options menu gains one button below its
+//! plate, which opens a window of built-in presets and single settings. Under
+//! Vanilla ([`MapPreview::enhanced_entry_shown`] is false) none of it draws or
+//! takes input, so SPEC-014's windows are as they were.
+//! - **Applying.** A click applies at once: the viewport, zoom, smooth camera,
+//!   roof peek, interface scale, tactical overlay and game speed all reach the
+//!   session. The zoom, camera, roof and scale rows do nothing in the fixed
+//!   viewport, and the window says so. The Vanilla or Enhanced rules cannot
+//!   change here: they decide tables, scripts and save sidecars as a world
+//!   loads, so that row only names what the next launch runs.
+//! - **Replays.** Clicks are logged input, and a replay's clicks reach this
+//!   window as a preferences change does, so nothing here is a record of its
+//!   own. What a frame shows comes from the session, never from a file.
+//! - **Saving.** Save writes the active profile's table of `vault-engine.toml`
+//!   ([`crate::config::save_profile_enhanced`]), a different file from
+//!   `fallout.cfg`. A headless or replay session writes nothing, and a file
+//!   whose active profile is another game's is refused: that save would go
+//!   into the wrong table.
 use super::{MapPreview, Screen};
-use crate::{AppResult, audio::Volumes, input::key_text, interface::Painter};
-use vault_core::ui::{
-    BUTTON_PRESS, ColorKey, Rect,
-    options::{
-        self, DragStep, LabelWidths, MenuKey, OptionsOutcome, OptionsPage, OptionsWindow,
-        PreferenceControl, PreferenceKey, PreferenceOutcome, Preferences, PreferencesScreen,
+use crate::{
+    AppResult,
+    audio::Volumes,
+    config::{self, Config, EnhancedProfile, Preset, UiScale},
+    enhanced::{BuiltinPreset, EnhancedSettings, GameSpeed, RoofPeek, ViewportMode},
+    input::key_text,
+    interface::Painter,
+};
+use std::path::{Path, PathBuf};
+use vault_core::{
+    GameProfile,
+    movie::MoviePolicy,
+    ui::{
+        BUTTON_PRESS, ColorKey, Rect,
+        options::{
+            self, DragStep, LabelWidths, MenuKey, OptionsOutcome, OptionsPage, OptionsWindow,
+            PreferenceControl, PreferenceKey, PreferenceOutcome, Preferences, PreferencesScreen,
+        },
     },
 };
 use vault_formats::cfg::ConfigFile;
@@ -21,6 +53,8 @@ use winit::keyboard::KeyCode;
 pub(crate) enum OptionsScreen {
     Window(OptionsWindow),
     Preferences(Box<PreferencesScreen>),
+    /// The `enhanced` preset's window of presets and settings.
+    Enhanced(EnhancedPanel),
 }
 impl OptionsScreen {
     pub(crate) const fn page(page: OptionsPage) -> Self {
@@ -221,9 +255,15 @@ impl MapPreview {
         match screen {
             OptionsScreen::Window(window) => {
                 self.draw_options_window(&painter, &mut image, window);
+                if self.enhanced_entry_shown() {
+                    self.draw_enhanced_entry(&painter, &mut image);
+                }
             }
             OptionsScreen::Preferences(state) => {
                 self.draw_preferences(&painter, &mut image, state);
+            }
+            OptionsScreen::Enhanced(panel) => {
+                self.draw_enhanced_panel(&painter, &mut image, panel);
             }
         }
         Ok(image)
@@ -518,6 +558,12 @@ impl MapPreview {
             self.screenshot();
             return true;
         }
+        // E is Exit Game (§3.17), so the window takes the word's next letter.
+        if key == KeyCode::KeyH && self.enhanced_entry_shown() {
+            self.play_effect(BUTTON_PRESS.as_bytes(), None);
+            self.open_enhanced_panel();
+            return true;
+        }
         let now = self.clock;
         let Screen::Options(screen) = &mut self.screen else {
             return false;
@@ -559,6 +605,7 @@ impl MapPreview {
                     _ => {}
                 }
             }
+            OptionsScreen::Enhanced(_) => return self.enhanced_panel_key(key),
         }
         true
     }
@@ -615,6 +662,12 @@ impl MapPreview {
         if self.preferences_busy() {
             return true;
         }
+        if self.enhanced_entry_shown() && ENHANCED_ENTRY.contains(point) {
+            let (press, release) = options::OPTIONS_SOUNDS;
+            self.press_button_cue(press.as_bytes(), release.as_bytes(), ENHANCED_ENTRY);
+            self.open_enhanced_panel();
+            return true;
+        }
         let Screen::Options(screen) = &mut self.screen else {
             return false;
         };
@@ -637,6 +690,7 @@ impl MapPreview {
                 self.options_outcome(outcome);
             }
             OptionsScreen::Preferences(_) => self.preferences_click(point),
+            OptionsScreen::Enhanced(_) => self.enhanced_panel_click(point),
         }
         true
     }
@@ -691,6 +745,705 @@ impl MapPreview {
                 self.press_cue(press.as_bytes(), release.as_bytes());
             }
             _ => {}
+        }
+    }
+}
+
+/// The options menu's Enhanced button, below its plate: the size and art of
+/// the five buttons on it.
+const ENHANCED_ENTRY: Rect = Rect::new(251, 290, 137, 34);
+/// The Enhanced window, over the map rows. A dimmed backdrop keeps the bar
+/// below it, so it stops short of row 380.
+const PANEL: Rect = Rect::new(54, 6, 532, 368);
+const PRESET_Y: i32 = 34;
+const PRESET_SIZE: [i32; 2] = [164, 22];
+const PRESET_GAP: i32 = 8;
+const ROW_Y: i32 = 68;
+const ROW_HEIGHT: i32 = 31;
+const ROW_X: i32 = 66;
+const VALUE: Rect = Rect::new(260, 0, 130, 22);
+const TAG_X: i32 = 398;
+const BADGE: Rect = Rect::new(482, 0, 92, 26);
+const NOTE_Y: i32 = 318;
+const BUTTON_Y: i32 = 340;
+const SAVE_AT: [i32; 2] = [66, BUTTON_Y];
+const DONE_AT: [i32; 2] = [176, BUTTON_Y];
+/// A red button's caption, right of the button.
+const CAPTION_DX: i32 = 20;
+/// The stops a click on the zoom and interface scale rows steps through.
+const ZOOM_STOPS: [f32; 6] = [0.5, 0.75, 1.0, 1.5, 2.0, 3.0];
+const UI_SCALE_STOPS: [f32; 4] = [1.0, 1.5, 2.0, 3.0];
+
+/// A row of the Enhanced window, top to bottom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnhancedRow {
+    Viewport,
+    Zoom,
+    Smooth,
+    Roof,
+    UiScale,
+    Speed,
+    Overlay,
+    Rules,
+}
+
+impl EnhancedRow {
+    const ALL: [Self; 8] = [
+        Self::Viewport,
+        Self::Zoom,
+        Self::Smooth,
+        Self::Roof,
+        Self::UiScale,
+        Self::Speed,
+        Self::Overlay,
+        Self::Rules,
+    ];
+    fn label(self) -> &'static str {
+        match self {
+            Self::Viewport => "Viewport",
+            Self::Zoom => "Default zoom",
+            Self::Smooth => "Smooth camera",
+            Self::Roof => "Roof peek",
+            Self::UiScale => "Interface scale",
+            Self::Speed => "Game speed",
+            Self::Overlay => "Tactical overlay",
+            Self::Rules => "Game rules",
+        }
+    }
+    fn hint(self) -> &'static str {
+        match self {
+            Self::Viewport => "The world across the window",
+            Self::Zoom => "The zoom a map starts at",
+            Self::Smooth => "Camera moves ease in and out",
+            Self::Roof => "Roofs open at the cursor",
+            Self::UiScale => "How large the interface draws",
+            Self::Speed => "World time against the clock",
+            Self::Overlay => "HP bars and to-hit in combat",
+            Self::Rules => "Vanilla or Enhanced play",
+        }
+    }
+    /// The row needs the unlocked view to show anything.
+    fn unlocked_only(self) -> bool {
+        matches!(self, Self::Zoom | Self::Smooth | Self::Roof | Self::UiScale)
+    }
+    /// The screen rectangle of the row's value, which a click steps.
+    fn value_rect(self) -> Rect {
+        let index = Self::ALL.iter().position(|row| *row == self).unwrap_or(0);
+        VALUE.offset([0, ROW_Y + ROW_HEIGHT * index as i32 + 3])
+    }
+    /// The screen rectangle of the row's preview badge.
+    fn badge_rect(self) -> Rect {
+        let index = Self::ALL.iter().position(|row| *row == self).unwrap_or(0);
+        BADGE.offset([0, ROW_Y + ROW_HEIGHT * index as i32 + 2])
+    }
+}
+
+/// What the session runs, as the window shows and saves it. It comes from the
+/// session alone, so a replay draws the frame the desktop drew.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EnhancedValues {
+    settings: EnhancedSettings,
+    speed: GameSpeed,
+    overlay: bool,
+    /// The rules the next launch runs.
+    rules: Preset,
+}
+
+impl EnhancedValues {
+    /// These values with what `profile` names over them.
+    fn with_profile(self, profile: EnhancedProfile) -> Self {
+        let settings = self.settings;
+        Self {
+            settings: EnhancedSettings {
+                viewport: profile.viewport_mode.unwrap_or(settings.viewport),
+                default_zoom: profile.default_zoom.unwrap_or(settings.default_zoom),
+                smooth_camera: profile.smooth_camera.unwrap_or(settings.smooth_camera),
+                roof_peek: profile.roof_peek.unwrap_or(settings.roof_peek),
+                ui_scale: profile.ui_scale.map_or(settings.ui_scale, UiScale::factor),
+                ..settings
+            },
+            speed: profile.game_speed.unwrap_or(self.speed),
+            overlay: profile.tactical_overlay.unwrap_or(self.overlay),
+            rules: profile.preset.unwrap_or(self.rules),
+        }
+    }
+    /// These values with `row` stepped to its next choice.
+    fn stepped(mut self, row: EnhancedRow) -> Self {
+        let settings = &mut self.settings;
+        match row {
+            EnhancedRow::Viewport => *settings = crate::replay::toggled_viewport(*settings),
+            EnhancedRow::Zoom => {
+                settings.default_zoom =
+                    next_stop(&ZOOM_STOPS, settings.default_zoom).unwrap_or(ZOOM_STOPS[0]);
+            }
+            EnhancedRow::Smooth => settings.smooth_camera = !settings.smooth_camera,
+            EnhancedRow::Roof => settings.roof_peek = settings.roof_peek.next(),
+            EnhancedRow::UiScale => {
+                settings.ui_scale = match settings.ui_scale {
+                    None => Some(UI_SCALE_STOPS[0]),
+                    Some(scale) => next_stop(&UI_SCALE_STOPS, scale),
+                };
+            }
+            EnhancedRow::Speed => self.speed = self.speed.next(),
+            EnhancedRow::Overlay => self.overlay = !self.overlay,
+            EnhancedRow::Rules => {
+                self.rules = match self.rules {
+                    Preset::Vanilla => Preset::Enhanced,
+                    Preset::Enhanced => Preset::Vanilla,
+                };
+            }
+        }
+        self
+    }
+    /// `row`'s value as shown.
+    fn text(&self, row: EnhancedRow) -> String {
+        let settings = &self.settings;
+        let on = |flag: bool| if flag { "On" } else { "Off" };
+        match row {
+            EnhancedRow::Viewport => match settings.viewport {
+                ViewportMode::Fixed => "Fixed 640x480".into(),
+                ViewportMode::Unlocked => "Unlocked".into(),
+            },
+            EnhancedRow::Zoom => format!("{:.2}x", settings.default_zoom),
+            EnhancedRow::Smooth => on(settings.smooth_camera).into(),
+            EnhancedRow::Roof => match settings.roof_peek {
+                RoofPeek::Vanilla => "Vanilla".into(),
+                RoofPeek::CursorXray => "Cursor X-ray".into(),
+                RoofPeek::Hidden => "Hidden".into(),
+            },
+            EnhancedRow::UiScale => settings
+                .ui_scale
+                .map_or_else(|| "Fit window".into(), |scale| format!("{scale:.1}x")),
+            EnhancedRow::Speed => self.speed.label().into(),
+            EnhancedRow::Overlay => on(self.overlay).into(),
+            EnhancedRow::Rules => match self.rules {
+                Preset::Vanilla => "Vanilla".into(),
+                Preset::Enhanced => "Enhanced".into(),
+            },
+        }
+    }
+    /// How `row` takes effect: its tag and color.
+    fn tag(&self, row: EnhancedRow) -> (&'static str, ColorKey) {
+        if row == EnhancedRow::Rules {
+            ("NEXT START", ColorKey::AMBER)
+        } else if row.unlocked_only() && self.settings.viewport == ViewportMode::Fixed {
+            ("NOT IN FIXED", ColorKey::GREY)
+        } else {
+            ("LIVE", ColorKey::GREEN)
+        }
+    }
+    /// The settings to save: these values over the file's table. The rules
+    /// stay as the file has them until the player chose some.
+    fn profile(&self, chosen: Option<Preset>, file: EnhancedProfile) -> EnhancedProfile {
+        let settings = &self.settings;
+        EnhancedProfile {
+            preset: chosen.or(file.preset),
+            viewport_mode: Some(settings.viewport),
+            default_zoom: Some(settings.default_zoom),
+            smooth_camera: Some(settings.smooth_camera),
+            roof_peek: Some(settings.roof_peek),
+            ui_scale: Some(UiScale::from_factor(settings.ui_scale)),
+            game_speed: Some(self.speed),
+            tactical_overlay: Some(self.overlay),
+        }
+    }
+}
+
+/// The first of `stops` past `value`.
+fn next_stop(stops: &[f32], value: f32) -> Option<f32> {
+    stops.iter().copied().find(|stop| *stop > value + 1e-3)
+}
+
+/// The Enhanced window's own state: what the session's settings do not hold.
+#[derive(Debug, Default)]
+pub(crate) struct EnhancedPanel {
+    /// The rules the player chose for the next launch; `None` leaves the
+    /// file's.
+    rules: Option<Preset>,
+    /// A change since the window opened or last saved.
+    unsaved: bool,
+    /// The last save's result, and whether it failed.
+    note: Option<(String, bool)>,
+}
+
+/// What a save did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SaveOutcome {
+    Saved {
+        profile: String,
+    },
+    /// A replay or a headless session: nothing was read or written.
+    Headless,
+    /// No settings file was found.
+    NoFile,
+    /// The file marks another game's profile active, so
+    /// [`config::save_profile_enhanced`] would write this session's settings
+    /// into that profile's table.
+    OtherProfile {
+        file: String,
+        session: String,
+    },
+    /// The file could not be read or written.
+    Failed(String),
+}
+
+impl SaveOutcome {
+    /// The window's line for it, and whether it is a failure.
+    fn note(&self) -> (String, bool) {
+        match self {
+            Self::Saved { profile } => (format!("Saved to the {profile} profile."), false),
+            Self::Headless => ("A replay or headless session saves nothing.".into(), true),
+            Self::NoFile => (
+                "No vault-engine.toml found: changes last this session.".into(),
+                true,
+            ),
+            Self::OtherProfile { file, session } => (
+                format!("Not saved: the file's profile is {file}, this session is {session}."),
+                true,
+            ),
+            Self::Failed(_) => (
+                "Not saved: the settings file could not be read or written.".into(),
+                true,
+            ),
+        }
+    }
+}
+
+/// A place in the Enhanced window a press acts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanelHit {
+    Preset(BuiltinPreset),
+    Row(EnhancedRow),
+    Save,
+    Done,
+}
+
+/// A built-in preset's button.
+fn preset_rect(index: usize) -> Rect {
+    let x = ROW_X + (PRESET_SIZE[0] + PRESET_GAP) * index as i32;
+    Rect::at([x, PRESET_Y], PRESET_SIZE)
+}
+
+/// What the Enhanced window has at `point`.
+fn panel_hit(point: [i32; 2]) -> Option<PanelHit> {
+    let preset = BuiltinPreset::ALL
+        .into_iter()
+        .enumerate()
+        .find(|(index, _)| preset_rect(*index).contains(point))
+        .map(|(_, preset)| PanelHit::Preset(preset));
+    let row = EnhancedRow::ALL
+        .into_iter()
+        .find(|row| row.value_rect().contains(point))
+        .map(PanelHit::Row);
+    preset.or(row).or_else(|| {
+        if vault_core::ui::red_button(SAVE_AT).contains(point) {
+            Some(PanelHit::Save)
+        } else if vault_core::ui::red_button(DONE_AT).contains(point) {
+            Some(PanelHit::Done)
+        } else {
+            None
+        }
+    })
+}
+
+/// The settings file a save writes: the one a launch reads. A test gives
+/// [`MapPreview::save_enhanced_to`] its own, and never finds the player's.
+fn settings_file() -> Option<PathBuf> {
+    if cfg!(test) {
+        None
+    } else {
+        config::find(&config::search_dirs())
+    }
+}
+
+/// A one-pixel outline just inside `rect`.
+fn outline(image: &mut IndexedImage, [x, y, w, h]: [i32; 4], color: u8) {
+    image.fill_rect([x, y, w, 1], color);
+    image.fill_rect([x, y + h - 1, w, 1], color);
+    image.fill_rect([x, y, 1, h], color);
+    image.fill_rect([x + w - 1, y, 1, h], color);
+}
+
+/// `row`'s badge in `rect`: a small picture of what the setting does in play,
+/// drawn with the interface's own colors, as there is no game art for it.
+fn draw_badge(
+    painter: &Painter,
+    image: &mut IndexedImage,
+    row: EnhancedRow,
+    values: &EnhancedValues,
+    rect: Rect,
+) {
+    let [amber, green, red, grey, black] = [
+        ColorKey::AMBER,
+        ColorKey::GREEN,
+        ColorKey::RED,
+        ColorKey::GREY,
+        ColorKey::BLACK,
+    ]
+    .map(|key| painter.color(key));
+    let Rect { x, y, w, h } = rect;
+    image.fill_rect([x, y, w, h], black);
+    outline(image, [x, y, w, h], grey);
+    let [cx, cy] = [x + w / 2, y + h / 2];
+    let settings = &values.settings;
+    match row {
+        // The 4:3 frame alone, or the world running past it on both sides.
+        EnhancedRow::Viewport => {
+            if settings.viewport == ViewportMode::Unlocked {
+                image.fill_rect([x + 8, y + 5, w - 16, h - 10], green);
+            }
+            image.fill_rect([cx - 13, y + 4, 26, h - 8], black);
+            outline(image, [cx - 13, y + 4, 26, h - 8], amber);
+        }
+        // Floor tiles at the zoom.
+        EnhancedRow::Zoom => {
+            let side = ((settings.default_zoom * 7.0).round() as i32).clamp(3, h - 6);
+            let mut at = x + 6;
+            let mut tile = 0;
+            while at + side < x + w - 5 {
+                let color = if tile % 2 == 0 { amber } else { grey };
+                image.fill_rect([at, cy - side / 2, side, side], color);
+                at += side + 1;
+                tile += 1;
+            }
+        }
+        // A camera path: one even line, or a few jumps.
+        EnhancedRow::Smooth => {
+            let steps = if settings.smooth_camera { 64 } else { 4 };
+            for step in 0..steps {
+                let along = step * 64 / steps;
+                let [px, py] = [x + 14 + along, y + h - 7 - along * (h - 13) / 64];
+                let size = if settings.smooth_camera { 2 } else { 6 };
+                image.fill_rect([px, py, size, 2], amber);
+            }
+        }
+        // A house: the walls, a critter inside, and the roof over them, cut
+        // around the cursor or gone.
+        EnhancedRow::Roof => {
+            outline(image, [cx - 24, y + 9, 48, h - 12], grey);
+            image.fill_rect([cx - 2, y + 13, 5, 9], green);
+            if settings.roof_peek != RoofPeek::Hidden {
+                image.fill_rect([cx - 28, y + 3, 56, 13], amber);
+            }
+            if settings.roof_peek == RoofPeek::CursorXray {
+                image.fill_rect([cx - 9, y + 3, 19, 13], black);
+                image.fill_rect([cx - 12, y + 6, 25, 7], black);
+                image.fill_rect([cx - 2, y + 13, 5, 3], green);
+            }
+        }
+        // The interface bar at its scale.
+        EnhancedRow::UiScale => {
+            let scale = settings.ui_scale.unwrap_or(2.0);
+            let width = ((scale * 24.0).round() as i32).clamp(12, w - 8);
+            let height = ((scale * 4.0).round() as i32).clamp(2, h - 8);
+            image.fill_rect([cx - width / 2, y + h - 4 - height, width, height], amber);
+            if settings.ui_scale.is_none() {
+                outline(image, [x + 3, y + 3, w - 6, h - 6], grey);
+            }
+        }
+        // One chevron for each step above 1.0x, and one for 1.0x itself.
+        EnhancedRow::Speed => {
+            let count = GameSpeed::ALL
+                .iter()
+                .position(|speed| *speed == values.speed)
+                .unwrap_or(0) as i32
+                + 1;
+            let left = cx - 7 * count;
+            for chevron in 0..count {
+                for slant in 0_i32..7 {
+                    let at = left + chevron * 14 + (3 - (3 - slant).abs()) * 2;
+                    image.fill_rect([at, cy - 7 + slant * 2, 4, 2], amber);
+                }
+            }
+        }
+        // The overlay in combat: a hurt critter's HP bar, and the to-hit
+        // chance beside it. Off, the bare critter.
+        EnhancedRow::Overlay => {
+            let critter = if values.overlay { green } else { grey };
+            image.fill_rect([x + 22, y + 11, 7, 12], critter);
+            if values.overlay {
+                image.fill_rect([x + 12, y + 4, 28, 5], grey);
+                image.fill_rect([x + 13, y + 5, 26, 3], black);
+                image.fill_rect([x + 13, y + 5, 12, 3], red);
+                painter.text(image, 101, ColorKey::WHITE, b"75%", [x + 48, y + 8], 40);
+            }
+        }
+        // A switch: the rules the next launch runs.
+        EnhancedRow::Rules => {
+            outline(image, [cx - 26, y + 6, 52, h - 12], grey);
+            let (at, color) = match values.rules {
+                Preset::Vanilla => (cx - 25, grey),
+                Preset::Enhanced => (cx + 1, amber),
+            };
+            image.fill_rect([at, y + 7, 24, h - 14], color);
+        }
+    }
+}
+
+/// The Enhanced window.
+impl MapPreview {
+    /// The options menu shows the Enhanced button: the menu page of a session
+    /// under the `enhanced` preset with its presentation on. Never under
+    /// Vanilla.
+    pub(crate) fn enhanced_entry_shown(&self) -> bool {
+        self.qol()
+            && self.enhanced.is_some()
+            && matches!(
+                self.screen,
+                Screen::Options(OptionsScreen::Window(OptionsWindow {
+                    page: OptionsPage::Menu
+                }))
+            )
+    }
+    fn open_enhanced_panel(&mut self) {
+        self.screen = Screen::Options(OptionsScreen::Enhanced(EnhancedPanel::default()));
+    }
+    fn close_enhanced_panel(&mut self) {
+        self.screen = Screen::Options(OptionsScreen::page(OptionsPage::Menu));
+    }
+    fn enhanced_panel(&mut self) -> Option<&mut EnhancedPanel> {
+        match &mut self.screen {
+            Screen::Options(OptionsScreen::Enhanced(panel)) => Some(panel),
+            _ => None,
+        }
+    }
+    /// The session's game speed, as the window left it. The shell keeps its
+    /// own copy, for Alt+F and the worlds a game makes next.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn session_game_speed(&self) -> GameSpeed {
+        self.qol_state.speed
+    }
+    /// This session's edition.
+    fn session_edition(&self) -> GameProfile {
+        if self.host.world.fallout2.is_some() {
+            GameProfile::Fallout2
+        } else {
+            GameProfile::Fallout1
+        }
+    }
+    /// A session no player runs: every headless world (a replay, a gallery
+    /// capture, `--headless`) completes its movies.
+    fn headless_session(&self) -> bool {
+        self.host.movie_policy == MoviePolicy::CompleteImmediately
+    }
+    fn enhanced_values(&self) -> EnhancedValues {
+        let rules = match &self.screen {
+            Screen::Options(OptionsScreen::Enhanced(panel)) => panel.rules,
+            _ => None,
+        };
+        EnhancedValues {
+            settings: self.enhanced().unwrap_or_default(),
+            speed: self.qol_state.speed,
+            overlay: self.qol_state.overlay,
+            rules: rules.unwrap_or(Preset::Enhanced),
+        }
+    }
+    /// Give the session `values`. The world's clock and the logged input
+    /// drive all of it, so a replay's click lands here on the same frame.
+    fn apply_enhanced_values(&mut self, values: EnhancedValues, rules: Option<Preset>) {
+        let old = self.enhanced_values();
+        self.set_enhanced(Some(values.settings));
+        if values.settings.default_zoom != old.settings.default_zoom {
+            let (zoom, now) = (f64::from(values.settings.default_zoom), self.clock);
+            if let Some(enhanced) = &mut self.enhanced {
+                enhanced.camera.zoom_user(zoom, None, now);
+            }
+        }
+        self.init_game_speed(values.speed);
+        self.qol_state.overlay = values.overlay;
+        if let Some(panel) = self.enhanced_panel() {
+            panel.rules = rules.or(panel.rules);
+            panel.unsaved = true;
+            panel.note = None;
+        }
+        self.thaw_view();
+        self.pointer.redraw = true;
+    }
+    /// A built-in preset: what it names, at once.
+    fn apply_builtin(&mut self, preset: BuiltinPreset) {
+        let profile = preset.settings();
+        let values = self.enhanced_values().with_profile(profile);
+        self.apply_enhanced_values(values, profile.preset);
+    }
+    fn enhanced_panel_click(&mut self, point: [i32; 2]) {
+        match panel_hit(point) {
+            Some(PanelHit::Preset(preset)) => {
+                self.press();
+                self.apply_builtin(preset);
+            }
+            Some(PanelHit::Row(row)) => {
+                self.press();
+                let values = self.enhanced_values().stepped(row);
+                let rules = (row == EnhancedRow::Rules).then_some(values.rules);
+                self.apply_enhanced_values(values, rules);
+            }
+            Some(PanelHit::Save) => {
+                self.press_button(vault_core::ui::red_button(SAVE_AT));
+                self.save_enhanced();
+            }
+            Some(PanelHit::Done) => {
+                self.press_button(vault_core::ui::red_button(DONE_AT));
+                self.close_enhanced_panel();
+            }
+            None => {}
+        }
+    }
+    fn enhanced_panel_key(&mut self, key: KeyCode) -> bool {
+        match key {
+            KeyCode::Escape => self.close_enhanced_panel(),
+            KeyCode::Enter | KeyCode::NumpadEnter => {
+                self.play_effect(BUTTON_PRESS.as_bytes(), None);
+                self.close_enhanced_panel();
+            }
+            KeyCode::KeyS => {
+                self.play_effect(BUTTON_PRESS.as_bytes(), None);
+                self.save_enhanced();
+            }
+            _ => return false,
+        }
+        true
+    }
+    /// Save to the settings file a launch reads, when the session may.
+    fn save_enhanced(&mut self) {
+        let path = if self.headless_session() {
+            None
+        } else {
+            settings_file()
+        };
+        self.save_enhanced_to(path.as_deref());
+    }
+    /// Save the session's settings to the active profile of the settings file
+    /// at `path`, and show what happened. A failure leaves the file alone and
+    /// the session running on what it has.
+    pub(crate) fn save_enhanced_to(&mut self, path: Option<&Path>) -> SaveOutcome {
+        let outcome = self.write_enhanced(path);
+        if let SaveOutcome::Failed(error) = &outcome {
+            tracing::warn!(%error, "enhanced settings not saved");
+            self.status = error.clone().into_bytes();
+        }
+        let note = outcome.note();
+        let saved = matches!(outcome, SaveOutcome::Saved { .. });
+        if let Some(panel) = self.enhanced_panel() {
+            panel.note = Some(note);
+            panel.unsaved &= !saved;
+        }
+        self.pointer.redraw = true;
+        outcome
+    }
+    /// The file is read, and written, only here.
+    fn write_enhanced(&self, path: Option<&Path>) -> SaveOutcome {
+        if self.headless_session() {
+            return SaveOutcome::Headless;
+        }
+        let Some(path) = path else {
+            return SaveOutcome::NoFile;
+        };
+        let file = match Config::load(path) {
+            Ok(file) => file,
+            Err(error) => return SaveOutcome::Failed(error.to_string()),
+        };
+        let edition = self.session_edition();
+        // A session that knows its profile saves there, whichever the file
+        // has active. One that does not can only trust the file's own.
+        let name = match &self.profile_name {
+            Some(name) => name.clone(),
+            None if file.active_game() == edition => file.active_profile().to_owned(),
+            None => {
+                return SaveOutcome::OtherProfile {
+                    file: file.active_profile().to_owned(),
+                    session: file.scope_name(edition).to_owned(),
+                };
+            }
+        };
+        let Some((owner, current)) = file.profile_enhanced(&name).filter(|it| it.0 == edition)
+        else {
+            return SaveOutcome::OtherProfile {
+                file: file.active_profile().to_owned(),
+                session: name,
+            };
+        };
+        let _ = owner;
+        let rules = match &self.screen {
+            Screen::Options(OptionsScreen::Enhanced(panel)) => panel.rules,
+            _ => None,
+        };
+        let settings = self.enhanced_values().profile(rules, current);
+        match config::save_profile_enhanced(path, &name, settings) {
+            Ok(()) => SaveOutcome::Saved { profile: name },
+            Err(error) => SaveOutcome::Failed(error),
+        }
+    }
+    /// The options menu's Enhanced button, in the art of the five above it.
+    fn draw_enhanced_entry(&self, painter: &Painter, image: &mut IndexedImage) {
+        let rect = ENHANCED_ENTRY;
+        let art = self.draw_button_opaque(painter, image, rect, ("opbtnoff.frm", "opbtnon.frm"));
+        let key = if art == "opbtnon.frm" {
+            ColorKey::LABEL_PRESSED
+        } else {
+            ColorKey::LABEL
+        };
+        painter.centered(image, 103, key, b"ENHANCED", [rect.x, rect.y + 8], rect.w);
+    }
+    /// The window: the presets, then a row for each setting with its value,
+    /// how it takes effect and its badge, then the last save's result.
+    fn draw_enhanced_panel(
+        &self,
+        painter: &Painter,
+        image: &mut IndexedImage,
+        panel: &EnhancedPanel,
+    ) {
+        let values = self.enhanced_values();
+        let [amber, grey, black] =
+            [ColorKey::AMBER, ColorKey::GREY, ColorKey::BLACK].map(|key| painter.color(key));
+        let Rect { x, y, w, h } = PANEL;
+        image.fill_rect([x, y, w, h], black);
+        outline(image, [x, y, w, h], amber);
+        outline(image, [x + 2, y + 2, w - 4, h - 4], grey);
+        let title = b"ENHANCED OPTIONS";
+        painter.centered(image, 103, ColorKey::LABEL, title, [x, y + 9], w);
+        for (index, preset) in BuiltinPreset::ALL.into_iter().enumerate() {
+            let rect = preset_rect(index);
+            let on = values.with_profile(preset.settings()) == values;
+            let area = [rect.x, rect.y, rect.w, rect.h];
+            image.fill_rect(area, if on { amber } else { black });
+            outline(image, area, amber);
+            let ink = if on { ColorKey::BLACK } else { ColorKey::AMBER };
+            let label = preset.label().as_bytes();
+            painter.centered(image, 101, ink, label, [rect.x, rect.y + 7], rect.w);
+        }
+        for (index, row) in EnhancedRow::ALL.into_iter().enumerate() {
+            let top = ROW_Y + ROW_HEIGHT * index as i32;
+            let label = row.label().as_bytes();
+            painter.text(image, 101, ColorKey::LABEL, label, [ROW_X, top + 4], 190);
+            let hint = row.hint().as_bytes();
+            painter.text(image, 101, ColorKey::GREY, hint, [ROW_X, top + 16], 190);
+            let rect = row.value_rect();
+            outline(image, [rect.x, rect.y, rect.w, rect.h], grey);
+            let text = values.text(row);
+            let origin = [rect.x, rect.y + 7];
+            painter.centered(image, 101, ColorKey::AMBER, text.as_bytes(), origin, rect.w);
+            let (tag, key) = values.tag(row);
+            painter.text(image, 101, key, tag.as_bytes(), [TAG_X, top + 10], 82);
+            draw_badge(painter, image, row, &values, row.badge_rect());
+        }
+        let (note, failed) = match &panel.note {
+            Some((note, failed)) => (note.as_str(), *failed),
+            None if values.rules == Preset::Vanilla => {
+                ("Vanilla rules start at the next launch.", false)
+            }
+            None if panel.unsaved => ("Applied now. Save keeps it for the next launch.", false),
+            None => ("", false),
+        };
+        let key = if failed {
+            ColorKey::RED
+        } else {
+            ColorKey::GREEN
+        };
+        painter.text(image, 101, key, note.as_bytes(), [ROW_X, NOTE_Y], 508);
+        for (at, caption) in [(SAVE_AT, b"SAVE"), (DONE_AT, b"DONE")] {
+            self.draw_red_button(painter, image, vault_core::ui::red_button(at));
+            let origin = [at[0] + CAPTION_DX, at[1] - 1];
+            painter.text(image, 103, ColorKey::LABEL, caption, origin, 70);
         }
     }
 }

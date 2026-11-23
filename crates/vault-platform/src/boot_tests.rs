@@ -310,7 +310,10 @@ fn spec020_a_choice_commits_game_and_last_played_together() {
         ..Config::default()
     };
     settings.commit(&path).unwrap();
-    settings.choose_game(GameProfile::Fallout2, paths("/data/master.dat"));
+    // A path below the folder: it is absolute on every host, where
+    // `/data/master.dat` would take the folder's drive when read on Windows.
+    let master = dir.path().join("data").join("master.dat");
+    settings.choose_game(GameProfile::Fallout2, paths(master.to_str().unwrap()));
     settings.last_played = Some("fallout2".to_owned());
     assert_eq!(
         commit_choice(&settings, &[dir.path().to_path_buf()]),
@@ -320,11 +323,7 @@ fn spec020_a_choice_commits_game_and_last_played_together() {
     assert_eq!(read.game, Some(GameProfile::Fallout2));
     assert_eq!(read.last_played.as_deref(), Some("fallout2"));
     assert_eq!(read.preset, Some(Preset::Enhanced));
-    assert_eq!(
-        read.master_dat,
-        Some(PathBuf::from("/data/master.dat")),
-        "the choice's paths"
-    );
+    assert_eq!(read.master_dat, Some(master), "the choice's paths");
     // A first choice with no file writes a new one.
     let fresh = tempfile::tempdir().unwrap();
     let written = commit_choice(&settings, &[fresh.path().to_path_buf()]).unwrap();
@@ -364,11 +363,275 @@ fn spec020_the_mod_count_reads_the_list_and_counts_the_enabled() {
         mod_list: Some(ModList::File(list)),
         ..Config::default()
     };
-    assert_eq!(enabled_mods(&config), 1);
-    assert_eq!(enabled_mods(&Config::default()), 0);
+    assert_eq!(enabled_mods(&config, GameProfile::Fallout1), 1);
+    assert_eq!(enabled_mods(&config, GameProfile::Fallout2), 0, "its own");
+    assert_eq!(enabled_mods(&Config::default(), GameProfile::Fallout1), 0);
     let missing = Config {
         mod_list: Some(ModList::File(dir.path().join("gone.toml"))),
         ..Config::default()
     };
-    assert_eq!(enabled_mods(&missing), 0, "it never stops a boot");
+    assert_eq!(
+        enabled_mods(&missing, GameProfile::Fallout1),
+        0,
+        "it never stops a boot"
+    );
+}
+
+/// A settings file with Fallout 2 on sfall and a load order of `ettu`, whose
+/// manifest asks for sfall mode, and Fallout 1 on nothing.
+const SCOPED: &str = "game = \"fallout2\"\n\n[profiles.fallout2]\nsfall = true\n\
+                      mod_list = [\"mods/ettu\"]\n";
+
+fn scoped_settings(dir: &Path, text: &str) -> Config {
+    let layer = dir.join("mods/ettu");
+    std::fs::create_dir_all(&layer).unwrap();
+    std::fs::write(
+        layer.join("vault-mod.toml"),
+        "name = \"Et Tu\"\n[scripting]\nsfall = true\n",
+    )
+    .unwrap();
+    let path = dir.join(config::FILE_NAME);
+    std::fs::write(&path, text).unwrap();
+    Config::load(&path).unwrap()
+}
+
+/// Fallout 2's stack is no reason to refuse Fallout 1, from either side of a
+/// switch, and the rows count each edition's own mods.
+#[test]
+fn fallout2s_sfall_and_mods_do_not_stop_fallout1() {
+    use GameProfile::{Fallout1, Fallout2};
+    let dir = tempfile::tempdir().unwrap();
+    let settings = scoped_settings(dir.path(), SCOPED);
+    let (one, two) = installs();
+    let found = dirs(one.path(), two.path());
+    assert_eq!(settings.game, Some(Fallout2));
+    assert_eq!(settings.sfall, Some(true));
+    let before = settings.clone();
+    assert!(validate_choice(&settings, &found, Fallout1, false).is_ok());
+    assert!(validate_choice(&settings, &found, Fallout2, false).is_ok());
+    assert_eq!(settings, before, "a check changes nothing");
+
+    let selector = Selector::new(&settings, both(), Some(Fallout2));
+    assert_eq!(selector.row(Fallout1).label(1), "1  Fallout 1");
+    assert_eq!(selector.row(Fallout2).label(2), "2  Fallout 2  (1 mod)");
+
+    // The other way round, with Fallout 1 the file's game.
+    let mut settings = settings;
+    settings.switch_game(Fallout1);
+    assert_eq!((settings.sfall, settings.mod_list.clone()), (None, None));
+    assert!(check_profile(&settings, Fallout1, false).is_ok());
+    assert!(check_profile(&settings, Fallout2, false).is_ok());
+}
+
+/// The same file before scoping, in the state a refused switch left it:
+/// `game` already says Fallout 1, under sfall and Fallout 2's mods.
+#[test]
+fn a_file_from_before_scoping_lets_fallout1_boot_too() {
+    use GameProfile::{Fallout1, Fallout2};
+    let dir = tempfile::tempdir().unwrap();
+    let settings = scoped_settings(
+        dir.path(),
+        "game = \"fallout1\"\nmod_list = [\"mods/ettu\"]\n[scripting]\nsfall = true\n",
+    );
+    assert_eq!((settings.sfall, settings.mod_list.clone()), (None, None));
+    assert!(check_profile(&settings, Fallout1, false).is_ok());
+    assert!(check_profile(&settings, Fallout2, false).is_ok());
+    let fallout2 = settings.scoped_to(Fallout2);
+    assert_eq!(fallout2.sfall, Some(true));
+    assert_eq!(
+        fallout2.mod_list,
+        Some(ModList::Paths(vec![dir.path().join("mods/ettu")]))
+    );
+}
+
+/// Each refusal says why, for the selector's row, and changes nothing.
+#[test]
+fn a_profile_that_cannot_run_is_refused_with_its_reason() {
+    use GameProfile::{Fallout1, Fallout2};
+    let dir = tempfile::tempdir().unwrap();
+    // Sfall on the edition that cannot run it: by the key, by a manifest of
+    // one of its layers, and by a carried flag.
+    let by_key = scoped_settings(dir.path(), "[profiles.fallout1]\nsfall = true\n");
+    let (one, two) = installs();
+    let found = dirs(one.path(), two.path());
+    let before = by_key.clone();
+    let reason = validate_choice(&by_key, &found, Fallout1, false).unwrap_err();
+    assert_eq!(reason, "sfall mode runs only under the fallout2 profile");
+    assert_eq!(by_key, before);
+    let by_manifest = scoped_settings(
+        dir.path(),
+        "[profiles.fallout1]\nmod_list = [\"mods/ettu\"]\n",
+    );
+    let reason = check_profile(&by_manifest, Fallout1, false).unwrap_err();
+    assert!(reason.contains("fallout2"), "{reason}");
+    assert!(check_profile(&Config::default(), Fallout1, true).is_err());
+    assert!(check_profile(&Config::default(), Fallout2, true).is_ok());
+    // A load order that does not read, and a layer that does not mount.
+    let path = dir.path().join("gone.toml");
+    let unread = Config {
+        mod_list: Some(ModList::File(path.clone())),
+        ..Config::default()
+    };
+    let reason = check_profile(&unread, Fallout1, false).unwrap_err();
+    assert!(reason.starts_with("mod_list: "), "{reason}");
+    assert!(reason.contains(&path.display().to_string()), "{reason}");
+    let unmounted = Config {
+        mod_list: Some(ModList::Paths(vec![dir.path().join("mods/none")])),
+        ..Config::default()
+    };
+    let reason = check_profile(&unmounted, Fallout1, false).unwrap_err();
+    assert!(reason.starts_with("mod_list: "), "{reason}");
+    // A missing install comes first, as discovery says it.
+    let empty = tempfile::tempdir().unwrap();
+    let none = dirs(empty.path(), empty.path());
+    assert_eq!(
+        validate_choice(&Config::default(), &none, Fallout1, false),
+        Err(NOT_FOUND.to_owned())
+    );
+}
+
+/// `switch-cases-rev4.tsv`, the cases the selector answers by itself: S14,
+/// S16, and S17 to S19 over a Vanilla session.
+#[test]
+fn spec020_rev4_the_preset_toggle_on_the_selector() {
+    use GameProfile::{Fallout1, Fallout2};
+    let table = include_str!("../../../tests/fixtures/spec020/switch-cases-rev4.tsv");
+    assert_eq!(table.lines().count(), 13, "S14 to S25");
+    // S14: the row toggles, and nothing is chosen.
+    let mut selector =
+        Selector::new(&Config::default(), both(), None).with_preset(Preset::Vanilla, None);
+    assert_eq!(selector.preset_label(), "P  Preset: Vanilla");
+    assert_eq!(selector.handle(&key(KeyCode::KeyP)), None);
+    assert_eq!(selector.preset_label(), "P  Preset: Enhanced");
+    assert_eq!(selector.toggled(), Some(Preset::Enhanced));
+    // S15: the choice carries it.
+    assert_eq!(
+        selector.handle(&key(KeyCode::Digit2)),
+        Some(BootAction::Choose(Fallout2))
+    );
+    // S16: no toggle.
+    let mut selector =
+        Selector::new(&Config::default(), both(), None).with_preset(Preset::Vanilla, None);
+    assert_eq!(
+        selector.handle(&key(KeyCode::Digit1)),
+        Some(BootAction::Choose(Fallout1))
+    );
+    assert_eq!(selector.toggled(), None);
+    // The row starts on the next boot's preset, not the file's.
+    let settings = Config {
+        preset: Some(Preset::Vanilla),
+        ..Config::default()
+    };
+    let selector = Selector::new(&settings, both(), None).with_preset(Preset::Enhanced, None);
+    assert_eq!(selector.preset_label(), "P  Preset: Enhanced");
+    assert_eq!(selector.toggled(), None);
+
+    let over_vanilla = || {
+        Selector::new(&Config::default(), both(), Some(Fallout1))
+            .with_preset(Preset::Vanilla, Some(Preset::Vanilla))
+    };
+    // S17: the same edition under the other preset is a switch.
+    let mut selector = over_vanilla();
+    selector.handle(&key(KeyCode::KeyP));
+    assert_eq!(
+        selector.handle(&key(KeyCode::Digit1)),
+        Some(BootAction::Choose(Fallout1))
+    );
+    // S18: toggled back, it resumes.
+    let mut selector = over_vanilla();
+    selector.handle(&key(KeyCode::KeyP));
+    selector.handle(&key(KeyCode::KeyP));
+    assert_eq!(selector.toggled(), None);
+    assert_eq!(
+        selector.handle(&key(KeyCode::Digit1)),
+        Some(BootAction::Leave)
+    );
+    // S19: Esc forgets a toggle.
+    let mut selector = over_vanilla();
+    selector.handle(&key(KeyCode::KeyP));
+    assert_eq!(
+        selector.handle(&key(KeyCode::Escape)),
+        Some(BootAction::Leave)
+    );
+    // The next boot's preset can differ from the session's, if the settings
+    // changed under it. Toggling to the session's own still resumes it, and
+    // with no toggle the running edition resumes as ever (D-23).
+    let drifted = || {
+        Selector::new(&Config::default(), both(), Some(Fallout1))
+            .with_preset(Preset::Enhanced, Some(Preset::Vanilla))
+    };
+    assert_eq!(
+        drifted().handle(&key(KeyCode::Digit1)),
+        Some(BootAction::Leave)
+    );
+    let mut selector = drifted();
+    selector.handle(&key(KeyCode::KeyP));
+    assert_eq!(selector.toggled(), Some(Preset::Vanilla));
+    assert_eq!(
+        selector.handle(&key(KeyCode::Digit1)),
+        Some(BootAction::Leave)
+    );
+}
+
+/// S21: `S`, `Tab` or a click opens Setup on the highlighted edition, even
+/// one not found, because the launcher is where its paths are fixed. A click
+/// on the preset row toggles, and a pointer over either changes no edition.
+#[test]
+fn spec020_rev4_setup_and_the_preset_row_take_the_mouse_and_keys() {
+    use GameProfile::{Fallout1, Fallout2};
+    for found in [both(), only_first()] {
+        let settings = Config {
+            last_played: Some("fallout2".to_owned()),
+            ..Config::default()
+        };
+        let mut selector = Selector::new(&settings, found, None);
+        for input in [key(KeyCode::KeyS), key(KeyCode::Tab)] {
+            assert_eq!(
+                selector.handle(&input),
+                Some(BootAction::Setup(Fallout2)),
+                "{input:?}"
+            );
+        }
+    }
+    let mut selector = Selector::new(&Config::default(), both(), None);
+    let [x, y, ..] = Selector::rect(SETUP_ROW);
+    let setup = LauncherInput::Press([x + 4, y + 4]);
+    assert_eq!(selector.handle(&setup), Some(BootAction::Setup(Fallout1)));
+    let [x, y, ..] = Selector::rect(PRESET_ROW);
+    assert_eq!(selector.handle(&LauncherInput::Press([x + 4, y + 4])), None);
+    assert_eq!(selector.toggled(), Some(Preset::Enhanced));
+    let before = selector.image();
+    selector.handle(&LauncherInput::Pointer([x + 4, y + 4]));
+    assert_eq!(selector.highlight(), Fallout1);
+    assert_ne!(
+        selector.image().pixels(),
+        before.pixels(),
+        "the row lights under the pointer"
+    );
+    assert_eq!(
+        Selector::new(&Config::default(), both(), None)
+            .highlighting(Fallout2)
+            .highlight(),
+        Fallout2
+    );
+}
+
+/// Revision 5 of SPEC-023: with no settings file the end of the list writes
+/// nothing, says nothing and creates nothing. With one it commits, and a
+/// commit that fails still reports.
+#[test]
+fn spec020_rev4_finished_hints_are_quiet_with_no_settings_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let dirs = [dir.path().to_path_buf()];
+    assert_eq!(finish_hints(&dirs), Ok(false));
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+    let path = dir.path().join(config::FILE_NAME);
+    Config::default().commit(&path).unwrap();
+    assert_eq!(finish_hints(&dirs), Ok(true));
+    let read = Config::load(&path).unwrap();
+    assert_eq!(read.hotkey_hints, Some(HotkeyHints::Off));
+
+    std::fs::write(&path, b"preset = [").unwrap();
+    assert!(finish_hints(&dirs).is_err(), "the file fails to commit");
 }

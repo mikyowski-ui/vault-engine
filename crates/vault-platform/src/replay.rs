@@ -55,7 +55,7 @@ use winit::keyboard::KeyCode;
 pub const FRAME_MS: u64 = 16;
 /// The desktop's initial logical window size, for an untimed log until it
 /// reports a resize.
-const INITIAL_SURFACE: [u32; 2] = [960, 640];
+pub const INITIAL_SURFACE: [u32; 2] = [960, 640];
 
 /// The interactive world a preview shows, if any: a map preview, or the
 /// game's current world.
@@ -277,6 +277,11 @@ impl Replay {
             replay.present()?;
         }
         Ok(replay)
+    }
+
+    /// The world the replay has reached, if the session shows one.
+    pub fn world(&mut self) -> Option<&mut MapPreview> {
+        interactive_world(&mut self.session)
     }
 
     /// Lines 1 and 2 of the stream, and row 0.
@@ -727,6 +732,17 @@ impl Replay {
                     if world.apply_debug(&command).is_ok() || world.debug_enabled() {
                         self.compose()?;
                     }
+                }
+            }
+            InputCommand::Bot { action } => {
+                if let Some(world) = interactive_world(&mut self.session) {
+                    // A refusal is part of the run: the world stands as it did.
+                    let _ = world.apply_bot(&action);
+                }
+            }
+            InputCommand::Autoplay { on } => {
+                if let Some(world) = interactive_world(&mut self.session) {
+                    world.replay_autoplay(on)?;
                 }
             }
             // Focus does not reach the preview; a logged hover is the

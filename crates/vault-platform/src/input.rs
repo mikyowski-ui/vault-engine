@@ -85,6 +85,16 @@ pub enum InputCommand {
     Debug {
         command: vault_core::debug::DebugCommand,
     },
+    /// An action the autoplay bot took. The shell logs it, then applies it; a
+    /// replay applies the logged record and runs no agent.
+    Bot {
+        action: vault_core::autoplay::BotAction,
+    },
+    /// Watch Mode's bot was handed control or gave it back. Logged so a
+    /// replay does not read the takeover's Space as ending a turn.
+    Autoplay {
+        on: bool,
+    },
     /// The shell's display scaling: logged after the surface and on every
     /// Alt+S, so a replay maps the pointer through the same viewport. A
     /// log without one is replayed with integer scaling.
@@ -170,6 +180,10 @@ pub struct EnhancedRecord {
     /// when set, so other logs are unchanged and read as `false`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub navigation_only: bool,
+    /// The overlay a session starts with: written only when a profile names
+    /// it, so other logs are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tactical_overlay: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,6 +217,7 @@ impl From<EnhancedSettings> for EnhancedRecord {
                 RoofPeek::Hidden => LoggedRoofPeek::Hidden,
             },
             ui_scale: settings.ui_scale,
+            tactical_overlay: settings.tactical_overlay,
             navigation_only: settings.navigation_only,
         }
     }
@@ -223,6 +238,7 @@ impl From<EnhancedRecord> for EnhancedSettings {
                 LoggedRoofPeek::Hidden => RoofPeek::Hidden,
             },
             ui_scale: record.ui_scale,
+            tactical_overlay: record.tactical_overlay,
             navigation_only: record.navigation_only,
         }
     }
@@ -915,6 +931,7 @@ mod tests {
             roof_peek: RoofPeek::CursorXray,
             ui_scale: Some(2.0),
             navigation_only: false,
+            tactical_overlay: None,
         };
         let command = InputCommand::Enhanced {
             settings: settings.into(),

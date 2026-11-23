@@ -377,8 +377,12 @@ impl Glyph {
 }
 /// The four cells (sign, hundreds, tens, ones) at offsets 0, 6, 15, 24.
 pub const COUNTER_CELLS: [i32; 4] = [0, 6, 15, 24];
+/// §3.21 the value a counter shows: values clamp to -999 through 999.
+pub fn counter_value(value: i32) -> i32 {
+    value.clamp(-999, 999)
+}
 pub fn counter_glyphs(value: i32) -> [Glyph; 4] {
-    let value = value.clamp(-999, 999);
+    let value = counter_value(value);
     let digits = value.unsigned_abs();
     [
         if value < 0 {
@@ -391,24 +395,26 @@ pub fn counter_glyphs(value: i32) -> [Glyph; 4] {
         Glyph::Digit((digits % 10) as u8),
     ]
 }
-/// The delay between roll frames for a change from `old` to `new`.
+/// The delay between roll frames for a change from `old` to `new`, both
+/// clamped first: §3.21 computes it from the clamped value.
 pub fn roll_delay(old: i32, new: i32) -> u64 {
-    250 / (u64::from(old.abs_diff(new)) + 1)
+    250 / (u64::from(counter_value(old).abs_diff(counter_value(new))) + 1)
 }
 /// The frames of one unit step from `value` to `value ± 1`: "up" in the
 /// ones cell; on a carry "up" in the tens cell, on a further carry "up"
 /// then "down" in the hundreds cell, then "down" in the tens cell; "down" in
 /// the ones cell; then the true digits. Each frame is followed by a wait.
 pub fn roll_frames(value: i32, up: bool) -> Vec<[Glyph; 4]> {
-    let next = if up { value + 1 } else { value - 1 };
+    let value = counter_value(value);
+    let next = counter_value(if up { value + 1 } else { value - 1 });
     let mut cells = counter_glyphs(value);
     let mut frames = Vec::new();
     let show = |cells: &mut [Glyph; 4], cell: usize, glyph: Glyph, frames: &mut Vec<[Glyph; 4]>| {
         cells[cell] = glyph;
         frames.push(*cells);
     };
-    let tens_carry = value.abs() / 10 != next.abs() / 10;
-    let hundreds_carry = value.abs() / 100 != next.abs() / 100;
+    let tens_carry = value.unsigned_abs() / 10 != next.unsigned_abs() / 10;
+    let hundreds_carry = value.unsigned_abs() / 100 != next.unsigned_abs() / 100;
     show(&mut cells, 3, Glyph::RollUp, &mut frames);
     if tens_carry {
         show(&mut cells, 2, Glyph::RollUp, &mut frames);
@@ -427,9 +433,12 @@ pub fn roll_frames(value: i32, up: bool) -> Vec<[Glyph; 4]> {
 /// starts at r in yellow, rising past y one starts at y in white; falling
 /// past y one starts at y in yellow, falling past r one starts at r in
 /// red. The first segment uses the previously `shown` color; when the color
-/// does not change there is one segment.
+/// does not change there is one segment. The band is the true HP's; the
+/// roll runs between the clamped values.
 pub fn roll_segments(old: i32, new: i32, max: i32, shown: Band) -> Vec<(i32, i32, Band)> {
-    if hp_band(new, max) == shown {
+    let band = hp_band(new, max);
+    let (old, new) = (counter_value(old), counter_value(new));
+    if band == shown {
         return vec![(old, new, shown)];
     }
     let (r, y) = (max / 4, max / 2);
@@ -456,7 +465,11 @@ pub fn roll_segments(old: i32, new: i32, max: i32, shown: Band) -> Vec<(i32, i32
 }
 /// The frames of a whole roll from `old` through its color segments: the
 /// first frame draws `old`, then each one-unit step's frames; every frame
-/// is followed by one wait of `roll_delay(old, new)`.
+/// is followed by one wait of `roll_delay(old, new)`. §3.21 clamps the
+/// values first, so a roll is at most the 1998 units from -999 to 999
+/// whatever it is given. Every unit of that is drawn: the step rule is
+/// `[Must-match]`, and past 249 units the wait is 0, so a roll never takes
+/// longer for being larger.
 pub fn roll(old: i32, segments: &[(i32, i32, Band)]) -> Vec<([Glyph; 4], Band)> {
     let first = segments.first().map_or(Band::White, |(_, _, band)| *band);
     // §3.21 `[May-improve]`: the reference's first frame draws the previous
@@ -465,9 +478,10 @@ pub fn roll(old: i32, segments: &[(i32, i32, Band)]) -> Vec<([Glyph; 4], Band)> 
     // digits with a separate sign (`counter_glyphs`).
     let mut frames = vec![(counter_glyphs(old), first)];
     for (start, end, band) in segments {
-        let mut value = *start;
-        while value != *end {
-            let up = *end > value;
+        let (start, end) = (counter_value(*start), counter_value(*end));
+        let mut value = start;
+        while value != end {
+            let up = end > value;
             frames.extend(
                 roll_frames(value, up)
                     .into_iter()
@@ -476,7 +490,7 @@ pub fn roll(old: i32, segments: &[(i32, i32, Band)]) -> Vec<([Glyph; 4], Band)> 
             value += if up { 1 } else { -1 };
         }
         if start == end {
-            frames.push((counter_glyphs(*end), *band));
+            frames.push((counter_glyphs(end), *band));
         }
     }
     frames
@@ -775,5 +789,77 @@ impl BarButtons {
     pub fn release(&mut self, point: Option<[i32; 2]>) -> Option<Key> {
         let over = point.and_then(|point| self.layout().hit(point));
         self.armed.release(over).map(BarButton::key)
+    }
+}
+
+#[cfg(test)]
+mod roll_bounds {
+    use super::{Band, Glyph, counter_glyphs, roll, roll_delay, roll_frames, roll_segments};
+
+    const MOST_NEGATIVE: [Glyph; 4] = [
+        Glyph::Minus,
+        Glyph::Digit(9),
+        Glyph::Digit(9),
+        Glyph::Digit(9),
+    ];
+
+    /// Every unit of a roll draws three frames, two more on a tens carry and
+    /// two more on a hundreds carry; the first frame draws P. The full span
+    /// -999 to 999 is the longest roll §3.21 can ask for.
+    const LONGEST_ROLL: usize = 1 + 3 * 1998 + 2 * 198 + 2 * 18;
+
+    #[test]
+    fn spec014_a_normal_roll_keeps_every_unit_and_its_timing() {
+        // §3.21 `[Must-match]`: a 50-unit change is not shortened. 50 units
+        // of 3 frames, 5 tens carries, 1 hundreds carry, the first frame.
+        let frames = roll(100, &roll_segments(100, 50, 100, Band::White));
+        assert_eq!(frames.len(), 1 + 3 * 50 + 2 * 5 + 2);
+        assert_eq!(frames.last().unwrap().0, counter_glyphs(50));
+        assert_eq!(roll_delay(100, 50), 250 / 51);
+        assert_eq!(roll_delay(10, 5), 41);
+    }
+
+    #[test]
+    fn spec014_the_longest_legal_roll_is_finite_and_ends_on_its_value() {
+        let frames = roll(-999, &[(-999, 999, Band::White)]);
+        assert_eq!(frames.len(), LONGEST_ROLL);
+        assert_eq!(frames.last().unwrap().0, counter_glyphs(999));
+        // Past 249 units the wait is 0: the whole roll ends in one tick.
+        assert_eq!(roll_delay(-999, 999), 0);
+    }
+
+    #[test]
+    fn spec014_i32_min_clamps_instead_of_overflowing() {
+        assert_eq!(counter_glyphs(i32::MIN), MOST_NEGATIVE);
+        for value in [i32::MIN, i32::MIN + 1, i32::MAX, i32::MAX - 1] {
+            for up in [false, true] {
+                assert!(!roll_frames(value, up).is_empty());
+            }
+        }
+        // The roll is computed from the clamped change (V clamped first).
+        assert_eq!(roll_delay(i32::MIN, i32::MAX), 250 / 1999);
+        assert_eq!(roll_delay(900, i32::MAX), 250 / 100);
+
+        let segments = roll_segments(30, i32::MIN, 30, Band::White);
+        let frames = roll(30, &segments);
+        assert!(frames.len() <= LONGEST_ROLL);
+        let (glyphs, band) = *frames.last().unwrap();
+        assert_eq!((glyphs, band), (MOST_NEGATIVE, Band::Red));
+    }
+
+    #[test]
+    fn spec014_a_very_large_delta_rolls_only_the_clamped_change() {
+        // Unclamped this is over four billion units; V clamps to 999 and P
+        // to -999, so it is exactly the longest legal roll.
+        let segments = roll_segments(i32::MIN, i32::MAX, i32::MAX, Band::Red);
+        let frames = roll(i32::MIN, &segments);
+        assert!(frames.len() <= LONGEST_ROLL);
+        assert_eq!(frames.last().unwrap().0, counter_glyphs(999));
+
+        // Unclamped segments handed straight to `roll` are bounded too, and
+        // land on the same value.
+        let frames = roll(i32::MIN, &[(i32::MIN, i32::MAX, Band::White)]);
+        assert_eq!(frames.len(), LONGEST_ROLL);
+        assert_eq!(frames.last().unwrap().0, counter_glyphs(i32::MAX));
     }
 }

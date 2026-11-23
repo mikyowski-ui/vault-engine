@@ -64,6 +64,8 @@ pub struct LibraryState {
     pub mouse_hidden: bool,
     pub mouse_shape: Option<(Vec<u8>, [i32; 2])>,
     pub sounds: [Option<SoundState>; 32],
+    /// The sound opcodes run, newest last: the newest
+    /// [`TRACE_RETAINED`](crate::host::TRACE_RETAINED) at least.
     pub sound_trace: Vec<(u16, u32)>,
     pub named: [Option<NamedBinding>; 40],
     pub keys: BTreeMap<i32, (u32, u32)>,
@@ -325,8 +327,8 @@ impl<A: WorldAssets> WorldHost<A> {
             0x8057 => self.library.border = [call.int(1), call.int(0)],
             0x8058 | 0x8059 => {
                 let mut images = vec![call.args[0].text.clone()];
-                for index in 1..4 {
-                    let value = call.args[index].value;
+                for arg in &call.args[1..4] {
+                    let value = arg.value;
                     if base_tag(value) == Value::INTEGER && value.payload != 0 {
                         return Err(VmError::Type(value.tag));
                     }
@@ -794,12 +796,12 @@ impl<A: WorldAssets> WorldHost<A> {
                 } else {
                     u32::MAX
                 };
-                self.library.sound_trace.push((word, handle));
+                crate::host::push_bounded(&mut self.library.sound_trace, (word, handle));
                 return Ok(Some(ExternalValue::Value(Value::integer(handle as i32))));
             }
             0x8099..=0x809d => {
                 let handle = call.uint(0);
-                self.library.sound_trace.push((word, handle));
+                crate::host::push_bounded(&mut self.library.sound_trace, (word, handle));
                 // Safe rule: a handle whose stripped slot is outside 0-31 (or
                 // empty) is a no-op, like -1.
                 let slot = (handle & !0xa000_0000) as usize;

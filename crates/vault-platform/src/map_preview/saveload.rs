@@ -446,6 +446,13 @@ impl MapPreview {
             SaveLoadOutcome::QuitConfirm => self.confirm_quit(),
         }
     }
+    /// Load the newest save, from a save screen already open. With none the
+    /// screen stays, showing the empty slots.
+    pub(crate) fn load_newest_slot(&mut self) {
+        if let Some(slot) = newest_slot(&self.save_root) {
+            self.load_slot(slot);
+        }
+    }
     /// Load an occupied slot from the screen.
     fn load_slot(&mut self, slot: usize) {
         let Screen::SaveLoad(screen) = &self.screen else {
@@ -667,10 +674,49 @@ impl MapPreview {
 #[path = "saveload_parity_tests.rs"]
 mod parity_tests;
 
+/// The slot, from 0, whose `SAVE.DAT` under `root` was written last; of equals
+/// the first.
+fn newest_slot(root: &std::path::Path) -> Option<usize> {
+    (0..vault_core::ui::saveload::SLOTS)
+        .filter_map(|slot| {
+            let name = slot_name(slot as u8 + 1).ok()?;
+            let file = root.join("SAVEGAME").join(name).join("SAVE.DAT");
+            let written = std::fs::metadata(file).ok()?.modified().ok()?;
+            Some((written, std::cmp::Reverse(slot)))
+        })
+        .max()
+        .map(|(_, slot)| slot.0)
+}
+
 #[cfg(test)]
 impl MapPreview {
     /// Every slot's state, as the screen would list it.
     pub(crate) fn slot_states(&self) -> Vec<SlotState> {
         self.scan_slots().0
+    }
+}
+
+#[cfg(test)]
+mod newest_tests {
+    use super::*;
+
+    /// The slot written last, not the highest or the first.
+    #[test]
+    fn the_newest_save_is_the_last_written() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(newest_slot(dir.path()), None);
+        let write = |slot: &str, seconds: u64| {
+            let folder = dir.path().join("SAVEGAME").join(slot);
+            std::fs::create_dir_all(&folder).unwrap();
+            let file = std::fs::File::create(folder.join("SAVE.DAT")).unwrap();
+            let time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+            file.set_modified(time).unwrap();
+        };
+        write("SLOT01", 100);
+        write("SLOT02", 300);
+        write("SLOT05", 200);
+        assert_eq!(newest_slot(dir.path()), Some(1));
+        write("SLOT07", 300);
+        assert_eq!(newest_slot(dir.path()), Some(1), "of equals, the first");
     }
 }

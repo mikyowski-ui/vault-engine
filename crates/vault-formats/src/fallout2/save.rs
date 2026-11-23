@@ -218,10 +218,13 @@ impl WorldMapSave2 {
                     .copied()
                     .unwrap_or(false)
         };
+        // `area` is still unchecked here: an area past the installed table
+        // has no entrances, so any slot in it refuses the load below.
         let entrance_ok = entrance == -1
-            || (area >= 0
-                && usize::try_from(entrance)
-                    .is_ok_and(|slot| slot < shape.entrances[area as usize]));
+            || usize::try_from(area)
+                .ok()
+                .and_then(|area| shape.entrances.get(area))
+                .is_some_and(|count| usize::try_from(entrance).is_ok_and(|slot| slot < *count));
         if !area_ok(area) || !entrance_ok || !area_ok(car_area) || !map_ok(car_map) {
             return Err(invalid(
                 r,

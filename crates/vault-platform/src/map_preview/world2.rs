@@ -20,14 +20,14 @@ use super::{
     MapPreview, Screen,
     world::TownOrigin,
     world_kit::{
-        Bounds, Hold, Leg, TownPress, VIEW_CLIP, WorldEdition, WorldView, red_button, triangle_art,
+        Bounds, Hold, TownPress, VIEW_CLIP, WorldEdition, WorldView, red_button, triangle_art,
     },
 };
 use crate::{AppResult, interface::Painter};
 use std::ops::{Deref, DerefMut};
 use vault_core::{
-    Fallout2Travel,
     fallout2::{self, Fallout2World, Selected},
+    host_player::TravelPass,
     sfall::encounter_flag,
     ui::{
         ColorKey, ERROR_SOUND, Rect,
@@ -237,18 +237,8 @@ impl WorldEdition for Fallout2 {
     fn travel_to_place(preview: &mut MapPreview, city: usize) -> bool {
         preview.travel_to_city(city)
     }
-    fn travel_iteration(preview: &mut MapPreview) -> AppResult<Leg<Selected>> {
-        Ok(match preview.host.fallout2_travel_iteration()? {
-            Fallout2Travel::Idle => Leg::Idle,
-            Fallout2Travel::Moving => Leg::Moving,
-            Fallout2Travel::Arrived | Fallout2Travel::Blocked => Leg::Stopped,
-            Fallout2Travel::OutOfFuel => Leg::OutOfFuel,
-            Fallout2Travel::Interrupted(_) => Leg::Interrupted,
-            Fallout2Travel::Encounter(selected) => Leg::Encounter(selected),
-        })
-    }
-    fn travel_mark(preview: &MapPreview) -> Option<[i32; 2]> {
-        preview.state2().and_then(|state| state.mark)
+    fn travel_pass(preview: &mut MapPreview) -> AppResult<TravelPass<Selected>> {
+        Ok(preview.host.fallout2_travel_pass()?)
     }
     fn enter_location(preview: &mut MapPreview, city: Option<usize>) {
         preview.enter_location2(city);
@@ -300,21 +290,11 @@ impl MapPreview {
     }
     /// §3.12.3 the town list: every known city, in city-table order.
     pub(crate) fn known_cities(&self) -> Vec<usize> {
-        let Some(state) = self.state2() else {
-            return Vec::new();
-        };
-        state
-            .tables
-            .city
-            .areas()
-            .map(|area| area.number as usize)
-            .filter(|city| state.areas.get(*city).is_some_and(|area| area.known >= 1))
-            .collect()
+        self.host.fallout2_known_cities()
     }
     /// The city whose circle holds the party, known or not.
     fn party_city(&self) -> Option<usize> {
-        let state = self.state2()?;
-        state.area_at(state.position)
+        self.host.fallout2_party_city()
     }
     fn city_name(&self, city: usize) -> Vec<u8> {
         self.state2()
@@ -478,17 +458,8 @@ impl MapPreview {
     }
     /// §3.12.3 travel toward a city's jittered position.
     fn travel_to_city(&mut self, city: usize) -> bool {
-        let Some(position) = self
-            .state2()
-            .and_then(|state| state.areas.get(city))
-            .map(|area| area.position)
-        else {
-            return false;
-        };
-        let target = fallout2::city_target(position, &mut self.host.world.rng)
-            .and_then(|target| self.host.fallout2_travel_to(target).map(|()| target));
-        match target {
-            Ok(_) => true,
+        match self.host.player_head_for_city(city) {
+            Ok(started) => started,
             Err(error) => {
                 self.status = error.to_string().into_bytes();
                 false
@@ -496,9 +467,30 @@ impl MapPreview {
         }
     }
     fn city_locked(&self, city: usize) -> bool {
-        self.state2()
-            .and_then(|state| state.areas.get(city))
-            .is_some_and(|area| area.locked)
+        self.host.fallout2_city_locked(city)
+    }
+    /// The bot heads for city `place`.
+    pub(super) fn bot_head_for_city(&mut self, place: usize) -> vault_core::autoplay::BotOutcome {
+        use vault_core::autoplay::BotOutcome;
+        if !self.known_cities().contains(&place) || self.city_locked(place) {
+            return BotOutcome::Refused(format!("city {place} is not open"));
+        }
+        let travelling = self.state2().and_then(|state| state.travel).is_some();
+        self.world_map_head_for::<Fallout2>(place, travelling);
+        BotOutcome::Done
+    }
+    /// The bot enters where the party stands.
+    pub(super) fn bot_enter_city(&mut self) -> vault_core::autoplay::BotOutcome {
+        self.world_map_entry::<Fallout2>(screen::ENTER_MS);
+        vault_core::autoplay::BotOutcome::Done
+    }
+    /// The bot takes the town map's marker `index`.
+    pub(super) fn bot_take_city_marker(
+        &mut self,
+        index: usize,
+    ) -> vault_core::autoplay::BotOutcome {
+        Fallout2::town_choice(self, index);
+        vault_core::autoplay::BotOutcome::Done
     }
     /// §3.12.3 a town-list row's release: travel to a city the party is
     /// not in, enter the one it is in; a locked city does nothing.

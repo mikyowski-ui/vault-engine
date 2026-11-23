@@ -1,0 +1,13 @@
+case	state	input	result	world_changed
+S14	Boot selector, preset Vanilla	P	The row reads Enhanced; nothing is written yet	no
+S15	S14, then 2	Choice	Fallout 2 boots under Enhanced; game, last_played and preset commit once	new session
+S16	Boot selector, preset not toggled	1	Boots; preset is not written	new session
+S17	Fallout 1 Vanilla session, selector open	P, then 1	Same edition, new preset: validated, torn down, booted	new session
+S18	Fallout 1 Vanilla session, selector open	P, P, then 1	The preset is back as it was: the session resumes at the same step	no
+S19	Fallout 1 Vanilla session, selector open	P, then Esc	The session resumes, Vanilla; the toggle is forgotten	no
+S20	Session started with --preset vanilla, selector open	P, then 2	The toggle wins for this boot, and preset is written	new session
+S21	Boot selector	S or Tab	The launcher opens; its Quit button reads Back	no
+S22	S21	Back	The selector returns, and discovery runs again	no
+S23	Session, selector open	S, then Back	The selector returns; the session is still stopped at its step	no
+S24	Session, selector open	S, Save, Back	Settings are written; the session is unchanged	no
+S25	Session, selector open	S, then Play	As a switch: validated first, then torn down and booted	new session

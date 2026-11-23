@@ -5,6 +5,8 @@
 //! `tests/fixtures/items/support.rs` is not part of it: it implements
 //! `vault-core` types, so `vault-core` includes that file as its own module.
 
+#[path = "../../../tests/fixtures/campaign/support.rs"]
+pub mod campaign;
 #[path = "../../../tests/fixtures/archive/dat.rs"]
 pub mod dat;
 #[path = "../../../tests/fixtures/archive/dat2.rs"]

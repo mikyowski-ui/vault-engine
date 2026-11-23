@@ -76,14 +76,48 @@ impl<T> TraceRing<T> {
     }
 }
 
+/// Why a stepper would not run an instruction: something else ran, or would
+/// have, inside a critical section it had stopped in (see
+/// [`CriticalHold`](crate::stepper::CriticalHold)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoldBreach {
+    /// A step of another VM while `held` was mid-section.
+    OtherVm { held: u32, stepped: u32 },
+    /// The host's clock moved, so the world ticked, between two steps.
+    ClockMoved { vm: u32, from_ms: u32, to_ms: u32 },
+}
+impl fmt::Display for HoldBreach {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OtherVm { held, stepped } => {
+                write!(f, "vm {held} holds a critical section, vm {stepped} waits")
+            }
+            Self::ClockMoved { vm, from_ms, to_ms } => write!(
+                f,
+                "the clock moved from {from_ms} to {to_ms} inside vm {vm}'s critical section"
+            ),
+        }
+    }
+}
+
 /// What one step did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {
-    /// `Vm::run` returned normally; `Budget` means the step completed with the
-    /// program still runnable.
+    /// `Vm::run` or `Vm::step` returned normally; `Budget` means the step
+    /// completed with the program still runnable.
     Ran(RunOutcome),
     /// The VM faulted; it is now ended with its error state set.
     Fault(VmError),
+    /// The stepper refused to run it; the VM did not change.
+    Refused(HoldBreach),
+}
+impl From<Result<RunOutcome, VmError>> for StepOutcome {
+    fn from(result: Result<RunOutcome, VmError>) -> Self {
+        match result {
+            Ok(outcome) => Self::Ran(outcome),
+            Err(error) => Self::Fault(error),
+        }
+    }
 }
 impl fmt::Display for StepOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -91,6 +125,7 @@ impl fmt::Display for StepOutcome {
             Self::Ran(RunOutcome::Budget) => f.write_str("ok"),
             Self::Ran(outcome) => write!(f, "{}", format!("{outcome:?}").to_lowercase()),
             Self::Fault(error) => write!(f, "fault: {error}"),
+            Self::Refused(breach) => write!(f, "refused: {breach}"),
         }
     }
 }

@@ -126,13 +126,154 @@ pub(crate) struct PointerState {
 /// SPEC-014 §3.27 the in-world cursor's objects for one refresh: the
 /// cursor's art layer (every mode's art, a flat object), movement mode's
 /// hex outline frame and its corner, and the AP-text layer (an upright
-/// object), all at the hex under the pointer. The layers are view-sized,
-/// with index 0 transparent.
+/// object), all at the hex under the pointer. Each layer is an image of its
+/// own origin in the view, with index 0 transparent.
 pub(crate) struct CursorObjects {
     pub hex: i32,
     pub art: IndexedImage,
+    /// `art`'s top-left corner in the view.
+    pub art_origin: [i64; 2],
     pub ring: Option<(Arc<FrmArchive>, [i64; 2])>,
     pub text: Option<IndexedImage>,
+    /// `text`'s top-left corner in the view.
+    pub text_origin: [i64; 2],
+}
+
+impl CursorObjects {
+    /// The same objects with view-sized layers at the view's corner.
+    #[cfg(test)]
+    pub(crate) fn view_sized(self, [width, height]: [u32; 2]) -> Option<Self> {
+        let widen = |layer: &IndexedImage, origin: [i64; 2]| {
+            let mut wide = IndexedImage::new(width, height).ok()?;
+            wide.copy_image(layer, origin.map(|value| value as i32));
+            Some(wide)
+        };
+        Some(Self {
+            hex: self.hex,
+            art: widen(&self.art, self.art_origin)?,
+            art_origin: [0, 0],
+            ring: self.ring,
+            text: match &self.text {
+                Some(text) => Some(widen(text, self.text_origin)?),
+                None => None,
+            },
+            text_origin: [0, 0],
+        })
+    }
+}
+
+/// The font and width limit of the cursor's text.
+const CURSOR_FONT: i32 = 101;
+const CURSOR_TEXT_LIMIT: i32 = 80;
+
+/// One draw of a cursor layer, in view pixels.
+enum Stroke<'a> {
+    /// Frame 0 of the art, from its top-left corner.
+    Art(Arc<FrmArchive>, [i64; 2]),
+    /// Text with a one-pixel black outline.
+    Text(ColorKey, &'a [u8], [i32; 2]),
+}
+
+impl Stroke<'_> {
+    /// Frame 0 of the interface art `name` at `origin`.
+    fn art(painter: &Painter, name: &str, origin: [i32; 2]) -> Option<Self> {
+        Some(Self::Art(painter.art(name)?, origin.map(i64::from)))
+    }
+    /// The cursor art `name` with its hotspot ([`Painter::cursor`]) at
+    /// `point`.
+    fn cursor(painter: &Painter, name: &str, point: [i32; 2]) -> Option<Self> {
+        let art = painter.art(name)?;
+        let frame = art.frame(0, 0)?;
+        let [sx, sy] = art.shifts[0].map(i64::from);
+        let origin = [
+            i64::from(point[0]) - i64::from(frame.width / 2) + sx,
+            i64::from(point[1]) - i64::from(frame.height) + 1 + sy,
+        ];
+        Some(Self::Art(art, origin))
+    }
+    /// `[left, top, right, bottom]` around every view pixel it can write,
+    /// `None` when it writes none.
+    fn bounds(&self, painter: &Painter) -> Option<[i64; 4]> {
+        match self {
+            Self::Art(art, [left, top]) => {
+                let frame = art.frame(0, 0)?;
+                Some([
+                    *left,
+                    *top,
+                    left + i64::from(frame.width),
+                    top + i64::from(frame.height),
+                ])
+            }
+            Self::Text(_, text, [left, top]) => {
+                let font = painter.font(CURSOR_FONT)?;
+                let glyphs = font.layout(text, CURSOR_TEXT_LIMIT as u32, false).glyphs;
+                let (right, bottom) = glyphs
+                    .iter()
+                    .filter_map(|at| Some((at, font.glyph(at.code)?)))
+                    .map(|(at, glyph)| {
+                        (
+                            at.x + i64::from(glyph.width),
+                            i64::from(at.y + glyph.height),
+                        )
+                    })
+                    .reduce(|a, b| (a.0.max(b.0), a.1.max(b.1)))?;
+                let [left, top] = [left, top].map(|value| i64::from(*value));
+                Some([left - 1, top - 1, left + right + 1, top + bottom + 1])
+            }
+        }
+    }
+    /// Draw it on a layer whose corner is view pixel `[left, top]`.
+    fn draw(&self, painter: &Painter, layer: &mut IndexedImage, [left, top]: [i64; 2]) {
+        match self {
+            Self::Art(art, origin) => {
+                if let Some(frame) = art.frame(0, 0) {
+                    layer.blit(frame, [origin[0] - left, origin[1] - top]);
+                }
+            }
+            Self::Text(key, text, origin) => {
+                let origin = [origin[0] - left as i32, origin[1] - top as i32];
+                outlined(painter, layer, *key, text, origin);
+            }
+        }
+    }
+}
+
+/// `strokes` drawn in order on a transparent view of `size`, as an image of
+/// just the pixels they can write and its corner in the view: one
+/// transparent pixel when they write none.
+fn cropped_layer(
+    painter: &Painter,
+    strokes: &[Stroke],
+    size: [u32; 2],
+) -> Option<(IndexedImage, [i64; 2])> {
+    let crop = strokes
+        .iter()
+        .filter_map(|stroke| stroke.bounds(painter))
+        .reduce(|a, b| {
+            [
+                a[0].min(b[0]),
+                a[1].min(b[1]),
+                a[2].max(b[2]),
+                a[3].max(b[3]),
+            ]
+        })
+        .map(|[left, top, right, bottom]| {
+            [
+                left.max(0),
+                top.max(0),
+                right.min(i64::from(size[0])),
+                bottom.min(i64::from(size[1])),
+            ]
+        })
+        .filter(|[left, top, right, bottom]| left < right && top < bottom);
+    let Some([left, top, right, bottom]) = crop else {
+        return Some((IndexedImage::new(1, 1).ok()?, [0, 0]));
+    };
+    let mut layer = IndexedImage::new((right - left) as u32, (bottom - top) as u32).ok()?;
+    for stroke in strokes {
+        stroke.draw(painter, &mut layer, [left, top]);
+    }
+    Some((layer, [left, top]))
 }
 
 /// The loot and barter windows' cursor art.
@@ -164,16 +305,16 @@ fn outlined(
             if (dx, dy) != (0, 0) {
                 painter.text(
                     image,
-                    101,
+                    CURSOR_FONT,
                     ColorKey::BLACK,
                     text,
                     [origin[0] + dx, origin[1] + dy],
-                    80,
+                    CURSOR_TEXT_LIMIT,
                 );
             }
         }
     }
-    painter.text(image, 101, key, text, origin, 80);
+    painter.text(image, CURSOR_FONT, key, text, origin, CURSOR_TEXT_LIMIT);
 }
 
 impl MapPreview {
@@ -1087,20 +1228,29 @@ impl MapPreview {
             && !self.host.world.ui_disabled)
             .then_some(at)
     }
+    /// SPEC-014 §3.27 the in-world cursor's objects over `view`.
+    pub(crate) fn cursor_objects(&self, view: MapView) -> Option<CursorObjects> {
+        self.cropped_cursor_objects(view)
+    }
     /// SPEC-014 §3.27 the in-world cursor's objects over `view`, at the hex
     /// under the pointer: none while it does not show, or off the hex grid.
     /// Movement mode snaps the `msef003.frm` hex outline to that hex, with
     /// its AP text at the hex's cell; the other modes follow the pointer by
-    /// pixel.
-    pub(crate) fn cursor_objects(&self, view: MapView) -> Option<CursorObjects> {
+    /// pixel. The layers hold only what they draw, so a wide canvas costs
+    /// no more than a small one and they always fit the instanced path's
+    /// atlas.
+    pub(crate) fn cropped_cursor_objects(&self, view: MapView) -> Option<CursorObjects> {
         let [width, height] = [view.width, view.height];
         let at = self.world_cursor_at()?;
         let hex = view.grid.pick_hex(at)?;
+        if ![width, height].iter().all(|side| (1..=4096).contains(side)) {
+            return None;
+        }
         let painter = Painter {
             assets: &self.host.assets,
             palette: &self.palette,
         };
-        let mut art = IndexedImage::new(width, height).ok()?;
+        let mut art = Vec::new();
         let mut ring = None;
         let mut text = None;
         let feedback = self.pointer.feedback.as_ref();
@@ -1117,21 +1267,14 @@ impl MapPreview {
                         center[0] + sx - i64::from(frame.width / 2),
                         center[1] + sy - i64::from(frame.height) + 1,
                     ];
-                    art.blit(frame, origin);
+                    art.push(Stroke::Art(frames.clone(), origin));
                     ring = Some((frames.clone(), origin));
                 }
                 if let Some(Feedback::Cost(cost, key)) = feedback {
-                    let mut layer = IndexedImage::new(width, height).ok()?;
                     let cell = [center[0] as i32 - 16, center[1] as i32 - 8];
-                    let width = painter.width(101, cost);
-                    outlined(
-                        &painter,
-                        &mut layer,
-                        *key,
-                        cost,
-                        [cell[0] + (32 - width) / 2, cell[1] + 3],
-                    );
-                    text = Some(layer);
+                    let width = painter.width(CURSOR_FONT, cost);
+                    let origin = [cell[0] + (32 - width) / 2, cell[1] + 3];
+                    text = Some(Stroke::Text(*key, cost, origin));
                 }
             }
             Mode::Arrow => match feedback {
@@ -1142,41 +1285,41 @@ impl MapPreview {
                     let (name, shift) = cursor::pick_art(at[0] - edge[0], at[1] - edge[1]);
                     let top = at[1] - shift;
                     if name == "actarrom.frm" {
-                        painter.blit(&mut art, name, 0, [at[0] - 28, top]);
-                        painter.blit(&mut art, icon, 0, [at[0] - 68, top]);
+                        art.extend(Stroke::art(&painter, name, [at[0] - 28, top]));
+                        art.extend(Stroke::art(&painter, icon, [at[0] - 68, top]));
                     } else {
-                        painter.blit(&mut art, "actarrow.frm", 0, [at[0], top]);
-                        painter.blit(&mut art, icon, 0, [at[0] + 29, top]);
+                        art.extend(Stroke::art(&painter, "actarrow.frm", [at[0], top]));
+                        art.extend(Stroke::art(&painter, icon, [at[0] + 29, top]));
                     }
                 }
-                _ => {
-                    painter.cursor(&mut art, Mode::Arrow.art(), at);
-                }
+                _ => art.extend(Stroke::cursor(&painter, Mode::Arrow.art(), at)),
             },
             Mode::Crosshair => match feedback {
                 Some(Feedback::Hit(hit, key)) => {
-                    painter.cursor(&mut art, "acttohit.frm", at);
-                    outlined(
-                        &painter,
-                        &mut art,
-                        *key,
-                        hit,
-                        [at[0] - 10 + 22, at[1] - 10 + 1],
-                    );
+                    art.extend(Stroke::cursor(&painter, "acttohit.frm", at));
+                    art.push(Stroke::Text(*key, hit, [at[0] - 10 + 22, at[1] - 10 + 1]));
                 }
-                _ => {
-                    painter.cursor(&mut art, Mode::Crosshair.art(), at);
-                }
+                _ => art.extend(Stroke::cursor(&painter, Mode::Crosshair.art(), at)),
             },
             mode @ (Mode::UseCrosshair | Mode::Skill(_)) => {
-                painter.cursor(&mut art, mode.art(), at);
+                art.extend(Stroke::cursor(&painter, mode.art(), at));
             }
         }
+        let (art, art_origin) = cropped_layer(&painter, &art, [width, height])?;
+        let (text, text_origin) = match text {
+            Some(stroke) => {
+                let (layer, origin) = cropped_layer(&painter, &[stroke], [width, height])?;
+                (Some(layer), origin)
+            }
+            None => (None, [0, 0]),
+        };
         Some(CursorObjects {
             hex,
             art,
+            art_origin,
             ring,
             text,
+            text_origin,
         })
     }
     /// The arrow and the stacked 40-by-40 icons, the highlighted one in its
@@ -1273,5 +1416,299 @@ impl MapPreview {
     /// Whether the action menu is open.
     pub(crate) fn menu_open(&self) -> bool {
         self.pointer.menu.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::{interactive, synthetic_corpus};
+    use super::*;
+    use vault_core::ui::cursor::Mode;
+    use vault_fixtures::world::frm;
+    use vault_formats::HexGrid;
+
+    /// The art the cursor draws: patterned with holes, some with shifts, so
+    /// a wrong hotspot or a lost pixel shows.
+    const ART: [(&str, u16, u16, [i16; 2]); 7] = [
+        ("msef003.frm", 32, 16, [2, -1]),
+        ("actarrow.frm", 24, 28, [0, 0]),
+        ("actarrom.frm", 24, 28, [0, 0]),
+        ("testicon.frm", 40, 40, [0, 0]),
+        ("acrshair.frm", 21, 21, [3, 5]),
+        ("acttohit.frm", 21, 21, [-3, 4]),
+        ("crossuse.frm", 19, 23, [-2, -6]),
+    ];
+
+    fn world() -> (tempfile::TempDir, MapPreview) {
+        let dir = synthetic_corpus();
+        let root = dir.path();
+        std::fs::write(
+            root.join("font1.aaf"),
+            super::super::state_fixture::preview_aaf(),
+        )
+        .unwrap();
+        for (name, width, height, [sx, sy]) in ART {
+            let mut bytes = frm(width, height, 0);
+            bytes[10..12].copy_from_slice(&sx.to_be_bytes());
+            bytes[22..24].copy_from_slice(&sy.to_be_bytes());
+            let start = bytes.len() - usize::from(width) * usize::from(height);
+            for (at, pixel) in bytes[start..].iter_mut().enumerate() {
+                *pixel = if at % 7 == 0 { 0 } else { 40 + (at % 90) as u8 };
+            }
+            std::fs::write(root.join("art/intrface").join(name), bytes).unwrap();
+        }
+        let mut preview = interactive(root);
+        preview.tick(16).unwrap();
+        preview.image().unwrap();
+        (dir, preview)
+    }
+
+    fn view_of(preview: &MapPreview, width: u32, height: u32) -> MapView {
+        MapView {
+            grid: HexGrid::centered(20100, width, height).unwrap(),
+            width,
+            height,
+            ..preview.view
+        }
+    }
+
+    /// Every cursor state: each mode, with and without its feedback.
+    fn states() -> Vec<(Mode, Option<Feedback>)> {
+        vec![
+            (Mode::Movement, None),
+            (
+                Mode::Movement,
+                Some(Feedback::Cost(b"12".to_vec(), ColorKey::AMBER)),
+            ),
+            (Mode::Arrow, None),
+            (Mode::Arrow, Some(Feedback::Pick("testicon.frm"))),
+            (Mode::Crosshair, None),
+            (
+                Mode::Crosshair,
+                Some(Feedback::Hit(b"95%".to_vec(), ColorKey::AMBER)),
+            ),
+            (Mode::UseCrosshair, None),
+        ]
+    }
+
+    /// A view-sized draw: the hex, art layer, ring origin and text layer.
+    type ViewSized = (i32, IndexedImage, Option<[i64; 2]>, Option<IndexedImage>);
+
+    /// The layers as `cursor_objects` drew them before they were cropped:
+    /// view-sized, through the painter.
+    fn drawn_view_sized(preview: &MapPreview, view: MapView) -> Option<ViewSized> {
+        let [width, height] = [view.width, view.height];
+        let at = preview.world_cursor_at()?;
+        let hex = view.grid.pick_hex(at)?;
+        let painter = Painter {
+            assets: &preview.host.assets,
+            palette: &preview.palette,
+        };
+        let mut art = IndexedImage::new(width, height).ok()?;
+        let mut ring = None;
+        let mut text = None;
+        let feedback = preview.pointer.feedback.as_ref();
+        match preview.hud.mode {
+            Mode::Movement => {
+                let center = view.grid.hex_center(hex).ok()?;
+                if let Some(frames) = painter.art(Mode::Movement.art())
+                    && let Some(frame) = frames.frame(0, 0)
+                {
+                    let [sx, sy] = frames.shifts[0].map(i64::from);
+                    let origin = [
+                        center[0] + sx - i64::from(frame.width / 2),
+                        center[1] + sy - i64::from(frame.height) + 1,
+                    ];
+                    art.blit(frame, origin);
+                    ring = Some(origin);
+                }
+                if let Some(Feedback::Cost(cost, key)) = feedback {
+                    let mut layer = IndexedImage::new(width, height).ok()?;
+                    let cell = [center[0] as i32 - 16, center[1] as i32 - 8];
+                    let width = painter.width(101, cost);
+                    let origin = [cell[0] + (32 - width) / 2, cell[1] + 3];
+                    outlined(&painter, &mut layer, *key, cost, origin);
+                    text = Some(layer);
+                }
+            }
+            Mode::Arrow => match feedback {
+                Some(Feedback::Pick(icon)) => {
+                    let edge = [width as i32 - 640, height as i32 - 380];
+                    let (name, shift) = cursor::pick_art(at[0] - edge[0], at[1] - edge[1]);
+                    let top = at[1] - shift;
+                    if name == "actarrom.frm" {
+                        painter.blit(&mut art, name, 0, [at[0] - 28, top]);
+                        painter.blit(&mut art, icon, 0, [at[0] - 68, top]);
+                    } else {
+                        painter.blit(&mut art, "actarrow.frm", 0, [at[0], top]);
+                        painter.blit(&mut art, icon, 0, [at[0] + 29, top]);
+                    }
+                }
+                _ => {
+                    painter.cursor(&mut art, Mode::Arrow.art(), at);
+                }
+            },
+            Mode::Crosshair => match feedback {
+                Some(Feedback::Hit(hit, key)) => {
+                    painter.cursor(&mut art, "acttohit.frm", at);
+                    let origin = [at[0] - 10 + 22, at[1] - 10 + 1];
+                    outlined(&painter, &mut art, *key, hit, origin);
+                }
+                _ => {
+                    painter.cursor(&mut art, Mode::Crosshair.art(), at);
+                }
+            },
+            mode @ (Mode::UseCrosshair | Mode::Skill(_)) => {
+                painter.cursor(&mut art, mode.art(), at);
+            }
+        }
+        Some((hex, art, ring, text))
+    }
+
+    /// In every state at `at`: the cropped layers hold exactly the pixels
+    /// of the view-sized ones, in less than `limit` pixels a side. Returns
+    /// the opaque pixels the view shows, `None` off the hex grid.
+    fn check(preview: &mut MapPreview, view: MapView, at: [i32; 2], limit: u32) -> Option<usize> {
+        check_states(preview, view, at, limit, states())
+    }
+
+    fn check_states(
+        preview: &mut MapPreview,
+        view: MapView,
+        at: [i32; 2],
+        limit: u32,
+        states: Vec<(Mode, Option<Feedback>)>,
+    ) -> Option<usize> {
+        preview.pointer.at = Some(at);
+        preview.pointer.world = true;
+        let size = [view.width, view.height];
+        let mut shown = None;
+        for (mode, feedback) in states {
+            let label = format!("{at:?} {mode:?} {feedback:?}");
+            preview.hud.mode = mode;
+            preview.pointer.feedback = feedback;
+            let want = drawn_view_sized(preview, view);
+            let got = preview.cropped_cursor_objects(view);
+            assert_eq!(got.is_some(), want.is_some(), "{label}");
+            let (Some(got), Some((hex, art, ring, text))) = (got, want) else {
+                continue;
+            };
+            for layer in [Some(&got.art), got.text.as_ref()].into_iter().flatten() {
+                assert!(
+                    layer.width() <= limit && layer.height() <= limit,
+                    "{label}: {} by {}",
+                    layer.width(),
+                    layer.height()
+                );
+            }
+            let opaque = |image: &IndexedImage| image.pixels().iter().filter(|p| **p != 0).count();
+            let cropped_opaque = opaque(&got.art);
+            let wide = got.view_sized(size).unwrap();
+            assert_eq!(wide.hex, hex, "{label}");
+            assert_eq!(wide.ring.map(|(_, origin)| origin), ring, "{label}");
+            assert!(wide.art.pixels() == art.pixels(), "{label}: art");
+            assert_eq!(cropped_opaque, opaque(&art), "{label}: art");
+            match (&wide.text, &text) {
+                (Some(got), Some(want)) => {
+                    assert!(got.pixels() == want.pixels(), "{label}: text");
+                }
+                (None, None) => {}
+                _ => panic!("{label}: text layer"),
+            }
+            *shown.get_or_insert(0) += cropped_opaque + text.as_ref().map_or(0, opaque);
+            // What the refresh is given is the same picture.
+            let live = preview.cursor_objects(view).unwrap().view_sized(size);
+            assert!(live.unwrap().art.pixels() == art.pixels(), "{label}");
+        }
+        shown
+    }
+
+    #[test]
+    fn cursor_layers_keep_their_pixels_near_every_canvas_edge() {
+        let (_dir, mut preview) = world();
+        let view = view_of(&preview, 640, 380);
+        for at in [
+            [320, 190],
+            [0, 190],
+            [2, 190],
+            [639, 190],
+            [637, 190],
+            [320, 0],
+            [320, 2],
+            [320, 379],
+            [320, 377],
+            [0, 0],
+            [639, 0],
+            [0, 379],
+            [639, 379],
+        ] {
+            let shown = check(&mut preview, view, at, 200);
+            assert!(shown.is_some_and(|shown| shown > 0), "{at:?}");
+        }
+    }
+
+    #[test]
+    fn cursor_layers_stay_small_on_a_4096_pixel_canvas() {
+        let (_dir, mut preview) = world();
+        let view = view_of(&preview, 4096, 380);
+        for at in [
+            [2048, 190],
+            [0, 190],
+            [4095, 190],
+            [4095, 0],
+            [4095, 379],
+            [4060, 190],
+        ] {
+            let shown = check(&mut preview, view, at, 200);
+            assert!(shown.is_some_and(|shown| shown > 0), "{at:?}");
+        }
+        // The hex grid is a rhombus: a tall canvas's corners are off it, so
+        // they have no cursor, and its edges' middles do.
+        let view = view_of(&preview, 4096, 2160);
+        assert_eq!(check(&mut preview, view, [4095, 0], 200), None);
+        for at in [[2048, 1080], [2048, 0], [2048, 2159], [0, 1080]] {
+            let shown = check(&mut preview, view, at, 200);
+            assert!(shown.is_some_and(|shown| shown > 0), "{at:?}");
+        }
+    }
+
+    /// Past the canvas the art and text clip away. The objects stay, as
+    /// they did, with a one-pixel transparent layer in place of an empty
+    /// image.
+    #[test]
+    fn an_off_canvas_cursor_keeps_its_objects_with_transparent_layers() {
+        let (_dir, mut preview) = world();
+        let view = view_of(&preview, 640, 380);
+        for at in [[-200, 190], [840, 190], [320, -200], [-200, -200]] {
+            assert_eq!(check(&mut preview, view, at, 1), Some(0), "{at:?}");
+        }
+        // Below the canvas the pick art's shift rule brings it back up, as
+        // it always did; everything else clips away.
+        let (pick, others): (Vec<_>, Vec<_>) = states()
+            .into_iter()
+            .partition(|(_, feedback)| matches!(feedback, Some(Feedback::Pick(_))));
+        for at in [[320, 580], [840, 580]] {
+            let clipped = check_states(&mut preview, view, at, 1, others.clone());
+            assert_eq!(clipped, Some(0), "{at:?}");
+        }
+        assert!(check_states(&mut preview, view, [320, 580], 200, pick).is_some_and(|n| n > 0));
+        // Partly off the canvas, the cropped layer keeps what still shows.
+        for at in [[-5, 190], [645, 190], [320, -5], [320, 385]] {
+            assert!(check(&mut preview, view, at, 200).is_some(), "{at:?}");
+        }
+    }
+
+    /// A view no image can be made for has no cursor.
+    #[test]
+    fn a_view_past_the_image_limit_has_no_cursor_objects() {
+        let (_dir, mut preview) = world();
+        preview.pointer.at = Some([320, 190]);
+        preview.pointer.world = true;
+        let mut view = view_of(&preview, 640, 380);
+        assert!(preview.cursor_objects(view).is_some());
+        view.width = 4097;
+        assert!(preview.cursor_objects(view).is_none());
+        view.width = 0;
+        assert!(preview.cursor_objects(view).is_none());
     }
 }

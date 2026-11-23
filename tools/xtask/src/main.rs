@@ -7,6 +7,8 @@ use std::{
 use clap::{Parser, Subcommand};
 use vault_fixtures::{dat, dat2, gallery, state, vm};
 
+mod clean_room;
+mod install_desktop;
 mod wasm_check;
 
 #[derive(Parser)]
@@ -26,6 +28,11 @@ enum Task {
     /// missing it says so and checks them on the host instead;
     /// `VAULT_REQUIRE_WASM=1` makes a missing target a failure.
     WasmCheck,
+    /// The ingestion rule of `CLAUDE.md`: scan `specs/`, `oracle/` and `docs/`
+    /// for 40-character hashes, foreign source paths and C code fences, print
+    /// each hit as `file:line: kind`, and exit 1 if there is one. It edits
+    /// nothing. CI runs it; it is not one of `check`'s gates.
+    CleanRoomCheck,
     /// Materialize a complete synthetic map/prototype/art/INT corpus in an empty
     /// directory, and the same corpus with the enhanced camera demo map
     /// `maps/cam_demo.map` in `<PATH>-cam-demo`, also empty.
@@ -79,6 +86,15 @@ enum Task {
         #[arg(long, value_name = "PATH")]
         render_path: Option<String>,
     },
+    /// Put the release build in the Linux desktop menu for this user: the
+    /// binary in `~/.local/bin`, an icon, and a desktop entry with an action
+    /// for each game. It never builds: run `cargo build --release --package
+    /// vault-platform` first.
+    InstallDesktop {
+        /// Remove those three files instead.
+        #[arg(long)]
+        uninstall: bool,
+    },
 }
 
 /// The workspace root.
@@ -120,19 +136,25 @@ fn check() -> Result<(), Box<dyn Error>> {
     }
 }
 
+/// The exit of a task whose closing line says how it went, so the status is
+/// all that is left.
+fn exit_with(status: Result<u8, Box<dyn Error>>) -> ExitCode {
+    match status {
+        Ok(code) => ExitCode::from(code),
+        Err(error) => {
+            eprintln!("xtask: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let result = match Args::parse().command {
         Task::Check => check(),
-        // Its closing line says how it went, so the status is all that is left.
         Task::WasmCheck => {
-            return match root().and_then(|root| wasm_check::run(root, &cargo())) {
-                Ok(code) => ExitCode::from(code),
-                Err(error) => {
-                    eprintln!("xtask: {error}");
-                    ExitCode::FAILURE
-                }
-            };
+            return exit_with(root().and_then(|root| wasm_check::run(root, &cargo())));
         }
+        Task::CleanRoomCheck => return exit_with(root().and_then(clean_room::run)),
         Task::Fixtures { output } => materialize(&output),
         Task::ExportMod {
             name,
@@ -146,6 +168,12 @@ fn main() -> ExitCode {
             stage,
             render_path,
         } => capture_gallery(&output, &stage, render_path.as_deref()),
+        Task::InstallDesktop { uninstall } => if uninstall {
+            install_desktop::run_uninstall()
+        } else {
+            install_desktop::run()
+        }
+        .map_err(Into::into),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

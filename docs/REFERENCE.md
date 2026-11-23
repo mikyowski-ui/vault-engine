@@ -4,7 +4,7 @@ The full reference for [Vault Engine](../README.md): installing and building,
 the desktop shell and its settings (`vault-engine.toml`), the launcher, the
 touch UI, the enhanced view and quality-of-life features, mod manifests
 (`vault-mod.toml`), the corpus audit tools, and the engine's notes on each
-approved specification (`SPEC-001` to `SPEC-019`). The front page is the
+approved specification (`SPEC-001` to `SPEC-024c`). The front page is the
 [README](../README.md); the clean-room process is in
 [`PROVENANCE.md`](../PROVENANCE.md).
 
@@ -63,9 +63,9 @@ frame.
 
 `AGENTS.md` is the repository's implementation policy. `PROVENANCE.md` records
 the two-team clean-room process, and `CONTRIBUTING.md` the clean-room
-certification every contribution requires. Format behavior follows
+certification every contribution requires. Behavior follows
 `specs/approved/SPEC-001-pal-frm-lst.md` through
-`SPEC-019-fallout2-interface-party-and-car.md`. No original game data is
+`SPEC-024c-mod-premade-startmap-and-city-rules.md`. No original game data is
 needed to build, test, or run the synthetic shell and preview fixtures.
 
 <details>
@@ -92,6 +92,13 @@ needed to build, test, or run the synthetic shell and preview fixtures.
 | `SPEC-017` | Fallout 2 host words and VM deltas |
 | `SPEC-018` | Fallout 2 mounting, saves and data tables |
 | `SPEC-019` | Fallout 2 interface, party control, the car and game-flow deltas |
+| `SPEC-020` | Unified session runtime and core UI authority, with the boot menu and warm switch ([Boot menu and Alt+L](#boot-menu-and-altl)) |
+| `SPEC-021` | Deterministic state hash, combat sub-hash, trace oracles and replay checkpoints ([Replay checkpoints](#replay-checkpoints)) |
+| `SPEC-022` | GPU-instanced sprite batching and hex lightmaps ([Render path](#render-path), [renderer notes](#renderer-notes-for-spec-022-revision-2)) |
+| `SPEC-023` | In-memory VFS mounting, portable storage and the wasm32 compile gate ([In-memory mounts](#in-memory-mounts-and-portable-storage-spec-023)) |
+| `SPEC-024a` | Engine hooks and mod scripts ([Manifest scripting](#manifest-scripting-spec-024a)) |
+| `SPEC-024b` | sfall extended opcodes, dynamic arrays and hook scripts ([Sfall mode](#sfall-mode-spec-024b)) |
+| `SPEC-024c` | Mod premade sheets, startup overrides and table parsing ([Mod premades](#mod-premades-startup-keys-and-tables-spec-024c)) |
 
 The per-spec reference sections further down are collapsed; open the one
 you need.
@@ -110,7 +117,7 @@ you need.
 | `vault-debug` | Headless VM stepper and instruction trace, GVAR/MVAR/LVAR watches, and map object/critter inspectors with tick diffs and text rendering |
 | `vault-platform` | Desktop shell, asset preview, input command logging |
 | `vault-fixtures` | Dev-only synthetic test fixture builders, compiled once and shared by the crates' tests and `xtask` |
-| `xtask` | Engineering gate runner, synthetic fixture writer, mod exporter (`export-mod`) and documentation gallery renderer (`capture-gallery`) |
+| `xtask` | Engineering gate runner (`check`, `wasm-check`), ingestion scan (`clean-room-check`), synthetic fixture writer, mod exporter (`export-mod`) and documentation gallery renderer (`capture-gallery`) |
 | `asset-audit` | Loose-corpus counts and format validation |
 
 ## Build and verify
@@ -131,6 +138,24 @@ cargo xtask check
 `--locked` fails instead of updating `Cargo.lock`, so CI and local gates build
 the committed dependency set.
 
+`cargo xtask clean-room-check` is not a gate, and `cargo xtask check` does not
+run it; CI does. It applies the ingestion rule of `CLAUDE.md` to `specs/`,
+`oracle/` and this folder, and prints each hit as `file:line: kind`, without
+the text it found. It exits 1 on any hit, and edits nothing, because a hit in
+`specs/` or `oracle/` is rejected and never sanitized on this side of the wall.
+- **Hash:** a run of exactly 40 hexadecimal digits. The oracle's longer
+  SHA-256 digests are not hits.
+- **Foreign source path:** a path through a directory named `src`, in any
+  case. In `specs/` and `oracle/` every such path is foreign. Here in `docs/`,
+  a path from the repository root into the sources of an existing folder under
+  `crates/` or `tools/` is allowed. Any other spelling of it is a hit.
+- **C code fence:** a Markdown fence tagged with a C or C++ language. It reads
+  only the tag, so a listing in a `text` fence is not found.
+
+Binary files (a NUL in the first 8000 bytes) are skipped and counted. Bytes
+that are not UTF-8 are replaced and the file is still read. A missing folder or
+an unreadable file is an error, not a pass.
+
 The dev profile builds `vault-formats` and `vault-core` at `opt-level = 2`, so
 debug runs of the desktop decode, decompress, light and route at near-release
 speed while the other crates keep full debug builds.
@@ -141,12 +166,15 @@ Cargo command `--locked`) runs these jobs on each push and pull request:
 - `wasm-check` (Linux): installs the `wasm32-unknown-unknown` target, runs
   `cargo xtask wasm-check` with `VAULT_REQUIRE_WASM=1`, so it can never pass by
   skipping, and runs the memory tests with `--no-default-features`.
+- `clean-room`: `cargo xtask clean-room-check`, run as
+  `cargo run --locked --package xtask -- clean-room-check`.
 - `msrv`: `cargo check --workspace --all-targets` on the `rust-version` from
   `Cargo.toml` (1.88).
 - `fuzz-check`: rustfmt over `fuzz/fuzz_targets/` and
   `cargo check --manifest-path fuzz/Cargo.toml --bins` on stable.
 - `windows-release`: a release build (`vault-platform.exe`, `asset-audit.exe`,
-  uploaded as artifacts) and the workspace tests.
+  uploaded as artifacts) and the workspace tests, with `VAULT_REQUIRE_GPU=1`,
+  so a GPU test cannot pass by skipping.
 - `macos`: build and test.
 - `supply-chain`: `cargo audit` and `cargo deny check` (policy in `deny.toml`)
   over both `Cargo.lock` and `fuzz/Cargo.lock`.
@@ -188,6 +216,8 @@ are clean-room safe:
 - `widescreen-modals-qol.gif`: Shift's ground-item outlines, a crate's
   loot window over the dimmed widescreen world, TAKE ALL, then the
   companion's Gear window from its pill and WIELD twice.
+- `launcher-settings-preview.png`: the launcher's live preview of the Enhanced
+  settings.
 - `f9-live-debugger.gif`: the F9 overlay's pages (the script trace, the
   object inspector on a clicked critter, the GVAR and MVAR editors, the map
   jump, the item spawner) to the camera page's Export Current Setup as Mod.
@@ -255,9 +285,44 @@ keeps these keys and **Alt+L** (and, under `preset = "enhanced"`, **Alt+V** and
 The window opens at 1280×960, or at the largest multiple of 640×480 that
 fits a smaller monitor.
 
-With no arguments the game starts from the data named in `vault-engine.toml`,
-looked for beside the executable and then in the working directory. Keys:
-`master_dat`, `critter_dat`, `data_root`, `mod_list` (or `load_order`),
+With no arguments the game starts from the data named in `vault-engine.toml`.
+A file beside the executable, then one in the working directory, wins, so a
+portable install stays put. Otherwise the file is the per-user one:
+`$XDG_CONFIG_HOME/vault-engine` or `~/.config/vault-engine` on Linux,
+`~/Library/Application Support/vault-engine` on macOS and
+`%APPDATA%\vault-engine` on Windows. Saves go to `saves/<profile>/` in the
+per-user data folder (`$XDG_DATA_HOME/vault-engine` or
+`~/.local/share/vault-engine` on Linux) unless `--save-dir` names a folder.
+If `./SAVEGAME` already holds a slot, both editions keep using the working
+directory, and nothing is moved.
+
+`sfall` and `mod_list` belong to one profile, so Fallout 2's mods never reach
+Fallout 1:
+
+```toml
+game = "fallout2"
+profile = "ettu"      # optional: the custom profile this edition runs under
+
+[profiles.fallout2]
+master_dat = "/games/fallout2/master.dat"
+sfall = true
+mod_list = "load_order.toml"
+
+[profiles.ettu]
+edition = "fallout2"  # required; a custom profile shares its edition's data
+sfall = true
+mod_list = ["mods/ettu"]
+```
+
+A custom profile inherits nothing from its edition, and path keys are refused
+in one. The old `[scripting] sfall` still reads as Fallout 2's. A top-level
+`mod_list` reads as Fallout 2's when it stands with `sfall = true`, otherwise
+as the file's `game`'s. The next commit of any kind moves both into
+`[profiles.<edition>]`. Commits edit lines in place, so comments, key order
+and unknown tables survive. The boot menu and Alt+L check the chosen game's
+profile before the running session ends, so a refusal costs nothing.
+
+Keys: `master_dat`, `critter_dat`, `data_root`, `mod_list` (or `load_order`),
 `game` (`fallout1`, the default, or `fallout2`; the `--game-profile` flag),
 `preset` (`vanilla` or `enhanced`), `scaling`, `fullscreen`, `touch_ui`
 (see [Touch UI](#touch-ui)), `debug` and `audio` (`false` keeps the audio
@@ -333,6 +398,20 @@ the highlight, and **Enter** chooses it. **Esc** or closing the window quits, an
 F11, Alt+Enter and Alt+S work as in the launcher. A choice sets `game` and
 `last_played` in one commit, and a boot that fails opens the launcher, showing why.
 
+Two rows sit below the editions. `P  Preset: Vanilla` starts on the preset the next
+boot would have, after `--preset` and the manifests. **P** or a click toggles it, and
+the toggle does nothing until an edition is chosen. It then wins over the flag, the
+manifests and the settings for that boot, and `preset` joins the same commit. With no
+toggle, `preset` is not written, and at a later start a manifest can win again.
+Toggling back is no toggle.
+
+`S  Setup` opens the launcher on its Game data tab, with the highlighted edition in
+its Game row, and **S**, **Tab** or a click opens it. Choosing a mod stack happens
+there, on the Mods tab, because the engine keeps one load order for each settings
+file and has no named mod profiles. Its Quit button reads **Back**, which returns to
+the boot menu and looks for the installs again, forgetting a toggle. Save works as it
+always does. Play counts as a choice, and also sets `last_played`.
+
 **The banner** boots its edition after 3 seconds and writes nothing. Any key or
 mouse button stops it and opens the boot menu, Enter included. Pointer movement, a
 lone modifier and the keys above do not. Neither screen appears in a replay, a smoke
@@ -342,16 +421,20 @@ test or a gallery capture, and neither writes to a `--record-inputs` log.
 progress is lost.`, on every screen, under both presets and both editions. The game
 never receives the key and it is not logged. While the menu is open nothing runs, is
 logged or is timed, and audio holds. **Esc**, **Alt+L**, or the edition already
-running closes it, and the session resumes at the same step, so a cancelled Alt+L
-changes no log, checkpoint or state. Choosing the other edition validates it first,
-and a failure shows on its row with the session untouched. Then the session ends as
+running under the preset it is running closes it, and the session resumes at the same
+step, so a cancelled Alt+L changes no log, checkpoint or state. An untaken toggle is
+forgotten. Choosing the other edition, or the running one under the other preset,
+validates it first, and a failure shows on its row with the session untouched. Setup
+works here too, and the session stays stopped under it: Save and Back leave it alone,
+Alt+L does nothing until Back, and Play is a switch. Then the session ends as
 at quit, with nothing saved: its log ends, and the world, its scripts, its decoded
 assets and its `Vfs` go with it. The new one is a cold start of that edition, and is
 not recorded. Only the window, the renderer and the storage carry over. Of the
 command line, only `--scaling`, `--fullscreen`, `--touch-ui`, `--preset`, `--viewport`,
 `--zoom`, `--render-path` and `--no-audio` cross a switch, so a session started with
 `--sfall` or `--master-dat` does not pass them on: the settings file and manifests
-decide. Alt+L does nothing in a replay or a smoke test, and a session whose data
+decide. A toggle wins over a carried `--preset`, which then stops carrying, so the next
+switch takes the settings and manifests. Alt+L does nothing in a replay or a smoke test, and a session whose data
 is in memory writes one diagnostic.
 
 **Hotkey hints.** A short amber plate near the top of the window teaches the keys,
@@ -362,7 +445,11 @@ seconds, dissolves over 0.5 and leaves a 1-second gap. The timer stops during co
 dialogue, any window, a movie and the F9 panel, and a HUD message hides a hint until
 it has gone. Pressing the shown hint's key ends it, and changes nothing about that
 key. `hotkey_hints` in `vault-engine.toml` is `once`, the default, `always` or `off`,
-and `once` becomes `off` when the list is finished. The shell draws a hint over a copy
+and `once` becomes `off` when the list is finished. The launcher's **Hotkey hints** row
+sets it, and setting `Once` after `Off` shows the list again from the next session
+started. With no settings file, finishing the list creates none and says nothing: `off`
+stays in memory for the process, across a warm switch, and the next commit of the
+settings writes it. The shell draws a hint over a copy
 of the frame, so it is in no screenshot, digest, state hash, save or log, and it never
 shows in a replay, a smoke test or a gallery capture.
 
@@ -408,11 +495,12 @@ digest), and every world file of the gallery, each on the reference path
 and on the instanced path. The CPU executor runs everywhere. The GPU
 variants skip with `skipped: no GPU adapter` unless `VAULT_REQUIRE_GPU=1`,
 and one lock serialises their device creation. They skip the same way when
-the device is lost on its first draw, as on the software Direct3D 12 adapter
-of the Windows runners, printing the adapter and the cause. Each test process
-makes that draw once, on a device of its own. Any other failure of that draw,
-such as a shader the backend rejects, fails the tests and names the cause, so
-it cannot pass for a missing GPU.
+the device is lost on its first draw, printing the adapter and the cause.
+Each test process makes that draw once, on a device of its own. Any other
+failure of that draw, such as a shader the backend rejects, fails the tests
+and names the cause, so it cannot pass for a missing GPU. The Windows runners'
+only adapter is the software Direct3D 12 one, Microsoft Basic Render Driver,
+and CI sets `VAULT_REQUIRE_GPU=1` there.
 
 ### Launcher
 
@@ -468,8 +556,8 @@ It has three tabs and a bottom bar:
 - **Display & audio**: two columns of evenly spaced rows, with one help
   line below them for the focused (else hovered) row.
   - **Left column:** scaling (`aspect_fit` or `integer`), fullscreen, the
-    touch UI, preset (`vanilla` or `enhanced`), audio on or off, and the
-    debug overlay.
+    touch UI, preset (`vanilla` or `enhanced`), audio on or off, the debug
+    overlay, and hotkey hints (`Once`, `Always` or `Off`), under both presets.
   - **Right column, enhanced preset only:** these rows are hidden, and out
     of the focus order, under Vanilla, where the column says how to show
     them.
@@ -490,7 +578,10 @@ It has three tabs and a bottom bar:
   load order's directory are written relative to it. A layer outside it is
   reported, because a load order's layers must lie inside its own directory.
   With no load order yet, Save writes `load_order.toml` beside the settings
-  and sets `mod_list = "load_order.toml"`. A `mod_list` given as an inline
+  and sets `mod_list = "load_order.toml"` for the active game, or writes
+  `load_order_<profile>.toml` when the other game already holds that file. The
+  tab follows the Game row, which waits for Save while the tab has unsaved
+  changes. A `mod_list` given as an inline
   path list in `vault-engine.toml` is shown read-only, with that explanation:
   edit it in the file, or remove it to manage a `load_order.toml` here. A load
   order that does not parse is also shown read-only, Save leaves it alone, and
@@ -498,6 +589,7 @@ It has three tabs and a bottom bar:
   the mod's `name`, with an `[enhanced]` badge when the manifest carries
   launch settings. A malformed manifest fails its layer and refuses Play.
 - **Save**, **Play**, **Launch with Debug** and **Quit**, with a status line.
+  Opened by the boot menu's Setup, **Quit** reads **Back**.
   Save writes `vault-engine.toml`, rewriting the file it was read from in
   place or else creating one beside the executable (then in the working
   directory). Unknown keys are kept, and paths below the file's directory are
@@ -1508,7 +1600,7 @@ travel iterations every 41 ms, and an encounter flashes 7 times before its map
 loads. The town map (§3.40) shows `twnmapNN.frm` with a triangle per known
 entrance (Vault 15 is `VAULTENT.MAP`, then `VAULTBUR.MAP`). A choice in the
 party's town loads its map; a choice elsewhere travels there on the world map
-(`vault-platform/src/map_preview/world.rs`, `vault_core::worldmap::screen`).
+(`crates/vault-platform/src/map_preview/world.rs`, `vault_core::worldmap::screen`).
 
 The Pip-Boy (SPEC-014 §3.41) is drawn on `pip.frm` with its companion art: the
 date and time from `numbers.frm` and `months.frm`, the vault-water note
@@ -1523,7 +1615,7 @@ Archives replays a played movie with flags `0x0B`. The Alarm Clock offers the
 `WorldHost::begin_rest`/`advance_rest` under the watch cursor; Escape stops a
 rest, and a queue interruption closes the Pip-Boy. After two idle minutes the
 screen saver runs. Closing runs `map_update_p_proc`. The `[May-improve]` safe
-rules apply (`vault-platform/src/map_preview/pipboy.rs`, `vault_core::ui::pipboy`).
+rules apply (`crates/vault-platform/src/map_preview/pipboy.rs`, `vault_core::ui::pipboy`).
 The game calendar starts at midnight on 5 December 2161 (SPEC-014 §3.1;
 `host_save::game_date`), shared by the Pip-Boy, the world map, the date
 opcodes and the save header.
@@ -1667,7 +1759,7 @@ On the local map, **I** opens the inventory and **C** the character screen
   Cancel or Escape restores the sheet saved on opening. The creation editor's
   Options SAVE, LOAD and PRINT TO FILE use the §3.43 file dialogs (`.GCD` and
   `.TXT` in the save root) with their overwrite question and messages
-  (`vault-platform/src/map_preview/character.rs`, `editor_screen.rs`;
+  (`crates/vault-platform/src/map_preview/character.rs`, `editor_screen.rs`;
   `vault_core::ui::{character, sheet}`).
 - A dialogue barter request (`gdialog_barter`) opens the SPEC-013 §3.18
   barter window (`barter.frm` under the conversation) with the dialogue's
@@ -3214,6 +3306,131 @@ which would otherwise index past the table.
 The instanced path applies the same clamp, in the translucent draw and in the
 gray level of a translucent outline's ring.
 
+## The launcher studio
+
+The launcher has profile cards on the left, four tabs in the middle and a live
+preview on the right. Each profile keeps its own data, `sfall`, load order and
+Enhanced settings, in its `[profiles.<name>]` table:
+
+```toml
+game = "fallout2"
+profile = "ettu"
+
+[profiles.ettu]
+edition = "fallout2"
+install_dir = "/games/Fallout 2"
+secondary_dat_dirs = ["/games/Fallout"]   # read where the game's own data lacks a file
+sfall = true
+preset = "enhanced"
+viewport_mode = "unlocked_widescreen"
+tactical_overlay = true
+
+[presets.my-setup]                         # [Save Custom Preset]
+roof_peek = "cursor_xray"
+
+[known_paths]                              # remembered as you pick them
+fallout1 = ["/games/Fallout"]
+pinned = ["/games"]
+```
+
+- **Fallout: Et Tu** always has a card, the `ettu` profile, which is ready once its
+  paths are set.
+- **Auto-Detect** fills a profile from a folder. It finds the archives in any case,
+  and notes `fallout1in2`, `mods/` and `ddraw.ini` by name, and links a remembered
+  Fallout 1 folder when the folder looks like Et Tu. A folder with `fallout1in2` goes
+  to the Et Tu card from any other. It reads no mod's contents.
+- The folder browser lists pinned and remembered folders, common Steam, GOG and
+  Heroic locations, and the drives. **P** pins the folder on show.
+- **Presets** are `1:1 Vanilla Purist`, `Widescreen Classic` and `Modern Tactical`,
+  plus any you save. Hovering a setting shows it in the preview. Under the fixed
+  viewport zoom and roof peek do nothing, and the preview shows that.
+- **Resume Last Save** loads the save written last. **Autoplay Test** plays with
+  the bot in Watch Mode.
+- In game, under the enhanced preset, **Options > Enhanced** (or `H`) changes these
+  live and saves them to the running profile alone. Vanilla or Enhanced rules
+  apply at the next start.
+
+`--profile NAME --game` starts a profile from the command line. A name the settings
+do not have opens the launcher, which says so.
+
+To add Vault Engine to a Linux desktop's menu:
+
+```sh
+cargo build --release --package vault-platform
+cargo xtask install-desktop              # --uninstall removes it
+```
+
+That writes the desktop entry, with actions for each game, and an icon, and copies
+the binary to `~/.local/bin/vault-engine`. It never builds, and refuses a stale binary.
+A menu launch has no working directory of its own, so it reads the per-user settings.
+
+## F9 tabs and the autoplay bot
+
+The F9 overlay's first tab, **Pages**, holds the pages F8 cycles. The others
+open by a press:
+
+- **Trace & Stepper** shows decoded instructions in the session's own mode, so
+  `0x8200` reads `engine_api_version` under enhanced and `fs_size` under sfall.
+  It starts a procedure in a debugger VM and steps it, with a Step Into Critical
+  toggle and a call-stack filter. The world stays frozen and saving is refused
+  until the procedure ends. A script the world dispatched cannot be stepped,
+  since it runs inside a tick.
+- **Hex & Object** shows a clicked object's prototype, script, flags and lock,
+  with Unlock/Toggle Door, Trigger Proc, Edit Vars, Heal and Kill.
+- **Timers & Explosives** lists the queue, armed explosives first, with
+  Fast-Forward to Detonation. Fast-forward is refused in combat and dialogue.
+- **World Spawner & Warp** lists the maps that load, and spawns items, C4 and
+  keycards.
+- **Autoplay Bot** starts, pauses and stops Watch Mode and sets its speed.
+
+Every change the overlay makes is a logged `debug` record, so a replay repeats it.
+
+The bot plays from `crates/vault-core/src/autoplay.rs`, through the same rules the
+interface uses (`crates/vault-core/src/host_player.rs`). It draws from its own
+random stream, never the world's, and each thing it does is a logged `bot` record,
+so a replay needs no bot.
+
+```sh
+# Headless: no window, GPU, audio or sleeping. Status 1 on a failure.
+vault-platform --autoplay-headless --corpus-dir DATA --preview-map maps/NAME.map \
+  --ticks 50000 --seed 42 --chaos-doors-c4 --autoplay-output run
+vault-platform --replay-bundle run
+
+# Watch Mode: the bot plays the visible game.
+vault-platform --autoplay-watch --game
+```
+
+`--autoplay-output` receives `inputs.jsonl`, `checkpoints.tsv`, `manifest.json` and
+`report.txt`, cut at the failing tick if a run fails. A run ends at its tick budget,
+when the session ends, when the player dies, when the bot runs out of places to go,
+or on a failure: a panic, a chaos check, a parity audit or a stuck loop.
+
+`--replay-bundle` is how to repeat a run, since it sets the policies the run used.
+Plain `--replay-inputs` does not.
+
+**Parity audits** run at each map change, explosion and combat end. The world saves
+to memory, loads into a second host (A), saves and loads again (B). `state_hash` of
+A and B must match, and an ID-keyed diff of the world against A covers objects,
+variables, the clock and the queue, because `state_hash` skips those last two. The
+RNG is copied across, as it is not saved. `report.txt` counts each thing the audit
+allows, all of them effects of a load: Start, MapEnter and map update scripts running,
+the exit-grid art shift, the player's pose, and handles that differ when a script
+moved an object. A script that re-places a critter on every load never settles, so
+A and B may differ in those entries alone.
+
+**`--chaos-doors-c4`** has the bot walk each map's doors and containers. It checks
+that a closed door blocks and an open one does not, that Lockpick and a Crowbar
+change nothing on an unscripted object, and that a dropped, armed explosive fires
+and finishes: its event gone, critters within 3 hexes hurt by the computed amount and
+others not, `damage_p_proc` run, no blocker or ID left behind, and no tiles changed.
+
+**Watch Mode** shows a banner with the goal, the speed buttons and the way back, and
+draws the bot's target and route on the map. Space or any manual click or key hands
+control to the player at once. Space again resumes, so while Watch Mode is on, a
+player who has taken over ends a combat turn with the bar's button, not Space. The
+speeds play several 16 ms frames of the game per shown frame, and leave `game_speed`
+as it is.
+
 ## Replay checkpoints
 
 SPEC-021 §3.10 records one row per headless step, so that two runs show not
@@ -3304,8 +3521,14 @@ Turn it on with any of these. `--sfall` wins over both files, and a replay needs
 it, because a replay reads neither:
 
 ```toml
-# vault-engine.toml, or a layer's vault-mod.toml
+# a layer's vault-mod.toml
 [scripting]
+sfall = true
+```
+
+```toml
+# vault-engine.toml
+[profiles.fallout2]
 sfall = true
 ```
 
@@ -3734,6 +3957,60 @@ the `state_hash` and `combat_hash` columns as they are with no mod.
 
 Lua or Wasm scripting, custom HUD drawing and networked mods are out of scope.
 
+## Explosives (SPEC-013 R1-rev10, SPEC-017 rule 49)
+
+A timed explosive damages every living critter within 3 hexes of its center on its
+elevation, the player included, under both profiles and both presets. A scripted
+`explosion` and a weapon stay center-only. Item, scenery and spatial scripts within 3
+hexes run `damage_p_proc` with fixed parameter 6 after a timed or scripted explosion;
+a weapon or thrown explosion runs no notice.
+
+Under `fallout2`, `metarule` 49 gives 6 for the object whose notice is running, and
+for the explosive from its event firing until its explosion ends, though the object
+itself is erased while the art plays. Otherwise it reads the weapon table, so a real
+weapon gives its own type and anything else gives -1 with a diagnostic. Under
+`fallout1`, rule 49 stays unknown and gives 0, so a door there has to read
+`fixed_param`.
+
+On real data:
+
+- Both locked Temple of Trials doors in `arcaves.map` fall to armed Dynamite or
+  Plastic Explosives dropped beside them, by their own `destroy_object`, under the
+  retail install and under Et Tu's base data. `artemple.map` has no door.
+- The door at hex 11108 falls to one blast. The door at hex 13528, on elevation 2,
+  counts blasts in a local variable and falls to the fourth. Its script holds that
+  number, so the engine leaves it alone.
+- Et Tu's own `ARCAVES.MAP` (`fo1_base`) has the same four doors with no scripts and
+  no locks, so a blast does nothing to them.
+
+## Fallout 2 loot window, measured (SPEC-019 D-34)
+
+Measured from the retail `loot.frm` (537 by 376) and its buttons, on behalf of D-34's
+first real-install check. Coordinates are relative to the window. The rectangles stay
+as SPEC-019 section 3.7 and `tests/fixtures/spec019/loot-layout.tsv` give them, because
+they carry no tolerance. A move is Team A's decision.
+
+| Element | Rectangle in use | Measured on the art | Verdict |
+| --- | --- | --- | --- |
+| Player portrait | (44, 35) 60 by 100 | Well (44, 34) 66 by 102 | Fits, 3 pixels left of center |
+| Target portrait | (422, 35) 60 by 100 | Well (424, 34) 65 by 102 | Its left 2 pixels lie on the bevel, 4 pixels left of center |
+| Player list | x 176, rows y 35 to 322 | Well (175, 31) 72 by 308 | Fits, 3 pixels left of center. The well has 16 pixels spare below the rows |
+| Target list | x 297, rows y 35 to 322 | Well (292, 31) 72 by 309 | Fits, 1 pixel right of center. As above below the rows |
+| Scroll buttons | (128, 39) and (379, 39) 22 by 46 | Flat plate, no socket | Fit |
+| Body cycling | (436, 162) and (456, 162) 20 by 18 | Flat metal, no socket | Fit |
+| **Take All** | (249, 158) 39 by 41 | The art between the lists is a 16-wide slot, x 258 to 273, from y 151 down | **Off.** The 39-wide button lies across both list frames, and `invmaup.frm` is 39 by 41 |
+| **Done** | (288, 328) 15 by 16 | `DONE` plate x 392 to 506, y 325 to 349, label x 407 to 467 | **Off.** The red button lies on the target list's lower left corner, 192 pixels left of the plate's free space |
+
+Candidates for Team A, inferred from the art, which marks no socket for either button:
+
+- **Done:** (480, 329) 15 by 16, centered in the plate's free space, x 476 to 498.
+- **Take All:** (432, 204) 39 by 41, in the upper part of the grille plate (426, 193) 51
+  by 92, between its top screws and its first slot at y 249. Nothing else on the window
+  has flat room for it beside the lists.
+
+Neither rectangle overlaps a list row or changes what a click does, so this is a
+visible misplacement, not a bug in play. Fallout 1's art was not measured.
+
 ## Core contracts
 
 `EntityStore<T>` is a `slotmap::SlotMap<EntityId, T>`. Construct it with
@@ -3759,7 +4036,7 @@ answered the code takes the stated choice and comments it.
   head is `combat.msg` 1110". But §3.12 (and SPEC-014 §3.38) name a location
   `1000 + 10 × alias + location`, which is message 1000 for alias 0 and the
   head, and SPEC-014 §3.38 says messages 1000-1007 do not exist. The Fixture J
-  tests (`vault-core/src/combat_messages_tests.rs`) use alias 11, which gives
+  tests (`crates/vault-core/src/combat_messages_tests.rs`) use alias 11, which gives
   1110 "the head" as the fixture's expected text needs. Which value is
   intended?
 
@@ -3789,15 +4066,6 @@ Sfall mode (SPEC-024b), against the spec's boundaries:
 - `HOOK_USEOBJ` runs for the player's use of a map object and for a critter's use of
   an inventory item in the shell's item paths; `HOOK_ENCOUNTER` event 1 runs for
   the drop to terrain and for entering an area.
-
-Explosives (SPEC-013 R1-rev9), on real data:
-
-- The locked Temple of Trials doors do not open to an armed explosive. They are in
-  `arcaves.map`; `artemple.map` has no door. A timed explosive's notice reaches each
-  door's `damage_p_proc` with fixed parameter 6, as §3.10 says, but both scripts ask
-  metarule 49 for the damage type of the door itself, and SPEC-017 gives -1 for a
-  non-weapon. A script that reads `fixed_param`, as the fixture's does, opens. The
-  rule these two scripts need has to come from a spec.
 
 SPEC-024c, on real data:
 

@@ -3,7 +3,7 @@
 use super::{Pending, TownOrigin, WorldScreen};
 use crate::map_preview::{
     MapPreview, Screen, fixture,
-    test_support::{interactive, local_corpus, synthetic_corpus},
+    test_support::{Recorder, interactive, local_corpus, synthetic_corpus},
 };
 use std::path::Path;
 use vault_core::{
@@ -546,4 +546,148 @@ fn corpus_world_and_town_map_art_and_seen_cell_dimming() {
         [50, 150, 100].map(|index| preview.palette.intensity(index, 64)),
         [52, 153, 228]
     );
+}
+
+/// Pins travel, a jittered town target, town entry and an encounter's load
+/// through the Fallout 1 world map, a row per pass.
+#[test]
+fn characterization_fallout1_travel_and_entry() {
+    let dir = corpus();
+    let mut preview = preview(dir.path());
+    let mut rows = Recorder::new("fallout1-travel");
+    let mut gvars = vec![0; 700];
+    gvars[10] = 30;
+    gvars[70] = 1;
+    gvars[564] = 1;
+    preview.host.world.gvars = Some(gvars);
+    preview.host.world.world_map.set_position([1225, 75]);
+    assert!(preview.step(KeyCode::KeyW));
+    rows.row("open", &preview);
+    click(&mut preview, [522, 441]);
+    rows.row("town-world", &preview);
+    click(&mut preview, [510, 90]);
+    rows.row("other-town", &preview);
+    click(&mut preview, [322, 199]);
+    rows.row("marker-travels", &preview);
+    let mut now = 1000;
+    for _ in 0..400 {
+        now += 41;
+        preview.tick(now).unwrap();
+        rows.row("travel", &preview);
+        if preview.host.world.world_map.travel.is_none() {
+            break;
+        }
+    }
+    // At rest in Vault 15's cell, its town button enters it.
+    click(&mut preview, [510, 90]);
+    rows.row("town-button", &preview);
+    for step in [300, 301, 1000] {
+        preview.tick(now + step).unwrap();
+        rows.row("enter", &preview);
+    }
+    rows.check();
+}
+
+/// Pins the terrain encounter's flash and the load it ends in.
+#[test]
+fn characterization_fallout1_encounter() {
+    let dir = corpus();
+    let mut preview = preview(dir.path());
+    let mut rows = Recorder::new("fallout1-encounter");
+    let mut gvars = vec![0; 700];
+    gvars[10] = 30;
+    preview.host.world.gvars = Some(gvars);
+    assert!(preview.step(KeyCode::KeyW));
+    preview.tick(1000).unwrap();
+    rows.row("open", &preview);
+    if let Screen::World(world) = &mut preview.screen {
+        world.pending = Some(Pending::Flash {
+            start: 1000,
+            encounter: Encounter::Terrain {
+                map: "DESERT1.MAP",
+                region: 2,
+                context: 2,
+            },
+        });
+    }
+    for step in [2785, 2786, 3000] {
+        preview.tick(1000 + step).unwrap();
+        rows.row("flash", &preview);
+    }
+    rows.check();
+}
+
+/// The bot's fixture loads on both editions, its doors read as written, and
+/// stepping on each exit grid walks the campaign to the world map.
+#[test]
+fn the_campaign_fixture_loads_and_its_exits_join_up() {
+    use vault_core::{fallout2::Fallout2World, world::Transition};
+    use vault_fixtures::campaign::{self, Edition};
+    for edition in [Edition::Fallout1, Edition::Fallout2] {
+        let dir = synthetic_corpus();
+        campaign::write_campaign(dir.path(), edition);
+        let mut preview = crate::map_preview::test_support::load(dir.path(), "maps/synthetic.map");
+        if edition == Edition::Fallout2 {
+            let tables = preview.host.load_fallout2_tables().unwrap();
+            let start = tables.maps.match_name(b"artemple.map");
+            preview.host.world.fallout2 = Some(Box::new(Fallout2World::new_game(tables, start)));
+        }
+        preview.host.load_map(&campaign::start(edition)).unwrap();
+        preview.image().unwrap();
+        let world = &preview.host.world;
+        let find = |id: u32| {
+            world
+                .iter()
+                .find(|(_, object)| object.raw.id == id)
+                .unwrap_or_else(|| panic!("object {id}"))
+                .0
+        };
+        for (id, locked) in [
+            (campaign::PLAIN_DOOR, false),
+            (campaign::LOCKED_DOOR, true),
+            (campaign::SCRIPTED_DOOR, true),
+        ] {
+            let lock = world.get(find(id)).unwrap().lock().unwrap();
+            assert_eq!(lock.0 & campaign::LOCKED as u32 != 0, locked, "door {id}");
+        }
+        let jammed = world
+            .get(find(campaign::JAMMED_DOOR))
+            .unwrap()
+            .lock()
+            .unwrap();
+        assert_ne!(jammed.0 & campaign::JAMMED as u32, 0);
+        for id in [
+            campaign::CONTAINER,
+            campaign::FRIEND,
+            campaign::FOE,
+            campaign::PISTOL,
+            campaign::AMMUNITION,
+            campaign::DYNAMITE,
+            campaign::PLASTIC,
+            campaign::DRUG,
+            campaign::EXIT_GRID,
+        ] {
+            find(id);
+        }
+        let request = |preview: &mut MapPreview, map: i32| {
+            preview.host.request_transition(Transition {
+                map,
+                elevation: 0,
+                hex: campaign::ENTRY,
+                facing: 0,
+            });
+            preview.host.process_transition().unwrap();
+            preview.image().unwrap();
+            preview.host.world.effects.clear();
+            preview.host.world.map.header.map_number
+        };
+        for (_, _, number) in campaign::maps(edition).into_iter().skip(1) {
+            assert_eq!(request(&mut preview, number), number);
+        }
+        request(&mut preview, -2);
+        assert!(
+            matches!(preview.screen, Screen::World(_) | Screen::World2(_)),
+            "the last exit opens the world map"
+        );
+    }
 }

@@ -2,7 +2,7 @@
 //! bounded trace.
 use crate::{
     decode::{Instruction, decode_next},
-    trace::{StepOutcome, TraceEntry, TraceRing},
+    trace::{HoldBreach, StepOutcome, TraceEntry, TraceRing},
 };
 use std::{collections::BTreeSet, fmt};
 use vault_vm::{RunOutcome, Value, Vm, VmHost, VmStatus};
@@ -16,6 +16,8 @@ pub enum StopReason {
     /// yielded, or reached a fragment end).
     Outcome(RunOutcome),
     Fault(vault_vm::VmError),
+    /// A [`CriticalHold`] was breached; the last step did not execute.
+    Refused(HoldBreach),
     /// `max_steps` steps ran without another reason to stop.
     StepLimit,
 }
@@ -33,29 +35,73 @@ impl fmt::Display for RunStop {
                 write!(f, "{}", format!("{outcome:?}").to_lowercase())
             }
             StopReason::Fault(error) => write!(f, "fault: {error}"),
+            StopReason::Refused(breach) => write!(f, "refused: {breach}"),
             StopReason::StepLimit => f.write_str("step limit"),
         }
     }
 }
 
+/// A critical section a stepper stopped inside, with its VM still runnable.
+///
+/// SPEC-004 §3.3 has a critical section run to its end before anything else
+/// runs, and scripts rely on that for what they share. Stopping inside one is
+/// invisible to them only while nothing else runs, so **while
+/// [`Stepper::critical_hold`] is `Some`, a caller must not tick the world or
+/// run another program.** A step checks what it can see of that, and refuses
+/// with a [`HoldBreach`], changing nothing, when another VM asks to step or
+/// the host's clock has moved. It cannot see a program run on the host with
+/// the clock still, or a tick that leaves the clock where it was, so the
+/// check does not replace the caller's freeze. After a breach the section's
+/// promise is already broken: [`Stepper::release_critical`] accepts that and
+/// lets stepping go on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CriticalHold {
+    pub vm: u32,
+    /// The host's clock when the VM stopped.
+    pub now_ms: u32,
+}
+
 /// Steps a VM one instruction at a time.
 ///
-/// Each step is `Vm::run(host, 1)`, so scheduling (wait release, yield,
-/// blocked/ended checks) behaves exactly as in normal execution. Inside a
-/// critical section the VM ignores its budget, so one step runs the whole
+/// By default each step is `Vm::run(host, 1)`, so scheduling (wait release,
+/// yield, blocked/ended checks) behaves exactly as in normal execution. Inside
+/// a critical section the VM ignores its budget, so one step runs the whole
 /// critical section (up to the VM's hard instruction limit) and is recorded
 /// as a single entry for its first instruction.
+///
+/// With [`step_into_critical`](Self::step_into_critical) on, each step is
+/// `Vm::step`, with the same checks, one instruction also inside a critical
+/// section, and breakpoints there stop. See [`CriticalHold`] for what that
+/// asks of the caller. `Vm::step` counts each step alone, so the hard
+/// instruction limit does not bound a stepped section; `max_steps` does.
 #[derive(Debug, Clone)]
 pub struct Stepper {
+    /// Stop inside critical sections, one instruction at a time. Turned off
+    /// while a section is held, the next step runs the rest of it at once,
+    /// plus the one counted instruction after it.
+    pub step_into_critical: bool,
+    hold: Option<CriticalHold>,
     breakpoints: BTreeSet<u32>,
     trace: TraceRing<TraceEntry>,
 }
 impl Stepper {
     pub fn new(trace_capacity: usize) -> Self {
         Self {
+            step_into_critical: false,
+            hold: None,
             breakpoints: BTreeSet::new(),
             trace: TraceRing::new(trace_capacity),
         }
+    }
+    /// The critical section this stepper is stopped inside, during which the
+    /// caller must keep the world still.
+    pub fn critical_hold(&self) -> Option<CriticalHold> {
+        self.hold
+    }
+    /// Forget the hold: after a breach, or when its VM has been discarded.
+    /// Returns the hold there was.
+    pub fn release_critical(&mut self) -> Option<CriticalHold> {
+        self.hold.take()
     }
     /// Break before executing the instruction at `address`. Returns whether
     /// it was newly added.
@@ -79,13 +125,51 @@ impl Stepper {
     }
     /// Execute at most one instruction (see the type docs for critical
     /// sections) and record it. A VM fault is recorded as the outcome rather
-    /// than returned, so the trace keeps the faulting instruction.
+    /// than returned, so the trace keeps the faulting instruction, and a
+    /// refused step likewise, with nothing executed.
     pub fn step(&mut self, vm: &mut Vm, host: &mut impl VmHost) -> TraceEntry {
         let pending = PendingStep::of(vm);
-        let result = vm.run(host, 1);
-        let entry = pending.finish(vm, result, self.trace.pushed());
+        let outcome = match self.breach(vm, host) {
+            Some(breach) => StepOutcome::Refused(breach),
+            None => {
+                let result = if self.step_into_critical {
+                    vm.step(host)
+                } else {
+                    vm.run(host, 1)
+                };
+                // Any other outcome ends the run here in normal execution
+                // too, critical or not, so others may run (SPEC-004 §3.3).
+                let held =
+                    result == Ok(RunOutcome::Budget) && vm.status.contains(VmStatus::CRITICAL);
+                self.hold = held.then(|| CriticalHold {
+                    vm: vm.id,
+                    now_ms: host.now_ms(),
+                });
+                result.into()
+            }
+        };
+        let entry = pending.finish(vm, outcome, self.trace.pushed());
         self.trace.push(entry.clone());
         entry
+    }
+    /// How a step of `vm` now would break the hold, if one is in place.
+    fn breach(&self, vm: &Vm, host: &impl VmHost) -> Option<HoldBreach> {
+        let hold = self.hold?;
+        let now_ms = host.now_ms();
+        if vm.id != hold.vm {
+            Some(HoldBreach::OtherVm {
+                held: hold.vm,
+                stepped: vm.id,
+            })
+        } else if now_ms != hold.now_ms {
+            Some(HoldBreach::ClockMoved {
+                vm: hold.vm,
+                from_ms: hold.now_ms,
+                to_ms: now_ms,
+            })
+        } else {
+            None
+        }
     }
     /// Step until a breakpoint, a non-runnable outcome, a fault, or
     /// `max_steps` steps. A breakpoint at the starting address does not stop
@@ -120,6 +204,12 @@ impl Stepper {
                         reason: StopReason::Fault(error),
                     };
                 }
+                StepOutcome::Refused(breach) => {
+                    return RunStop {
+                        steps,
+                        reason: StopReason::Refused(breach),
+                    };
+                }
             }
         }
         let reason = if self.breakpoints.contains(&vm.pc) && steps > 0 {
@@ -149,12 +239,7 @@ impl PendingStep {
         }
     }
     /// The entry for the step that has now run.
-    pub(crate) fn finish(
-        self,
-        vm: &Vm,
-        result: Result<RunOutcome, vault_vm::VmError>,
-        seq: u64,
-    ) -> TraceEntry {
+    pub(crate) fn finish(self, vm: &Vm, outcome: StepOutcome, seq: u64) -> TraceEntry {
         TraceEntry {
             seq,
             vm: vm.id,
@@ -166,10 +251,7 @@ impl PendingStep {
             return_depth: vm.return_stack.byte_len() / 6,
             status_before: self.status_before,
             status_after: vm.status.0,
-            outcome: match result {
-                Ok(outcome) => StepOutcome::Ran(outcome),
-                Err(error) => StepOutcome::Fault(error),
-            },
+            outcome,
         }
     }
 }

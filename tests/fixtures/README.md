@@ -9,6 +9,7 @@ All files here were authored for Vault Engine. None contain original game assets
 - `vm/`: SPEC-004 complete program, isolated fragments, error vectors, and VM
   context/scheduling recipes.
 - `host/`: all SPEC-005 extension bytecode fragments and expected stack bytes.
+- `campaign/`: the autoplay bot's synthetic three-map campaign, on either edition.
 - `state/`: SPEC-006 GAM/GCD vectors, world/RNG/stat/dialogue tests, and interactive
   synthetic corpus generation.
 - `sound/`: SPEC-010 ACM vectors A-H as offset-addressed hex streams.

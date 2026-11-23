@@ -38,10 +38,50 @@ pub fn layer_dir(directory: &Path, entry: &LayerEntry, policy: LoadOrderPolicy) 
     Some(directory.join(path))
 }
 
-/// The enabled folder layers of `mod_list`, lowest first. A load order
-/// that cannot be read lists none (mounting it reports why).
-pub fn layer_dirs(mod_list: &ModList) -> Vec<PathBuf> {
-    match mod_list {
+/// A `load_order.toml` as read: the folder its relative paths are relative
+/// to, and how far they may reach.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadOrder {
+    pub directory: PathBuf,
+    pub entries: Vec<LayerEntry>,
+    pub policy: LoadOrderPolicy,
+}
+
+/// The policy of a load order in `directory`, with `user_root` the per-user
+/// settings folder. A load order in a game or mod folder stays inside it, so a
+/// downloaded one cannot reach out. The per-user folder holds no game or mod,
+/// and only the player writes there, so its load order names layers anywhere,
+/// as the settings' own path list does.
+pub fn load_order_policy(directory: &Path, user_root: Option<&Path>) -> LoadOrderPolicy {
+    LoadOrderPolicy {
+        allow_outside: user_root == Some(directory),
+    }
+}
+
+/// The one reader of a `load_order.toml`, through the `config` namespace
+/// (SPEC-023 §3.10 rule 1). A file that is missing, unreadable or malformed
+/// is an error naming it.
+pub fn read_load_order(file: &Path) -> Result<LoadOrder, String> {
+    let text = storage::read_config_file(file)?
+        .ok_or_else(|| format!("{}: file not found", file.display()))?;
+    let entries = vault_formats::parse_load_order(&text)
+        .map_err(|error| format!("{}: {error}", file.display()))?;
+    let directory = match file.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let root = storage::user_config_root();
+    let policy = load_order_policy(&directory, root.as_deref());
+    Ok(LoadOrder {
+        directory,
+        entries,
+        policy,
+    })
+}
+
+/// The enabled folder layers of `mod_list`, lowest first.
+pub fn enabled_layer_dirs(mod_list: &ModList) -> Result<Vec<PathBuf>, String> {
+    Ok(match mod_list {
         ModList::Paths(paths) => paths
             .iter()
             .filter(|path| {
@@ -53,22 +93,15 @@ pub fn layer_dirs(mod_list: &ModList) -> Vec<PathBuf> {
             .cloned()
             .collect(),
         ModList::File(file) => {
-            let text = storage::read_config_file(file).ok().flatten();
-            let Some(entries) = text.and_then(|text| vault_formats::parse_load_order(&text).ok())
-            else {
-                return Vec::new();
-            };
-            let directory = match file.parent() {
-                Some(parent) if !parent.as_os_str().is_empty() => parent,
-                _ => Path::new("."),
-            };
-            entries
+            let order = read_load_order(file)?;
+            order
+                .entries
                 .iter()
                 .filter(|entry| entry.enabled)
-                .filter_map(|entry| layer_dir(directory, entry, LoadOrderPolicy::default()))
+                .filter_map(|entry| layer_dir(&order.directory, entry, order.policy))
                 .collect()
         }
-    }
+    })
 }
 
 /// The manifest at the root of layer folder `dir`, if it has one. A
@@ -313,7 +346,7 @@ pub fn with_mods(config: &Config) -> Result<(Config, Vec<String>), String> {
     let Some(mod_list) = &config.mod_list else {
         return Ok((merged, applied));
     };
-    for dir in layer_dirs(mod_list) {
+    for dir in enabled_layer_dirs(mod_list)? {
         if let Some(manifest) = read_manifest(&dir)? {
             if manifest.enhanced.is_some() || manifest.sfall.is_some() {
                 applied.push(manifest.name.clone());
@@ -560,8 +593,61 @@ mod tests {
         };
         assert!(layer_dir(base, &entry("../elsewhere"), open).is_some());
         let paths = ModList::Paths(vec!["/m/a".into(), "/m/b.dat".into()]);
-        assert_eq!(layer_dirs(&paths), [PathBuf::from("/m/a")]);
-        assert!(layer_dirs(&ModList::File("/missing/load_order.toml".into())).is_empty());
+        assert_eq!(enabled_layer_dirs(&paths), Ok(vec![PathBuf::from("/m/a")]));
+    }
+
+    #[test]
+    fn only_a_load_order_in_the_user_folder_reaches_outside_it() {
+        let root = Path::new("/home/a/.config/vault-engine");
+        assert!(load_order_policy(root, Some(root)).allow_outside);
+        let game = Path::new("/games/fallout2");
+        assert!(!load_order_policy(game, Some(root)).allow_outside);
+        assert!(!load_order_policy(game, None).allow_outside);
+    }
+
+    /// One reader, whose errors name the file, and which a launch and a
+    /// mount both see. Nothing here reads as "no mods".
+    #[test]
+    fn a_load_order_that_cannot_be_read_is_an_error_not_an_empty_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("load_order.toml");
+        let list = ModList::File(file.clone());
+        let name = file.display().to_string();
+        let missing = enabled_layer_dirs(&list).unwrap_err();
+        assert!(
+            missing.contains(&name) && missing.contains("not found"),
+            "{missing}"
+        );
+        assert_eq!(read_load_order(&file).unwrap_err(), missing);
+        let config = Config {
+            mod_list: Some(list.clone()),
+            ..Config::default()
+        };
+        assert_eq!(with_mods(&config).unwrap_err(), missing);
+
+        std::fs::write(&file, "[[layer]\n").unwrap();
+        let malformed = enabled_layer_dirs(&list).unwrap_err();
+        assert!(malformed.starts_with(&name), "{malformed}");
+        std::fs::write(&file, b"\xff\xfe").unwrap();
+        assert!(read_load_order(&file).unwrap_err().starts_with(&name));
+
+        // A good file: its entries, and the folder they resolve against.
+        std::fs::write(
+            &file,
+            "[[layer]]\npath = \"mods/a\"\n[[layer]]\npath = \"mods/b\"\nenabled = false\n",
+        )
+        .unwrap();
+        let order = read_load_order(&file).unwrap();
+        assert_eq!(order.directory, dir.path());
+        assert_eq!(order.entries.len(), 2);
+        assert_eq!(order.policy, LoadOrderPolicy::default());
+        assert_eq!(
+            enabled_layer_dirs(&list),
+            Ok(vec![dir.path().join("mods/a")])
+        );
+        // The bare name of a load order beside the working directory.
+        let error = read_load_order(Path::new("no-such-file.toml")).unwrap_err();
+        assert!(error.contains("no-such-file.toml"), "{error}");
     }
 
     #[test]
@@ -706,7 +792,7 @@ mod tests {
         .unwrap();
         let list = ModList::File(dir.path().join("load_order.toml"));
         assert!(
-            mod_session(&layer_dirs(&list), None, true)
+            mod_session(&enabled_layer_dirs(&list).unwrap(), None, true)
                 .unwrap()
                 .is_none()
         );

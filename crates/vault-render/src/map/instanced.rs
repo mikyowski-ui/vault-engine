@@ -27,7 +27,7 @@ use crate::{
 };
 use std::collections::{BTreeSet, HashMap};
 use vault_formats::{
-    MapFile,
+    MapFile, Palette,
     frm::FrmFrame,
     map::{MapObject, MapObjects},
     pro::{BasicFlags, Category},
@@ -713,6 +713,77 @@ enum Executor {
     Unavailable(InstanceError),
 }
 
+/// Every part of a palette [`LookupTables::from_palette`] reads: the six-bit
+/// entries, which are mapped, the RGB555 lookup and the supplied tables.
+/// Nothing else feeds the tables: fades and brightness change the display
+/// colors, not these.
+struct PaletteInputs {
+    entries: [[u8; 3]; 256],
+    mapped: [bool; 256],
+    lookup: Vec<u8>,
+    supplied: Option<Vec<u8>>,
+}
+
+/// The five-bit color at `packed` in the RGB555 lookup.
+fn five_bit(packed: usize) -> [u8; 3] {
+    [
+        (packed >> 10) as u8,
+        (packed >> 5) as u8 & 31,
+        packed as u8 & 31,
+    ]
+}
+
+impl PaletteInputs {
+    fn of(palette: &Palette) -> Self {
+        Self {
+            entries: std::array::from_fn(|index| palette.rgb6(index as u8)),
+            mapped: std::array::from_fn(|index| palette.is_mapped(index as u8)),
+            lookup: (0..32768)
+                .map(|packed| palette.lookup_rgb5(five_bit(packed)).unwrap_or(0))
+                .collect(),
+            supplied: palette.supplied_tables().map(<[u8]>::to_vec),
+        }
+    }
+    /// Whether `palette` has these contents, wherever it lives.
+    fn matches(&self, palette: &Palette) -> bool {
+        palette.supplied_tables() == self.supplied.as_deref()
+            && (0..=255).all(|index| {
+                palette.rgb6(index) == self.entries[usize::from(index)]
+                    && palette.is_mapped(index) == self.mapped[usize::from(index)]
+            })
+            && (0..32768)
+                .all(|packed| palette.lookup_rgb5(five_bit(packed)) == Some(self.lookup[packed]))
+    }
+}
+
+/// The lookup tables of the last palette drawn with. A refresh is one tile
+/// of the canvas, so a frame asks for the same tables many times. The key is
+/// the palette's contents rather than its address or a version, so a palette
+/// replaced in place can never serve stale tables.
+#[derive(Default)]
+struct TableCache {
+    held: Option<(PaletteInputs, LookupTables)>,
+    /// How many times the tables were built.
+    builds: usize,
+}
+
+impl TableCache {
+    fn tables(&mut self, palette: &Palette) -> &LookupTables {
+        let held = self
+            .held
+            .take()
+            .filter(|(inputs, _)| inputs.matches(palette));
+        let held = held.unwrap_or_else(|| {
+            self.builds += 1;
+            (
+                PaletteInputs::of(palette),
+                LookupTables::from_palette(palette),
+            )
+        });
+        &self.held.insert(held).1
+    }
+}
+
 /// SPEC-022 §3.1 and §3.12 the world canvas's renderer: the reference
 /// path (the default), or the instanced path with a fallback to the
 /// reference for every refresh it refuses. The setting is not saved and
@@ -720,6 +791,7 @@ enum Executor {
 pub struct SceneRenderer {
     path: RenderPath,
     executor: Executor,
+    tables: TableCache,
     /// The causes logged so far (each once per session).
     logged: BTreeSet<&'static str>,
     /// How many refreshes each cause refused.
@@ -738,6 +810,7 @@ impl SceneRenderer {
         Self {
             path,
             executor: Executor::Untried,
+            tables: TableCache::default(),
             logged: BTreeSet::new(),
             refusals: HashMap::new(),
             last: None,
@@ -774,6 +847,10 @@ impl SceneRenderer {
     /// How many refreshes `cause` refused.
     pub fn refusals(&self, cause: &str) -> usize {
         self.refusals.get(cause).copied().unwrap_or(0)
+    }
+    /// How many times the lookup tables were built.
+    pub fn table_builds(&self) -> usize {
+        self.tables.builds
     }
     /// The GPU executor, if one is in use.
     pub fn gpu(&self) -> Option<&GpuExecutor> {
@@ -850,25 +927,32 @@ impl SceneRenderer {
         {
             return Err(InstanceError::TextureLimit(view.width, view.height).into());
         }
-        // The tables of the light palette, rebuilt each refresh (the GPU
-        // executor re-uploads them only when they change).
+        // The tables of the light palette, built when its contents change
+        // (the GPU executor re-uploads them only then too).
         let palette = scene
             .light
             .map(|light| light.palette)
             .or(scene.cutout.map(|cut| cut.palette));
-        let tables = palette.map(LookupTables::from_palette);
-        let mut frame = gather_map_frame(map, objects, view, art, scene, tables.as_ref())?;
+        let tables = palette.map(|palette| self.tables.tables(palette));
+        let mut frame = gather_map_frame(map, objects, view, art, scene, tables)?;
         if let Some(tamper) = self.tamper {
             tamper(&mut frame.instances);
         }
         let plan = BatchPlan::new(&frame.instances)?;
-        let empty = LookupTables {
-            intensity: vec![0; 65536].into(),
-            mix: vec![0; 65536].into(),
-            gray: [[0; 256]; 2],
-            blends: std::array::from_fn(|_| Box::new([[0; 256]; 8])),
+        let empty;
+        let tables = match tables {
+            Some(tables) => tables,
+            None => {
+                empty = LookupTables {
+                    intensity: vec![0; 65536].into(),
+                    mix: vec![0; 65536].into(),
+                    gray: [[0; 256]; 2],
+                    blends: std::array::from_fn(|_| Box::new([[0; 256]; 8])),
+                };
+                &empty
+            }
         };
-        let inputs = frame.inputs(tables.as_ref().unwrap_or(&empty));
+        let inputs = frame.inputs(tables);
         let mut canvas = frame.base_canvas()?;
         match &mut self.executor {
             Executor::Gpu(executor) => {
@@ -894,5 +978,341 @@ impl SceneRenderer {
             Executor::Unavailable(error) => return Err(error.clone().into()),
         }
         Ok((canvas, plan.counts()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{
+        RoofCutaway, SceneCursor, fixture,
+        tests::{Keyed, preview, scene},
+    };
+    use super::*;
+    use crate::layers::gpu;
+    use std::collections::BTreeMap;
+    use vault_formats::{FrmArchive, HexGrid, map::TilePair};
+
+    /// A palette's file bytes: scrambled entries and RGB555 lookup.
+    fn palette_bytes() -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(0x8300);
+        for index in 0..256_u32 {
+            bytes.extend(
+                [
+                    (index * 7) % 32,
+                    (index * 13 + 5) % 32,
+                    (index * 29 + 11) % 32,
+                ]
+                .map(|channel| channel as u8),
+            );
+        }
+        for packed in 0..32768_u32 {
+            let (r, g, b) = (packed >> 10, (packed >> 5) & 31, packed & 31);
+            bytes.push(((r * 3 + g * 5 + b * 7 + 1) % 255 + 1) as u8);
+        }
+        bytes
+    }
+
+    fn map() -> MapFile {
+        let mut map = preview();
+        let word = (1_u32 << 16) | 4;
+        map.tiles[0] = Some(vec![TilePair { stored: word, word }; 10000]);
+        map
+    }
+
+    fn art() -> Keyed {
+        let frame = |color| FrmArchive::parse(&fixture::frm(80, 36, color)).unwrap();
+        Keyed(BTreeMap::from([
+            ((true, 1), frame(0)),
+            ((true, 4), frame(60)),
+        ]))
+    }
+
+    fn view_of(width: u32, height: u32) -> MapView {
+        MapView {
+            grid: HexGrid::centered(20100, width, height).unwrap(),
+            elevation: 0,
+            roofs: false,
+            width,
+            height,
+        }
+    }
+
+    fn scene_of<'a>(light: Option<MapLight<'a>>, cursor: Option<SceneCursor<'a>>) -> MapScene<'a> {
+        MapScene {
+            cutout: None,
+            light,
+            outlines: None,
+            floating: &[],
+            cursor,
+            roof_cutaway: None::<RoofCutaway>,
+            shroud: None,
+            overscan: false,
+            highlight: None,
+        }
+    }
+
+    /// One palette change at a time, each palette assigned over the last
+    /// (the same address), rebuilds the tables, and a repeat does not.
+    #[test]
+    fn a_palette_change_rebuilds_the_lookup_tables() {
+        let (map, art) = (map(), art());
+        let objects = scene(Vec::new());
+        let view = view_of(640, 380);
+        let tiles = vec![40000_i64; 40000];
+        let mut renderer = SceneRenderer::cpu();
+        let mut draw = |palette: &Palette| {
+            let light = MapLight {
+                palette,
+                ambient: 30000,
+                tiles: &tiles,
+            };
+            let scene = scene_of(Some(light), None);
+            let image = renderer.render(&map, &objects, view, &art, scene).unwrap();
+            let reference = render_map_scene(&map, &objects, view, &art, scene).unwrap();
+            assert_eq!(image.pixels(), reference.pixels());
+            assert!(matches!(
+                renderer.last_refresh(),
+                Some(RefreshReport::Instanced(_))
+            ));
+            let held = &renderer.tables.held.as_ref().unwrap().1;
+            assert!(*held == LookupTables::from_palette(palette), "stale tables");
+            renderer.table_builds()
+        };
+
+        let bytes = palette_bytes();
+        let mut palette = Palette::parse(&bytes).unwrap();
+        assert_eq!(draw(&palette), 1);
+        assert_eq!(draw(&palette), 1, "the same palette");
+        assert_eq!(draw(&palette.clone()), 1, "equal contents elsewhere");
+
+        let mut entry = bytes.clone();
+        entry[3 * 60 + 1] ^= 1;
+        let mut unmapped = bytes.clone();
+        unmapped[3 * 60] = 200;
+        let mut lookup = bytes.clone();
+        lookup[768 + 12345] ^= 1;
+        let mut supplied = bytes.clone();
+        supplied.extend(b"CWEN");
+        supplied.extend((0..3 * 65536_u32).map(|at| (at % 251) as u8));
+        let mut other_supplied = supplied.clone();
+        *other_supplied.last_mut().unwrap() ^= 1;
+        let mut builds = 1;
+        for (label, changed) in [
+            ("an entry", entry),
+            ("a mapped entry", unmapped),
+            ("the RGB555 lookup", lookup),
+            ("supplied tables", supplied),
+            ("the supplied tables' last byte", other_supplied),
+            ("back to the first", bytes),
+        ] {
+            palette = Palette::parse(&changed).unwrap();
+            builds += 1;
+            assert_eq!(draw(&palette), builds, "{label}");
+            assert_eq!(draw(&palette), builds, "{label}, repeated");
+        }
+    }
+
+    /// A refresh with no palette draws without building any tables.
+    #[test]
+    fn an_unlit_refresh_builds_no_tables() {
+        let (map, art) = (map(), art());
+        let objects = scene(Vec::new());
+        let mut renderer = SceneRenderer::cpu();
+        renderer
+            .render(
+                &map,
+                &objects,
+                view_of(640, 380),
+                &art,
+                scene_of(None, None),
+            )
+            .unwrap();
+        assert_eq!(renderer.table_builds(), 0);
+    }
+
+    /// A layer's pattern at view pixel `[x, y]`: nonzero, with holes.
+    fn ink([x, y]: [i64; 2]) -> u8 {
+        match (x * 5 + y * 3).rem_euclid(23) {
+            0 => 0,
+            value => 100 + value as u8,
+        }
+    }
+
+    /// The view-sized layer with `rect` (`[left, top, right, bottom]`, kept
+    /// on the view) inked, and the same layer cropped to `rect`, with its
+    /// origin. A rectangle with no pixels crops to one transparent pixel.
+    fn layers(view: MapView, rect: [i64; 4]) -> (IndexedImage, IndexedImage, [i64; 2]) {
+        let [left, top, right, bottom] = rect;
+        let mut full = IndexedImage::new(view.width, view.height).unwrap();
+        if left >= right || top >= bottom {
+            return (full, IndexedImage::new(1, 1).unwrap(), [0, 0]);
+        }
+        let mut crop = IndexedImage::new((right - left) as u32, (bottom - top) as u32).unwrap();
+        let stride = i64::from(view.width);
+        for y in top..bottom {
+            for x in left..right {
+                let color = ink([x, y]);
+                full.pixels_mut()[(y * stride + x) as usize] = color;
+                let at = (y - top) * (right - left) + x - left;
+                crop.pixels_mut()[at as usize] = color;
+            }
+        }
+        (full, crop, [left, top])
+    }
+
+    /// The canvas of `view`, drawn in `tile`-sized refreshes as the
+    /// `enhanced` world is, on both paths with both layers, with the cursor
+    /// on the hex at `at`: the four must agree, and the layer must show
+    /// when it has pixels.
+    fn assert_same_canvas(
+        label: &str,
+        view: MapView,
+        tile: [u32; 2],
+        at: [i32; 2],
+        rect: [i64; 4],
+        lit: bool,
+    ) {
+        let _gpu = gpu::test_lock();
+        let (map, art) = (map(), art());
+        let objects = scene(Vec::new());
+        let palette = Palette::parse(&palette_bytes()).unwrap();
+        let tile_light = vec![40000_i64; 40000];
+        let light = lit.then_some(MapLight {
+            palette: &palette,
+            ambient: 30000,
+            tiles: &tile_light,
+        });
+        let (full, crop, origin) = layers(view, rect);
+        let hex = view.grid.pick_hex(at).unwrap();
+        let mut cpu = SceneRenderer::cpu();
+        let mut gpu = gpu::test_device().map(SceneRenderer::with_device);
+        let mut reference = SceneRenderer::new(RenderPath::Reference);
+        let mut shown = false;
+        for y in (0..view.height).step_by(tile[1] as usize) {
+            for x in (0..view.width).step_by(tile[0] as usize) {
+                let offset = [i64::from(x), i64::from(y)];
+                let part = part_of(view, tile, offset);
+                let cursor = |layer, at: [i64; 2]| SceneCursor {
+                    hex,
+                    art: (layer, [at[0] - offset[0], at[1] - offset[1]]),
+                    outline: None,
+                    text: Some((layer, [at[0] - offset[0], at[1] - offset[1]])),
+                };
+                let whole = scene_of(light, Some(cursor(&full, [0, 0])));
+                let tight = scene_of(light, Some(cursor(&crop, origin)));
+                let want = reference.render(&map, &objects, part, &art, whole).unwrap();
+                let bare = reference
+                    .render(&map, &objects, part, &art, scene_of(light, None))
+                    .unwrap();
+                shown |= want.pixels() != bare.pixels();
+                for (path, scene, instanced) in [
+                    ("reference, cropped", tight, false),
+                    ("instanced, view-sized", whole, true),
+                    ("instanced, cropped", tight, true),
+                ] {
+                    let renderer = if instanced { &mut cpu } else { &mut reference };
+                    let got = renderer.render(&map, &objects, part, &art, scene).unwrap();
+                    assert!(
+                        got.pixels() == want.pixels(),
+                        "{label}: {path} at tile {offset:?}"
+                    );
+                    if instanced {
+                        assert!(matches!(
+                            renderer.last_refresh(),
+                            Some(RefreshReport::Instanced(_))
+                        ));
+                    }
+                }
+                if let Some(renderer) = &mut gpu {
+                    for scene in [whole, tight] {
+                        let got = renderer.render(&map, &objects, part, &art, scene).unwrap();
+                        assert!(got.pixels() == want.pixels(), "{label}: GPU at {offset:?}");
+                        assert!(matches!(
+                            renderer.last_refresh(),
+                            Some(RefreshReport::Instanced(_))
+                        ));
+                    }
+                }
+            }
+        }
+        assert_eq!(shown, rect[0] < rect[2] && rect[1] < rect[3], "{label}");
+    }
+
+    /// The tile of `view` at canvas pixel `offset`.
+    fn part_of(view: MapView, tile: [u32; 2], offset: [i64; 2]) -> MapView {
+        MapView {
+            grid: HexGrid {
+                origin: [0, 1].map(|axis| view.grid.origin[axis] - offset[axis]),
+            },
+            width: (view.width - offset[0] as u32).min(tile[0]),
+            height: (view.height - offset[1] as u32).min(tile[1]),
+            ..view
+        }
+    }
+
+    /// A cropped cursor layer draws the view-sized layer's pixels on both
+    /// paths, at each edge and corner of the canvas and with no pixels.
+    #[test]
+    fn a_cropped_cursor_layer_draws_the_same_pixels_at_every_edge() {
+        let view = view_of(640, 380);
+        for (label, at, rect) in [
+            ("left edge", [15, 170], [0, 150, 30, 190]),
+            ("right edge", [625, 170], [610, 150, 640, 190]),
+            ("top edge", [320, 12], [300, 0, 340, 25]),
+            ("bottom edge", [320, 367], [300, 355, 340, 380]),
+            ("top left", [10, 10], [0, 0, 20, 20]),
+            ("top right", [630, 10], [620, 0, 640, 20]),
+            ("bottom left", [10, 370], [0, 360, 20, 380]),
+            ("bottom right", [630, 370], [620, 360, 640, 380]),
+            ("nothing drawn", [320, 190], [0, 0, 0, 0]),
+        ] {
+            for lit in [false, true] {
+                assert_same_canvas(label, view, [640, 380], at, rect, lit);
+            }
+        }
+    }
+
+    /// Tiled as the `enhanced` world is: a layer across a seam, and layers
+    /// wholly outside a tile that still visits the cursor's hex, which then
+    /// draws an instance off its canvas.
+    #[test]
+    fn a_cropped_cursor_layer_draws_the_same_pixels_across_tiles() {
+        let view = view_of(1280, 380);
+        for (label, at, rect) in [
+            ("across the seam", [640, 190], [620, 170, 660, 210]),
+            ("in the left tile", [520, 190], [500, 170, 540, 210]),
+            ("in the right tile", [780, 190], [760, 170, 800, 210]),
+        ] {
+            assert_same_canvas(label, view, [640, 380], at, rect, true);
+        }
+    }
+
+    /// A 4096-pixel canvas, tiled: the view-sized layer is an image past a
+    /// 2048-pixel atlas limit in every refresh that draws it, the cropped
+    /// one is not, and they draw alike.
+    #[test]
+    fn a_cropped_cursor_layer_fits_the_atlas_on_a_4096_pixel_canvas() {
+        let view = view_of(4096, 100);
+        let (at, rect) = ([4078, 60], [4060, 40, 4096, 80]);
+        assert_same_canvas("wide canvas", view, [640, 380], at, rect, true);
+        let (map, art) = (map(), art());
+        let objects = scene(Vec::new());
+        let (full, crop, origin) = layers(view, rect);
+        let hex = view.grid.pick_hex(at).unwrap();
+        let offset = [3840, 0];
+        let part = part_of(view, [640, 380], offset);
+        let widest = |layer: &IndexedImage, at: [i64; 2]| {
+            let cursor = SceneCursor {
+                hex,
+                art: (layer, [at[0] - offset[0], at[1] - offset[1]]),
+                outline: None,
+                text: None,
+            };
+            let scene = scene_of(None, Some(cursor));
+            let frame = gather_map_frame(&map, &objects, part, &art, scene, None).unwrap();
+            frame.images.iter().map(|image| image.width).max().unwrap()
+        };
+        assert_eq!(widest(&full, [0, 0]), 4096);
+        assert!(widest(&crop, origin) <= 80);
     }
 }

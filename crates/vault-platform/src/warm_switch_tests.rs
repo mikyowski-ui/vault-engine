@@ -552,3 +552,119 @@ fn spec023_the_phase_l1_keys_are_settings() {
     assert!(Config::parse("hotkey_hints = \"sometimes\"\n").is_err());
     assert_eq!(Config::default().hotkey_hints, None);
 }
+
+/// A layer whose manifest asks for `preset`.
+fn manifest_layer(preset: &str) -> tempfile::TempDir {
+    let layer = tempfile::tempdir().unwrap();
+    let text = format!("name = \"layer\"\n[enhanced]\npreset = \"{preset}\"\n");
+    std::fs::write(layer.path().join("vault-mod.toml"), text).unwrap();
+    layer
+}
+
+/// §2.4: the row starts on what a boot would do: the flag, then a manifest,
+/// then the settings. A toggle wins over all three, for its boot.
+#[test]
+fn spec020_rev4_the_next_preset_and_a_toggle_follow_the_start_order() {
+    use config::Preset::{Enhanced, Vanilla};
+    let layer = manifest_layer("enhanced");
+    let vanilla = Config {
+        preset: Some(Vanilla),
+        ..Config::default()
+    };
+    let modded = Config {
+        mod_list: Some(config::ModList::Paths(vec![layer.path().to_path_buf()])),
+        ..vanilla.clone()
+    };
+    let bare = parse(&[]);
+    let flagged = parse(&["--preset", "vanilla"]);
+    assert_eq!(next_preset(&bare, &Config::default()), Vanilla);
+    assert_eq!(next_preset(&bare, &vanilla), Vanilla);
+    assert_eq!(next_preset(&bare, &modded), Enhanced, "the manifest");
+    assert_eq!(next_preset(&flagged, &modded), Vanilla, "the flag");
+
+    // A toggle reaches the launch through the command line's own slot, the
+    // one that wins, past a carried flag and past a manifest (S20).
+    let launched = |args: &Args, settings: &Config| {
+        let mut args = args.clone();
+        let merged = with_mod_settings(&args, Some(settings)).unwrap();
+        resolve_launch(&mut args, merged.as_ref()).preset
+    };
+    assert_eq!(launched(&bare, &modded), Enhanced);
+    assert_eq!(launched(&boot_args(&bare, Some(Vanilla)), &modded), Vanilla);
+    assert_eq!(
+        launched(&boot_args(&flagged, Some(Enhanced)), &modded),
+        Enhanced
+    );
+    assert_eq!(launched(&boot_args(&flagged, None), &modded), Vanilla);
+}
+
+/// S15, S16 and S20: a choice commits once, and `preset` goes with it only
+/// when it was toggled. A later start takes the usual order again, so a
+/// manifest wins over what the toggle wrote.
+#[test]
+fn spec020_rev4_a_choice_commits_a_toggle_and_only_a_toggle() {
+    use config::Preset::{Enhanced, Vanilla};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(config::FILE_NAME);
+    let dirs = [dir.path().to_path_buf()];
+    Config::default().commit(&path).unwrap();
+
+    let mut settings = Config::load(&path).unwrap();
+    apply_choice(&mut settings, Fallout1, None, false);
+    boot::commit_choice(&settings, &dirs).unwrap();
+    let read = Config::load(&path).unwrap();
+    assert_eq!(read.preset, None, "S16: no toggle, no preset");
+    assert_eq!(read.last_played.as_deref(), Some("fallout1"));
+
+    let mut settings = Config::load(&path).unwrap();
+    apply_choice(&mut settings, Fallout2, Some(Enhanced), false);
+    boot::commit_choice(&settings, &dirs).unwrap();
+    let read = Config::load(&path).unwrap();
+    assert_eq!(read.preset, Some(Enhanced), "S15");
+    assert_eq!(read.last_played.as_deref(), Some("fallout2"));
+
+    let layer = manifest_layer("vanilla");
+    let modded = Config {
+        mod_list: Some(config::ModList::Paths(vec![layer.path().to_path_buf()])),
+        ..read
+    };
+    assert_eq!(next_preset(&parse(&[]), &modded), Vanilla, "a later start");
+}
+
+/// §2.6 with no settings file: the `off` held in memory goes out with the
+/// next commit of the settings, which a warm switch's choice is.
+#[test]
+fn spec020_rev4_hints_held_in_memory_go_out_with_the_next_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let dirs = [dir.path().to_path_buf()];
+    let mut settings = Config::default();
+    apply_choice(&mut settings, Fallout2, None, true);
+    assert_eq!(boot::hint_setting(Some(&settings)), HotkeyHints::Off);
+    let path = boot::commit_choice(&settings, &dirs).unwrap();
+    assert_eq!(
+        Config::load(&path).unwrap().hotkey_hints,
+        Some(HotkeyHints::Off)
+    );
+    // Nothing held, and a value the launcher wrote stays.
+    let mut settings = Config {
+        hotkey_hints: Some(HotkeyHints::Always),
+        ..Config::default()
+    };
+    apply_choice(&mut settings, Fallout2, None, false);
+    assert_eq!(settings.hotkey_hints, Some(HotkeyHints::Always));
+}
+
+/// A session knows its preset, which is what tells S17 from S18.
+#[test]
+fn spec020_rev4_a_session_reports_its_preset() {
+    let dir = synthetic_corpus();
+    assert_eq!(map_session(dir.path()).preset(), config::Preset::Vanilla);
+    let args = preview::PreviewArgs {
+        preset: vault_core::EnginePreset::Enhanced,
+        ..map_args(dir.path())
+    };
+    let session = SessionRuntime::start(SessionConfig::new(SessionOrigin::CommandLine, args))
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.preset(), config::Preset::Enhanced);
+}

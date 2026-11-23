@@ -1379,3 +1379,274 @@ fn spec024c_records_sharing_a_file() {
         ]
     );
 }
+
+// Non-ASCII table text and out-of-range save words ---------------------
+
+#[test]
+fn spec018_stem_of_non_ascii_text_is_refused_without_a_panic() {
+    use super::text::stem;
+    // Latin-1 `é` is two bytes in the converted text, so `len - 4` falls
+    // inside it for the first two; the others reach the same rule by a
+    // clean cut, or through a three-byte character.
+    for bad in [
+        "é123",
+        "é.ma",
+        "é.map",
+        "café.MAP",
+        "é",
+        "日本語",
+        "日本語.map",
+    ] {
+        assert_eq!(stem(bad), None, "{bad}");
+    }
+    // ASCII stems are unchanged, with `.map` folded and removed once.
+    for (text, expected) in [
+        ("TESTVIL.MAP", Some("TESTVIL")),
+        ("artemple.map", Some("artemple")),
+        ("mixed.Map", Some("mixed")),
+        ("a", Some("a")),
+        ("map", Some("map")),
+        ("a.map.map", None),
+        ("abcdefgh.map", Some("abcdefgh")),
+        ("abcdefghi.map", None),
+        (".map", None),
+        ("", None),
+    ] {
+        assert_eq!(stem(text).as_deref(), expected, "{text}");
+    }
+}
+
+#[test]
+fn spec018_maps_table_drops_non_ascii_names_and_keeps_the_rest() {
+    // The bytes are Latin-1 as shipped tables are, not UTF-8.
+    let mut notes = Diagnostics::default();
+    let table = MapsTable::parse(
+        b"[Map 0]\nmap_name=\xE9123\n\
+          [Map 1]\nmap_name=good\nmusic=\xE9123\nambient_sfx=\xE9123:10\n\
+          [Map 2]\nmap_name=caf\xE9.map\n",
+        &mut notes,
+    )
+    .unwrap();
+    assert!(table.get(0).is_none() && table.get(2).is_none());
+    let good = table.get(1).unwrap();
+    assert_eq!((good.stem.as_str(), good.music.as_deref()), ("good", None));
+    for message in [
+        "[Map 0] has no valid map_name",
+        "[Map 2] has no valid map_name",
+        "music: not a Stem",
+        "ambient_sfx:",
+    ] {
+        assert!(
+            notes.0.iter().any(|note| note.message.contains(message)),
+            "{message}: {:?}",
+            notes.0
+        );
+    }
+}
+
+#[test]
+fn spec018_row_palette_of_non_ascii_text() {
+    assert_eq!(lines::row_palette("é123"), "é123.pal");
+    assert_eq!(lines::row_palette("é.fr"), "é.fr.pal");
+    assert_eq!(lines::row_palette("é.frm"), "é.pal");
+    assert_eq!(lines::row_palette("日本語"), "日本語.pal");
+    // ASCII names are unchanged, with `.frm` folded and short names kept.
+    assert_eq!(lines::row_palette("ENDSLID1.FRM"), "ENDSLID1.pal");
+    assert_eq!(lines::row_palette("art"), "art.pal");
+    assert_eq!(lines::row_palette(".frm"), ".pal");
+    assert_eq!(lines::row_palette(""), ".pal");
+}
+
+#[test]
+fn spec018_world_map_area_outside_the_tables_refuses_the_load() {
+    // §8.9's shape: one area with three entrance slots.
+    let read = |installed: &Fallout2Shape, area: i32, entrance: i32| {
+        let mut bytes = hex(WORLD_MAP_COMPONENT);
+        bytes[12..16].copy_from_slice(&area.to_be_bytes());
+        bytes[16..20].copy_from_slice(&entrance.to_be_bytes());
+        WorldMapSave2::read(&mut Reader::unbounded(&bytes, "SAVE"), installed)
+    };
+    let installed = shape(false);
+    for (area, entrance) in [
+        (1, 0),
+        (1, -1),
+        (i32::MAX, 0),
+        (i32::MAX, i32::MAX),
+        (i32::MIN, 0),
+        (-2, 0),
+        (-1, 0),
+        (0, 3),
+        (0, -2),
+        (0, i32::MAX),
+    ] {
+        let error = read(&installed, area, entrance).unwrap_err();
+        assert!(
+            error.message.contains("outside the installed tables"),
+            "area {area}, entrance {entrance}: {}",
+            error.message
+        );
+    }
+    for (area, entrance) in [(0, 0), (0, 2), (0, -1), (-1, -1)] {
+        assert!(
+            read(&installed, area, entrance).is_ok(),
+            "area {area}, entrance {entrance}"
+        );
+    }
+    // A presence table longer than the entrance table is no way past it.
+    let mut uneven = shape(false);
+    uneven.areas_present = vec![true; 2];
+    assert!(read(&uneven, 1, 0).is_err());
+}
+
+// Automap entries, inventory stacks and the ACM step table -------------
+
+#[test]
+fn automap_entry_length_word_is_bounded() {
+    // Map 3 elevation 0's offset word is at 5 + 4 x 9.
+    let entry = |db: &mut Vec<u8>, length: u32| {
+        let at = db.len() as i32;
+        db.extend(length.to_be_bytes());
+        db.push(0);
+        db[41..45].copy_from_slice(&at.to_be_bytes());
+    };
+    let message = |db: AutomapDb| db.raster(3, 0).unwrap_err().message;
+    let mut largest = AutomapDb::fallout2(|_| false).bytes().to_vec();
+    entry(&mut largest, u32::MAX);
+    assert!(message(AutomapDb::parse_fallout2(largest).unwrap()).contains("payload"));
+    let mut fallout1 = AutomapDb::default().bytes().to_vec();
+    entry(&mut fallout1, u32::MAX);
+    assert!(message(AutomapDb::parse(fallout1).unwrap()).contains("payload"));
+    // A header cut short by the end of the database.
+    let mut short = AutomapDb::fallout2(|_| false).bytes().to_vec();
+    short.extend([0, 0]);
+    let at = (short.len() - 1) as i32;
+    short[41..45].copy_from_slice(&at.to_be_bytes());
+    assert!(message(AutomapDb::parse_fallout2(short).unwrap()).contains("header"));
+}
+
+/// SPEC-003 Fixture C inside a map, and the offset of its quantity word.
+fn stacked_map() -> (Vec<u8>, usize) {
+    let mut bytes = vault_fixtures::world::empty_map();
+    bytes.truncate(268);
+    bytes.extend(vault_fixtures::world::inventory());
+    (bytes, 268 + 0x60)
+}
+
+#[test]
+fn spec003_a_zero_stack_is_written_back_unchanged() {
+    use crate::map::MapFile;
+    let (bytes, quantity) = stacked_map();
+    let stacked = MapFile::parse(&bytes, &lookup).unwrap().write().unwrap();
+    let mut zero = bytes.clone();
+    vault_fixtures::world::word(&mut zero, quantity, 0);
+    let map = MapFile::parse(&zero, &lookup).unwrap();
+    assert_eq!(map.objects.elevations[0][0].inventory[0].quantity, 0);
+    assert!(
+        map.diagnostics
+            .iter()
+            .any(|note| note.contains("quantity 0"))
+    );
+    // Only the quantity word differs from the map with a real stack. The
+    // writer adds the occupied elevation's tiles ahead of it (SPEC-003 §3.2).
+    let written = map.write().unwrap();
+    let mut expected = stacked;
+    let tiles = expected.len() - bytes.len();
+    assert_eq!(
+        expected[tiles + quantity..tiles + quantity + 4],
+        [0, 0, 0, 3]
+    );
+    vault_fixtures::world::word(&mut expected, tiles + quantity, 0);
+    assert_eq!(written, expected);
+    // And it survives another round.
+    let again = MapFile::parse(&written, &lookup).unwrap();
+    assert_eq!(again.write().unwrap(), written);
+}
+
+#[test]
+fn spec003_writer_refuses_only_what_the_reader_cannot_represent() {
+    use crate::map::MapFile;
+    let (bytes, _) = stacked_map();
+    let mut map = MapFile::parse(&bytes, &lookup).unwrap();
+    let set = |map: &mut MapFile, quantity: u32| {
+        map.objects.elevations[0][0].inventory[0].quantity = quantity;
+    };
+    set(&mut map, i32::MAX as u32);
+    let written = map.write().unwrap();
+    let read = MapFile::parse(&written, &lookup).unwrap();
+    assert_eq!(
+        read.objects.elevations[0][0].inventory[0].quantity,
+        i32::MAX as u32
+    );
+    set(&mut map, i32::MAX as u32 + 1);
+    assert!(map.write().unwrap_err().message.contains("exceeds i32"));
+}
+
+/// An ACM of `blocks.len()` one-sample blocks, each `(k, s, format, value)`
+/// with no transform levels. Fields are LSB-first, as SPEC-010 §2.3 lays out.
+fn acm_of_single_samples(blocks: &[(u32, u32, u32, u32)]) -> Vec<u8> {
+    let mut bytes = vec![0x97, 0x28, 0x03, 0x01];
+    bytes.extend((blocks.len() as u32).to_le_bytes());
+    bytes.extend(1u16.to_le_bytes());
+    bytes.extend(22050u16.to_le_bytes());
+    bytes.extend((1u16 << 4).to_le_bytes());
+    let mut count = 0;
+    let mut put = |value: u32, width: u32| {
+        for bit in 0..width {
+            if count % 8 == 0 {
+                bytes.push(0);
+            }
+            *bytes.last_mut().unwrap() |= (((value >> bit) & 1) as u8) << (count % 8);
+            count += 1;
+        }
+    };
+    for &(k, step, format, value) in blocks {
+        put(k, 4);
+        put(step, 16);
+        put(format, 5);
+        put(value, format);
+    }
+    bytes
+}
+
+#[test]
+fn spec010_step_table_entries_match_the_rule_in_every_block() {
+    // SPEC-010 §3.2: T[j] = wrap16(j x s). Every block has the widest table
+    // and a new step, so a table stored per block is rebuilt for each
+    // sample: 2^16 entries for 2^16 blocks.
+    let blocks: Vec<_> = (0..1u32 << 16)
+        .map(|at| (15, at.wrapping_mul(40503) & 0xffff, 16, at))
+        .collect();
+    let decoded = crate::acm::decode(&acm_of_single_samples(&blocks)).unwrap();
+    assert_eq!(decoded.failure, None);
+    assert_eq!(decoded.blocks, 1 << 16);
+    let expected: Vec<i16> = blocks
+        .iter()
+        .map(|&(_, step, _, value)| {
+            ((i64::from(value) - 32768) * i64::from(step)).rem_euclid(65536) as u16 as i16
+        })
+        .collect();
+    assert_eq!(decoded.samples, expected);
+}
+
+#[test]
+fn spec010_step_table_keeps_its_asymmetric_range() {
+    let decode = |blocks: &[(u32, u32, u32, u32)]| {
+        crate::acm::decode(&acm_of_single_samples(blocks)).unwrap()
+    };
+    // k = 2 fills -4..3: format 3's fields 0 and 7 reach both ends, and
+    // step 40000 wraps (§3.2's example gives T[+1] = -25536).
+    let ends = decode(&[(2, 100, 3, 0), (2, 100, 3, 7), (2, 40000, 3, 5)]);
+    assert_eq!(ends.failure, None);
+    assert_eq!(ends.samples, [-400, 300, -25536]);
+    // k = 1 fills -2..1: T[+2] is never filled, and T[-4] is below it. The
+    // block before the failure is kept and the failing one emits nothing.
+    for field in [6, 0] {
+        let stopped = decode(&[(1, 100, 3, 5), (1, 100, 3, field)]);
+        assert_eq!(stopped.samples, [100], "field {field}");
+        let failure = stopped.failure.expect("an out-of-range index");
+        assert!(
+            failure.message.contains("step-table index"),
+            "field {field}"
+        );
+    }
+}

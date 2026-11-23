@@ -18,11 +18,12 @@
 //! the same on both paths.
 mod demos;
 mod encode;
+pub mod settings_preview;
 
 use crate::{
     AppResult, EnhancedShown, bezel_layer,
     config::{Config, GamePaths},
-    enhanced::EnhancedSettings,
+    enhanced::{EnhancedSettings, RoofPeek, ViewportMode},
     enhanced_layers,
     launcher::{self, Launcher, Setup, color, font},
     map_preview::{MapPreview, SharedRenderer},
@@ -32,6 +33,7 @@ use crate::{
     side_tiles,
 };
 use encode::Indexed;
+use settings_preview::{PreviewSettings, SettingsPreviewCanvas};
 use std::{
     cell::RefCell,
     path::{Path, PathBuf},
@@ -51,6 +53,9 @@ const WIDE: [u32; 2] = [854, 480];
 /// The label band above each side-by-side picture, and the divider.
 const BAND: u32 = 28;
 const DIVIDER: u32 = 4;
+/// Each picture of the launcher's live preview: 16:9, as the launcher
+/// frames it.
+const SETTINGS_PREVIEW: [u32; 2] = [480, 270];
 
 thread_local! {
     /// SPEC-022 the renderer every showcase session started on this thread
@@ -99,6 +104,10 @@ fn capture_files(output: &Path, stage: &Path) -> AppResult<()> {
     // The export lands in the stage, named relative to it.
     let mut files = world_files(&corpus, Path::new("mods"))?;
     files.insert(1, ("launcher-overview.png", launcher_overview()?));
+    files.insert(
+        2,
+        ("launcher-settings-preview.png", settings_preview_sheet()?),
+    );
     for (name, bytes) in files {
         let path = output.join(name);
         std::fs::write(&path, &bytes).map_err(|error| format!("{}: {error}", path.display()))?;
@@ -352,8 +361,52 @@ fn launcher_overview() -> AppResult<Vec<u8>> {
             ("Fallout 2 profile", &frames[1]),
         ],
         color::BACKGROUND,
-        color::FOCUS,
+        color::WARN,
     )?;
+    Ok(encode::png(&picture, &colors))
+}
+
+/// `launcher-settings-preview.png`: the launcher's live preview under
+/// three sets of settings, on a fixed clock with the cutaway over the room.
+fn settings_preview_sheet() -> AppResult<Vec<u8>> {
+    let enhanced = PreviewSettings {
+        enhanced: true,
+        viewport: ViewportMode::Unlocked,
+        ..PreviewSettings::default()
+    };
+    let shots = [
+        ("Vanilla 4:3", PreviewSettings::default()),
+        (
+            "Roof cutaway",
+            PreviewSettings {
+                roof_peek: RoofPeek::CursorXray,
+                ..enhanced
+            },
+        ),
+        (
+            "Tactical overlay",
+            PreviewSettings {
+                tactical_overlay: true,
+                ..enhanced
+            },
+        ),
+    ];
+    let [width, height] = SETTINGS_PREVIEW;
+    let mut images = Vec::new();
+    for (label, settings) in shots {
+        let mut image = IndexedImage::new(width, height)?;
+        let mut canvas = SettingsPreviewCanvas::new();
+        canvas.set(settings);
+        canvas.tick(1200);
+        canvas.draw(&mut image, [0, 0, width as i32, height as i32]);
+        images.push((label, image));
+    }
+    let pictures: Vec<(&str, &IndexedImage)> = images
+        .iter()
+        .map(|(label, image)| (*label, image))
+        .collect();
+    let colors = launcher::palette().map(|[r, g, b, _]| [r, g, b]);
+    let picture = side_by_side(&pictures, color::BACKGROUND, color::WARN)?;
     Ok(encode::png(&picture, &colors))
 }
 
@@ -577,6 +630,20 @@ mod tests {
         assert_eq!(&first[..8], b"\x89PNG\r\n\x1a\n");
         let width = CLASSIC[0] + DIVIDER + WIDE[0];
         let height = BAND + CLASSIC[1];
+        assert_eq!(
+            &first[16..24],
+            [width.to_be_bytes(), height.to_be_bytes()].concat()
+        );
+    }
+
+    /// The launcher's preview sheet needs no stage: no game data at all.
+    #[test]
+    fn the_settings_preview_sheet_is_the_same_each_time() {
+        let first = settings_preview_sheet().unwrap();
+        assert_eq!(first, settings_preview_sheet().unwrap());
+        assert_eq!(&first[..8], b"\x89PNG\r\n\x1a\n");
+        let width = SETTINGS_PREVIEW[0] * 3 + DIVIDER * 2;
+        let height = BAND + SETTINGS_PREVIEW[1];
         assert_eq!(
             &first[16..24],
             [width.to_be_bytes(), height.to_be_bytes()].concat()

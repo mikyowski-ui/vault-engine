@@ -279,15 +279,16 @@ impl<A: WorldAssets> WorldHost<A> {
     /// `set_object_data`: the listed field, through the ordinary state, so
     /// the hash sees what it covers.
     pub(crate) fn sfall_object_set(&mut self, object: ObjectRef, offset: i32, value: i32) {
+        // An ID change moves the object's entry in the unique-ID index too.
+        if offset == 0x00 {
+            self.world.set_object_id(object, value as u32);
+            return;
+        }
         let Some(found) = self.world.get_mut(object) else {
             return;
         };
         let raw = &mut found.raw;
         let done = match offset {
-            0x00 => {
-                raw.id = value as u32;
-                true
-            }
             0x04 => {
                 raw.hex = (value >= 0).then_some(value);
                 true
@@ -396,5 +397,48 @@ impl<A: WorldAssets> WorldHost<A> {
             } => Some((rounds, ammo_pid)),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::spec024_tests::sfall_host;
+
+    /// `reference_for_id` walks the objects, so only the uniqueness check of
+    /// an insert shows what the ID index believes.
+    #[test]
+    fn spec024b_an_object_id_write_moves_the_id_index_entry() {
+        let (mut host, me) = sfall_host();
+        let old = host.world.get(me).unwrap().raw.id;
+        let new = old + 1000;
+        host.sfall_object_set(me, 0x00, new as i32);
+
+        assert_eq!(host.sfall_object_get(me, 0x00), new as i32);
+        assert_eq!(host.world.reference_for_id(new), Some(me));
+        assert_eq!(host.world.reference_for_id(old), None);
+
+        let mut copy = host.world.get(me).unwrap().clone();
+        copy.raw.id = new;
+        let taken = host.world.insert(copy.clone()).unwrap();
+        let reassigned = host.world.get(taken).unwrap().raw.id;
+        assert_ne!(reassigned, new, "the new ID is held");
+        assert_eq!(host.world.reference_for_id(new), Some(me));
+
+        copy.raw.id = old;
+        let freed = host.world.insert(copy).unwrap();
+        assert_eq!(
+            host.world.get(freed).unwrap().raw.id,
+            old,
+            "the old is free"
+        );
+        assert_eq!(host.world.reference_for_id(old), Some(freed));
+    }
+    #[test]
+    fn spec024b_an_object_id_write_to_a_missing_object_does_nothing() {
+        let (mut host, me) = sfall_host();
+        let held = host.world.get(me).unwrap().raw.id;
+        host.sfall_object_set(0x7fff_0000, 0x00, 77);
+        assert_eq!(host.world.reference_for_id(77), None);
+        assert_eq!(host.world.reference_for_id(held), Some(me));
     }
 }

@@ -1504,7 +1504,7 @@ fn reports_the_spec017_script_stack_model_for_both_tables() {
     for line in [
         "Script stack (fallout1 table): 3 scripts, 1 listed but absent, 0 undecodable",
         "Script stack findings: 3 (underflow 0, overflow 0, merge conflict 0, unresolved 0, \
-         refused word 2, reserved word 0, unexpected frame 0, data-dependent 0, \
+         refused word 2, reserved word 0, unexpected frame 0, data-dependent 0, step budget 0, \
          stale exception 1)",
         "Script stack units with leaked results: 0",
         "Script stack stale exception: gatedemo.int underflow at word 0x80de recorded x1, \
@@ -1513,7 +1513,7 @@ fn reports_the_spec017_script_stack_model_for_both_tables() {
         "Script stack finding: refused word at word 0x815a x1",
         "Script stack (fallout2 table): 3 scripts, 1 listed but absent, 0 undecodable",
         "Script stack findings: 1 (underflow 0, overflow 0, merge conflict 0, unresolved 0, \
-         refused word 0, reserved word 1, unexpected frame 0, data-dependent 0, \
+         refused word 0, reserved word 1, unexpected frame 0, data-dependent 0, step budget 0, \
          stale exception 0)",
         "Script stack finding: reserved word at word 0x815a x1",
         "Script stack word 0x8156 (inven_cmds): 1 occurrences, table pops 3 push 1, consistent: ",
@@ -1599,7 +1599,7 @@ fn the_spec017_model_check_passes_with_a_matched_exception_and_leaked_results() 
     for line in [
         "Script stack (fallout1 table): 2 scripts, 0 listed but absent, 0 undecodable",
         "Script stack findings: 0 (underflow 0, overflow 0, merge conflict 0, unresolved 0, \
-         refused word 0, reserved word 0, unexpected frame 0, data-dependent 0, \
+         refused word 0, reserved word 0, unexpected frame 0, data-dependent 0, step budget 0, \
          stale exception 0)",
         "Script stack units with leaked results: 1",
         "Script stack recorded exception: gatedemo.int underflow at word 0x80de x1",
