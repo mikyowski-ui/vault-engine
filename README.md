@@ -4,13 +4,20 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Rust: 1.88+](https://img.shields.io/badge/Rust-1.88%2B-orange.svg)](Cargo.toml)
 
+> *War never changes. The engine did.*
+
 **Vault Engine** is a clean-room engine for the classic ***Fallout* (1997)**
 and ***Fallout 2* (1998)**, written in Rust. One native binary runs both
 retail games from your own `.DAT` archives, on Linux, Windows and macOS.
-Every behaviour is built from written specifications in `specs/approved/` by
-a two-team clean-room process. No game data ships with it.
 
-## What sets it apart
+Think of it as a new Pip-Boy for two very old holotapes: same wasteland,
+same dice, same talking heads, but with widescreen, zoom, a live debugger
+and a save system that knows what a hash is. Every behaviour is built from
+written specifications in `specs/approved/` by a two-team clean-room
+process, so nothing here was copied from anyone's vault. No game data ships
+with it: bring your own.
+
+## What sets it apart (S.P.E.C.I.A.L. edition)
 
 | | |
 | --- | --- |
@@ -36,7 +43,7 @@ a two-team clean-room process. No game data ships with it.
 <sub>Every picture is rendered by `cargo xtask capture-gallery` from synthetic
 fixtures and procedural art. No game data is used.</sub>
 
-## Quick start
+## Quick start (leave the vault in two steps)
 
 1. **Download** a prebuilt archive from
    [Releases](https://github.com/mikyowski-ui/vault-engine/releases), unpack
@@ -66,7 +73,7 @@ exactly where you were. Short hints teach the main keys the first time you play.
 debugger · `Alt+L` switch game. All but `F6`/`F7`, `F9` and `Alt+L` are
 enhanced-preset features.
 
-## Crates
+## Crates (what is in the footlocker)
 
 | Crate | What it does |
 | --- | --- |

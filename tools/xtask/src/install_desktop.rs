@@ -653,6 +653,8 @@ mod tests {
         assert!(desktop_entry(path).unwrap_err().contains("not UTF-8"));
     }
 
+    // The desktop entry is a Linux convention: POSIX paths and PATH.
+    #[cfg(unix)]
     #[test]
     fn the_folders_follow_the_base_directory_rule() {
         let resolve = |home: Option<&str>, xdg: Option<&str>| {
@@ -709,6 +711,8 @@ mod tests {
         assert!(png(2, &[0; 17]).is_err());
     }
 
+    // The desktop entry is a Linux convention: POSIX paths and PATH.
+    #[cfg(unix)]
     #[test]
     fn install_writes_the_three_files() {
         let scratch = Scratch::new("install");
@@ -791,6 +795,8 @@ mod tests {
         assert_eq!(fs::read_dir(&root.bin).unwrap().count(), 1);
     }
 
+    // The desktop entry is a Linux convention: POSIX paths and PATH.
+    #[cfg(unix)]
     #[test]
     fn uninstall_removes_the_three_files_alone() {
         let scratch = Scratch::new("uninstall");
@@ -912,6 +918,8 @@ mod tests {
         assert!(note.contains("not installed"), "{note}");
     }
 
+    // The desktop entry is a Linux convention: POSIX paths and PATH.
+    #[cfg(unix)]
     #[test]
     fn the_path_note_says_whether_a_terminal_will_find_it() {
         let bin = Path::new("/home/a/.local/bin");

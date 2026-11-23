@@ -454,6 +454,12 @@ mod tests {
     use std::{collections::HashMap, fs};
     use tempfile::tempdir;
 
+    /// `path` as a VDF or JSON string holds it: each backslash doubled, so
+    /// a Windows path survives the unescaping that reads it back.
+    fn escaped(path: &Path) -> String {
+        path.display().to_string().replace('\\', "\\\\")
+    }
+
     fn make(path: &Path) -> PathBuf {
         fs::create_dir_all(path).unwrap();
         path.to_path_buf()
@@ -628,11 +634,11 @@ mod tests {
              \t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n\t\"2\"\t\t\"{}\"\n\
              \t\"3\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n\
              \t\"4\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n}}\n",
-            home.join(".local/share/Steam").display(),
-            home.join("mnt/SteamLibrary").display(),
-            home.join("mnt/Old").display(),
-            home.join("mnt/Empty").display(),
-            home.join("mnt/Missing").display(),
+            escaped(&home.join(".local/share/Steam")),
+            escaped(&home.join("mnt/SteamLibrary")),
+            escaped(&home.join("mnt/Old")),
+            escaped(&home.join("mnt/Empty")),
+            escaped(&home.join("mnt/Missing")),
         );
         fs::write(steamapps.join("libraryfolders.vdf"), vdf).unwrap();
 
@@ -654,18 +660,28 @@ mod tests {
 
     #[test]
     fn steam_key_values_undo_their_escapes_and_skip_other_numbers() {
-        let text = "\t\"path\"\t\t\"D:\\\\Steam Library\"\n\
-                    \t\"PATH\"\t\t\"/mnt/games\"\n\
-                    \t\"1\"\t\t\"/old/library\"\n\
-                    \t\"38400\"\t\t\"123\"\n\
-                    \t\"label\"\t\t\"/not/this\"\n\
-                    \t\"0\"\n\t{\n";
+        // The old form (a number for a key) counts only with an absolute
+        // path, and what is absolute depends on the platform.
+        let old = if cfg!(windows) {
+            "E:\\old\\library"
+        } else {
+            "/old/library"
+        };
+        let text = format!(
+            "\t\"path\"\t\t\"D:\\\\Steam Library\"\n\
+             \t\"PATH\"\t\t\"/mnt/games\"\n\
+             \t\"1\"\t\t\"{}\"\n\
+             \t\"38400\"\t\t\"123\"\n\
+             \t\"label\"\t\t\"/not/this\"\n\
+             \t\"0\"\n\t{{\n",
+            escaped(Path::new(old)),
+        );
         assert_eq!(
-            steam_libraries(text),
+            steam_libraries(&text),
             [
                 PathBuf::from("D:\\Steam Library"),
                 PathBuf::from("/mnt/games"),
-                PathBuf::from("/old/library"),
+                PathBuf::from(old),
             ]
         );
     }
@@ -694,7 +710,7 @@ mod tests {
             config.join("config.json"),
             format!(
                 "{{\"defaultSettings\":{{\"language\":\"en\",\"defaultInstallPath\":\"{}\"}}}}",
-                library.display()
+                escaped(&library)
             ),
         )
         .unwrap();
@@ -704,9 +720,9 @@ mod tests {
             format!(
                 "{{\"installed\":[{{\"install_path\":\"{}\"}},{{\"install_path\":\"{}\"}},\
                  {{\"install_path\":\"{}\"}}]}}",
-                elsewhere.display(),
-                home.join("Elsewhere/Another Game").display(),
-                home.join("Elsewhere/Fallout Missing").display(),
+                escaped(&elsewhere),
+                escaped(&home.join("Elsewhere/Another Game")),
+                escaped(&home.join("Elsewhere/Fallout Missing")),
             ),
         )
         .unwrap();
