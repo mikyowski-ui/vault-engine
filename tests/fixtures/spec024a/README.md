@@ -2,8 +2,9 @@
 
 Every file here is synthetic. The Spec-Author sub-agent (Team A) wrote or
 computed each one from SPEC-024a alone. No manifest, script or table holds game
-data. See SPEC-024a section 9. These vectors live here, not in `oracle/`, which
-is reserved for research-side vectors.
+data. See SPEC-024a section 9. These vectors live here, not in `oracle/`. The one
+table the engine compiles in, `hook-points.tsv`, is the exception, as the last
+entry below says.
 
 Text formats: TSV files have one header row. A `-` means "not used".
 
@@ -19,9 +20,12 @@ Text formats: TSV files have one header row. A `-` means "not used".
   for two mods and one sfall script on one hook point.
 - `hook-order-rev4.tsv` (Revision 2): vectors O12 to O15 of section 9.2, on points
   SPEC-024b Revision 4 added, with a `hook` column and no arg3 columns.
-- `hook-points.tsv`: the hook list of section 3 with every row of
-  `oracle/SPEC-024/sfall-hooks.tsv`: whether the point fires (`yes` for the 30
-  tier P1 hooks of SPEC-024b Revision 4, else `no`), under which profiles, its
-  types, the native result it overrides, and where its boundary text is.
 - `mod-words.tsv`: the words of section 7.3, with the `pops` and `push` columns
   the stack model reads and the operand classes of SPEC-024b section 4.1.
+- `hook-points.tsv` is now `oracle/SPEC-024/hook-points.tsv`, because `vault-formats`
+  compiles it in and a crate should not read a test directory. Team A wrote it the
+  same way as the files here, and its bytes did not change in the move. It is the
+  hook list of section 3 with every row of `oracle/SPEC-024/sfall-hooks.tsv`:
+  whether the point fires (`yes` for the 30 tier P1 hooks of SPEC-024b Revision 4,
+  else `no`), under which profiles, its types, the native result it overrides, and
+  where its boundary text is.

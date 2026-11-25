@@ -1,8 +1,9 @@
 # Provenance
 
-Vault Engine is built under a strict two-team clean-room process. This document
-records where every kind of material in the repository comes from, and how
-compatibility is checked without copying protected expression.
+Vault Engine was built under a strict two-team clean-room process until
+2026-11-01, when the owner ended the Team A/B split ("The split ended" below). This
+document records where every kind of material in the repository comes from, and
+how compatibility is checked without copying protected expression.
 
 ## The two teams
 
@@ -134,6 +135,37 @@ Team A also amended research specs on the owner's briefs of 2026-11-01. Each rec
 - **SPEC-014 (R1-rev14):** one note in section 3.19 pointing to SPEC-020's Phase L1. No rule changes, and the main menu is untouched.
 
 Team A read no map, script, art or engine code for these. Their fixtures are in `tests/fixtures/spec013/`, and are synthetic.
+
+## The split ended: revisions by the implementing side
+
+The owner ended the Team A/B split on 2026-11-01, on the brief for Phase B. From then
+on the implementing side may revise a spec on the owner's instruction, and no
+separate Spec-Author sub-agent is involved. The clean-room wall is unchanged: no
+decompilation, disassembly or re-implementation source, and the ingestion rule in
+`CLAUDE.md` still applies to every spec. What changes is the separation in the
+section above. These revisions were written by the agents that implement the
+engine, after reading its code, so each one describes what the code does.
+
+The first such revisions, of 2026-11-01, record what Waves 1 to 3 built. Each has a
+Revision entry, and every change is a Decision marked as an owner instruction. No
+game rule changed, and no vector or oracle row changed.
+
+| Spec | Revision | What it records | Decisions |
+| --- | --- | --- | --- |
+| SPEC-017 | 6 | The stack model's total step budget and the `step budget` finding (section 8.2) | 51 |
+| SPEC-020 | 5 | Per-profile load orders, the built-in `ettu` profile and `--profile`, linked Fallout 1 data, the Studio's pills, a warm switch keeping no storage, and the `H` key for the in-game Enhanced window (sections 2.4 to 2.8) | D-37 to D-43 |
+| SPEC-023 | 6 | The config root order, the per-profile save root, the wider settings grammar, and a warm switch keeping no storage (sections 2.4, 3.10, 3.11, 3.15) | D-45 to D-48 |
+| SPEC-024a | 4 | `hook-points.tsv` moves to `oracle/SPEC-024/`. No row of it changes | D-34 |
+| SPEC-024b | 6 | Per-profile `sfall` (section 3.1), the array total cap (D-60, section 5.4), and the sidecar's refusals (section 5.8) | D-60, D-61, D-62 |
+
+`oracle/` no longer holds only research-side material. It now also keeps tables the
+engine's build reads: Team A wrote `oracle/SPEC-024/hook-points.tsv`, and the tables of
+`oracle/SPEC-005/`, `oracle/SPEC-007/` and `oracle/SPEC-008/` are transcribed from the
+approved specs on this side, as their READMEs say. None of these has a research-side
+generator behind it.
+
+A later research-vault revision of any of these specs supersedes these changes, as it
+does Team A's.
 
 ## Research hand-off: SPEC-024b
 

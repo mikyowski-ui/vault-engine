@@ -98,7 +98,7 @@ pub const MAX_SETTINGS: usize = 64;
 /// §7.4: the longest string setting.
 pub const MAX_SETTING_TEXT: usize = 255;
 /// §2.2: the one list of hook points.
-const HOOK_POINTS: &str = include_str!("../../../tests/fixtures/spec024a/hook-points.tsv");
+const HOOK_POINTS: &str = include_str!("../../../oracle/SPEC-024/hook-points.tsv");
 
 /// The ID of the hook named `point`, as exact bytes (SPEC-024a §2.2). The
 /// reserved range has no name.

@@ -112,6 +112,57 @@ fn the_profile_flag_chooses_the_profile_for_one_start() {
     );
 }
 
+/// `--profile` gives a headless run that profile's edition, data, links,
+/// mods and sfall, with its rules left Vanilla, and refuses a name the
+/// settings do not have rather than running on nothing.
+#[test]
+fn a_headless_run_takes_its_session_from_the_profile() {
+    let settings = config::Config::parse(concat!(
+        "master_dat = \"/games/f1/MASTER.DAT\"\n",
+        "critter_dat = \"/games/f1/CRITTER.DAT\"\n",
+        "[profiles.fallout2]\n",
+        "master_dat = \"/games/ettu/MASTER.DAT\"\n",
+        "critter_dat = \"/games/ettu/CRITTER.DAT\"\n",
+        "[profiles.ettu]\n",
+        "edition = \"fallout2\"\n",
+        "secondary_dat_dirs = [\"/games/f1\"]\n",
+        "sfall = true\n",
+        "preset = \"enhanced\"\n",
+    ))
+    .unwrap();
+    let start = ["--autoplay-headless", "--preview-map", "maps/start.map"];
+    let mut args = parse(&[&start[..], &["--profile", "ettu"]].concat());
+    apply_headless_profile(&mut args, &settings).unwrap();
+    let session = &args.preview;
+    assert_eq!(session.game_profile, vault_core::GameProfile::Fallout2);
+    assert_eq!(
+        session.master_dat.as_deref(),
+        Some(Path::new("/games/ettu/MASTER.DAT"))
+    );
+    assert_eq!(session.linked_dirs, [PathBuf::from("/games/f1")]);
+    assert!(session.sfall);
+    assert_eq!(session.preset, vault_core::EnginePreset::Vanilla);
+
+    // The command line still wins over the profile's data.
+    let mut args = parse(&[&start[..], &["--profile", "ettu", "--corpus-dir", "/here"]].concat());
+    apply_headless_profile(&mut args, &settings).unwrap();
+    assert_eq!(args.preview.corpus_dir.as_deref(), Some(Path::new("/here")));
+    assert_eq!(args.preview.master_dat, None);
+
+    let mut args = parse(&[&start[..], &["--profile", "nobody"]].concat());
+    let error = apply_headless_profile(&mut args, &settings).unwrap_err();
+    assert_eq!(error.to_string(), "no profile named nobody in the settings");
+}
+
+/// `--game` passes the command line's check, but a run needs a map.
+#[test]
+fn a_headless_run_needs_a_map() {
+    let error = check_headless_start(&parse(&["--autoplay-headless", "--game"])).unwrap_err();
+    assert!(error.to_string().contains("--preview-map"), "{error}");
+    let named = parse(&["--autoplay-headless", "--preview-map", "maps/a.map"]);
+    assert!(check_headless_start(&named).is_ok());
+}
+
 #[test]
 fn the_sfall_flag_parses_and_defaults_off() {
     assert!(parse(&["--sfall"]).preview.sfall);

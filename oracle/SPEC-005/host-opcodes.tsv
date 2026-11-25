@@ -1,0 +1,274 @@
+# SPEC-005 sections 2.3 to 2.10: the 266 host words 0x804C to 0x8155, in word order.
+# word: the instruction word. section: the section of the reference table with the row. name: its name.
+# operands: the operand types, first popped first, with - for none: Integer, String, Float, Unchecked, Optional,
+# Filename, FillColor, TextColor, IntegerOrString, Previous or ScrollFourth. A type is always named here. Section 2.1
+# makes an unmarked operand Integer, so spec_operands shows no suffix for most of them.
+# spec_operands, spec_return: the Pop and Return cells of the row, verbatim. push: None, Value or Text.
+# registered, variable: 1 or 0. Read by crates/vault-vm/build.rs. Checked by crates/vault-vm/tests/table_sync.rs.
+word	section	name	operands	spec_operands	push	spec_return	registered	variable
+0x804C	2.3	sayquit	-	none	None	none	1	0
+0x804D	2.3	sayend	-	none	None	none	1	0
+0x804E	2.3	saystart	-	none	None	none	1	0
+0x804F	2.3	saystartpos	Unchecked	start position U	None	none	1	0
+0x8050	2.3	sayreplytitle	Optional	title O	None	none	1	0
+0x8051	2.3	saygotoreply	Optional	reply name O	None	none	1	0
+0x8052	2.3	sayreply	Optional,Optional	reply text O, label O	None	none	1	0
+0x8053	2.3	sayoption	IntegerOrString,Optional	destination S or I, option text O	None	none	1	0
+0x8054	2.3	saymessage	Optional,Optional	message O, title O	None	none	1	0
+0x8055	2.3	sayreplywindow	Filename,Unchecked,Unchecked,Unchecked,Unchecked	background N, height U, width U, y U, x U	None	none	1	0
+0x8056	2.3	sayoptionwindow	Filename,Unchecked,Unchecked,Unchecked,Unchecked	background N, height U, width U, y U, x U	None	none	1	0
+0x8057	2.3	sayborder	Integer,Integer	vertical border, horizontal border	None	none	1	0
+0x8058	2.3	sayscrollup	ScrollFourth,Unchecked,Unchecked,Unchecked,Unchecked,Unchecked	fourth image S/0/-1, third image U, second image U, first image U, y U, x U	None	none	1	0
+0x8059	2.3	sayscrolldown	ScrollFourth,Unchecked,Unchecked,Unchecked,Unchecked,Unchecked	fourth image S/0/-1, third image U, second image U, first image U, y U, x U	None	none	1	0
+0x805A	2.3	saysetspacing	Integer	spacing	None	none	1	0
+0x805B	2.3	sayoptioncolor	TextColor,TextColor,TextColor	blue T, green T, red T	None	none	1	0
+0x805C	2.3	sayreplycolor	TextColor,TextColor,TextColor	blue T, green T, red T	None	none	1	0
+0x805D	2.3	sayrestart	-	none	None	none	1	0
+0x805E	2.3	saygetlastpos	-	none	Value	I position	1	0
+0x805F	2.3	sayreplyflags	Integer	flags	None	none	1	0
+0x8060	2.3	sayoptionflags	Integer	flags	None	none	1	0
+0x8061	2.3	saymessagetimeout	Unchecked	timeout U	None	none	1	0
+0x8062	2.3	createwin	Unchecked,Unchecked,Unchecked,Unchecked,Unchecked	height U, width U, y U, x U, name U	None	none	1	0
+0x8063	2.3	deletewin	Unchecked	name U	None	none	1	0
+0x8064	2.3	selectwin	String	name S	None	none	1	0
+0x8065	2.3	resizewin	Unchecked,Unchecked,Unchecked,Unchecked,Unchecked	height U, width U, y U, x U, name U	None	none	1	0
+0x8066	2.3	scalewin	Unchecked,Unchecked,Unchecked,Unchecked,Unchecked	height U, width U, y U, x U, name U	None	none	1	0
+0x8067	2.3	showwin	-	none	None	none	1	0
+0x8068	2.3	fillwin	FillColor,FillColor,FillColor	blue C, green C, red C	None	none	1	0
+0x8069	2.3	fillrect	FillColor,FillColor,FillColor,Integer,Integer,Integer,Integer	blue C, green C, red C, height, width, y, x	None	none	1	0
+0x806A	2.3	fillwin3x3	String	filename S	None	none	1	0
+0x806B	2.3	display	String	filename S	None	none	1	0
+0x806C	2.3	displaygfx	Unchecked,Unchecked,Unchecked,Unchecked,Unchecked	height U, width U, y U, x U, filename U	None	none	1	0
+0x806D	2.3	displayraw	String	filename S	None	none	1	0
+0x806E	2.3	loadpalettetable	Unchecked	filename U	None	none	1	0
+0x806F	2.3	fadein	Integer	duration	None	none	1	0
+0x8070	2.3	fadeout	Integer	duration	None	none	1	0
+0x8071	2.3	gotoxy	Integer,Integer	y, x	None	none	1	0
+0x8072	2.3	print	Unchecked	value U	None	none	1	0
+0x8073	2.3	format	Integer,Integer,Integer,Integer,Integer,String	alignment, height, width, y, x, text S	None	none	1	0
+0x8074	2.3	printrect	Integer,Integer,Unchecked	alignment, width, value U	None	none	1	0
+0x8075	2.3	setfont	Integer	font number	None	none	1	0
+0x8076	2.3	settextflags	Integer	flags	None	none	1	0
+0x8077	2.3	settextcolor	TextColor,TextColor,TextColor	blue T, green T, red T	None	none	1	0
+0x8078	2.3	sethighlightcolor	TextColor,TextColor,TextColor	blue T, green T, red T	None	none	1	0
+0x8079	2.3	stopmovie	-	none	None	none	1	0
+0x807A	2.3	playmovie	String	filename S	None	none	1	0
+0x807B	2.3	movieflags	Unchecked	flags U	None	none	1	0
+0x807C	2.3	playmovierect	Unchecked,Unchecked,Unchecked,Unchecked,Integer	height U, width U, y U, x U, filename I	None	none	1	0
+0x807D	2.3	Unregistered	-	none	None	none	0	0
+0x807E	2.3	Unregistered	-	none	None	none	0	0
+0x807F	2.3	addregion	Integer,Integer,Unchecked	count, then repeated y and x, then name U	None	none	1	1
+0x8080	2.3	addregionflag	Integer,String	flags, region name S	None	none	1	0
+0x8081	2.3	addregionproc	Integer,Integer,Integer,Integer,String	release procedure, press procedure, exit procedure, enter procedure, region name S	None	none	1	0
+0x8082	2.3	addregionrightproc	Integer,Integer,String	release procedure, press procedure, region name S	None	none	1	0
+0x8083	2.3	deleteregion	Unchecked	name U	None	none	1	0
+0x8084	2.3	activateregion	Unchecked,Unchecked	event U, region name U	None	none	1	0
+0x8085	2.3	checkregion	String	region name S	Value	I bool	1	0
+0x8086	2.3	addbutton	Integer,Integer,Integer,Integer,String	height, width, y, x, name S	None	none	1	0
+0x8087	2.3	addbuttontext	String,String	text S, button name S	None	none	1	0
+0x8088	2.3	addbuttonflag	Integer,String	flags, button name S	None	none	1	0
+0x8089	2.3	addbuttongfx	Unchecked,Unchecked,Unchecked,String	hover image U, normal image U, pressed image U, button name S	None	none	1	0
+0x808A	2.3	addbuttonproc	Integer,Integer,Integer,Integer,String	release procedure, press procedure, exit procedure, enter procedure, button name S	None	none	1	0
+0x808B	2.3	addbuttonrightproc	Integer,Integer,String	release procedure, press procedure, button name S	None	none	1	0
+0x808C	2.3	deletebutton	Unchecked	name U	None	none	1	0
+0x808D	2.3	hidemouse	-	none	None	none	1	0
+0x808E	2.3	showmouse	-	none	None	none	1	0
+0x808F	2.3	mouseshape	Integer,Integer,String	hotspot y, hotspot x, filename S	None	none	1	0
+0x8090	2.3	refreshmouse	Integer	fallback procedure	None	none	1	0
+0x8091	2.3	setglobalmousefunc	-	none	None	none	1	0
+0x8092	2.3	addnamedevent	Unchecked,String	procedure U, event name S	None	none	1	0
+0x8093	2.3	addnamedhandler	Unchecked,String	procedure U, event name S	None	none	1	0
+0x8094	2.3	clearnamed	String	event name S	None	none	1	0
+0x8095	2.3	signalnamed	String	event name S	None	none	1	0
+0x8096	2.3	addkey	Integer,Integer	procedure, key number	None	none	1	0
+0x8097	2.3	deletekey	Integer	key number	None	none	1	0
+0x8098	2.3	soundplay	Integer,String	mode, filename S	Value	I handle	1	0
+0x8099	2.3	soundpause	Integer	handle	None	none	1	0
+0x809A	2.3	soundresume	Integer	handle	None	none	1	0
+0x809B	2.3	soundstop	Integer	handle	None	none	1	0
+0x809C	2.3	soundrewind	Integer	handle	None	none	1	0
+0x809D	2.3	sounddelete	Integer	handle	None	none	1	0
+0x809E	2.3	setoneoptpause	Integer	enabled	None	none	1	0
+0x809F	2.3	selectfilelist	String,String	filename pattern S, title S	Text	D filename or I zero	1	0
+0x80A0	2.3	tokenize	Integer,Previous,String	delimiter, previous S or I zero, source S	Text	D token or I zero	1	0
+0x80A1	2.8	give_exp_points	Integer	experience	None	none	1	0
+0x80A2	2.4	scr_return	Integer	result	None	none	1	0
+0x80A3	2.10	play_sfx	String	sound name S	None	none	1	0
+0x80A4	2.5	obj_name	Integer	object	Text	D name	1	0
+0x80A5	2.10	sfx_build_open_name	Integer,Integer	action, object	Text	D name	1	0
+0x80A6	2.8	get_pc_stat	Integer	player-stat number	Value	I value	1	0
+0x80A7	2.5	tile_contains_pid_obj	Integer,Integer,Integer	PID, elevation, hex	Value	I object	1	0
+0x80A8	2.9	set_map_start	Integer,Integer,Integer,Integer	orientation, elevation, y, x	None	none	1	0
+0x80A9	2.9	override_map_start	Integer,Integer,Integer,Integer	orientation, elevation, y, x	None	none	1	0
+0x80AA	2.8	has_skill	Integer,Integer	skill number, object	Value	I level	1	0
+0x80AB	2.8	using_skill	Integer,Integer	skill number, object	Value	I bool	1	0
+0x80AC	2.8	roll_vs_skill	Integer,Integer,Integer	modifier, skill number, object	Value	I roll	1	0
+0x80AD	2.8	skill_contest	Integer,Integer,Integer	third value, second value, first value	Value	I zero	1	0
+0x80AE	2.8	do_check	Integer,Integer,Integer	modifier, primary-stat number, object	Value	I roll	1	0
+0x80AF	2.8	is_success	Integer	roll	Value	I predicate	1	0
+0x80B0	2.8	is_critical	Integer	roll	Value	I predicate	1	0
+0x80B1	2.8	how_much	Integer	ignored value	Value	I margin	1	0
+0x80B2	2.8	reaction_roll	Integer,Integer,Integer	third value, second value, first value	Value	I zero	1	0
+0x80B3	2.8	reaction_influence	Integer,Integer,Integer	third value, second value, first value	Value	I zero	1	0
+0x80B4	2.8	random	Integer,Integer	maximum, minimum	Value	I value	1	0
+0x80B5	2.8	roll_dice	Integer,Integer	second value, first value	Value	I zero	1	0
+0x80B6	2.5	move_to	Integer,Integer,Integer	elevation, hex, object	Value	I status	1	0
+0x80B7	2.5	create_object_sid	Integer,Integer,Integer,Integer	script-file number, elevation, hex, PID	Value	I object	1	0
+0x80B8	2.10	display_msg	String	text S	None	none	1	0
+0x80B9	2.4	script_overrides	-	none	None	none	1	0
+0x80BA	2.5	obj_is_carrying_obj_pid	Integer,Integer	PID, owner	Value	I quantity	1	0
+0x80BB	2.5	tile_contains_obj_pid	Integer,Integer,Integer	PID, elevation, hex	Value	I bool	1	0
+0x80BC	2.4	self_obj	-	none	Value	I object	1	0
+0x80BD	2.4	source_obj	-	none	Value	I object	1	0
+0x80BE	2.4	target_obj	-	none	Value	I object	1	0
+0x80BF	2.4	dude_obj	-	none	Value	I object	1	0
+0x80C0	2.4	obj_being_used_with	-	none	Value	I object	1	0
+0x80C1	2.4	local_var	Integer	element index	Value	I value	1	0
+0x80C2	2.4	set_local_var	Integer,Integer	value, element index	None	none	1	0
+0x80C3	2.4	map_var	Integer	element index	Value	I value	1	0
+0x80C4	2.4	set_map_var	Integer,Integer	value, element index	None	none	1	0
+0x80C5	2.4	global_var	Integer	element index	Value	I value	1	0
+0x80C6	2.4	set_global_var	Integer,Integer	value, element index	None	none	1	0
+0x80C7	2.4	script_action	-	none	Value	I action	1	0
+0x80C8	2.5	obj_type	Integer	object	Value	I category	1	0
+0x80C9	2.5	obj_item_subtype	Integer	object	Value	I subtype	1	0
+0x80CA	2.8	get_critter_stat	Integer,Integer	stat number, object	Value	I value	1	0
+0x80CB	2.8	set_critter_stat	Integer,Integer,Integer	adjustment, stat number, object	Value	I status	1	0
+0x80CC	2.6	animate_stand_obj	Integer	object	None	none	1	0
+0x80CD	2.6	animate_stand_reverse_obj	Integer	object	None	none	1	0
+0x80CE	2.6	animate_move_obj_to_tile	Integer,Integer,Integer	movement flags, hex, object	None	none	1	0
+0x80CF	2.6	animate_jump	-	none	None	none	1	0
+0x80D0	2.9	attack	Integer,Integer,Integer,Integer,Integer,Integer,Integer,Integer	eighth value, seventh value, maximum damage, minimum damage, accuracy, ignored third value, ignored second value, target	None	none	1	0
+0x80D1	2.9	make_daytime	-	none	None	none	1	0
+0x80D2	2.5	tile_distance	Integer,Integer	second hex, first hex	Value	I hops	1	0
+0x80D3	2.5	tile_distance_objs	Integer,Integer	second object, first object	Value	I hops	1	0
+0x80D4	2.5	tile_num	Integer	object	Value	I hex	1	0
+0x80D5	2.5	tile_num_in_direction	Integer,Integer,Integer	steps, orientation, origin hex	Value	I hex	1	0
+0x80D6	2.5	pickup_obj	Integer	item	None	none	1	0
+0x80D7	2.5	drop_obj	Integer	item	None	none	1	0
+0x80D8	2.5	add_obj_to_inven	Integer,Integer	item, owner	None	none	1	0
+0x80D9	2.5	rm_obj_from_inven	Integer,Integer	item, owner	None	none	1	0
+0x80DA	2.5	wield_obj_critter	Integer,Integer	item, critter	None	none	1	0
+0x80DB	2.5	use_obj	Integer	object	None	none	1	0
+0x80DC	2.5	obj_can_see_obj	Integer,Integer	target, observer	Value	I bool	1	0
+0x80DD	2.9	attack` alias	Integer,Integer,Integer,Integer,Integer,Integer,Integer,Integer	eighth value, seventh value, maximum damage, minimum damage, accuracy, ignored third value, ignored second value, target	None	none	1	0
+0x80DE	2.7	start_gdialog	Integer,Integer,Integer,Integer,Integer	background, head art number, reaction, object, unused list number	None	none	1	0
+0x80DF	2.7	end_dialogue	-	none	None	none	1	0
+0x80E0	2.7	dialogue_reaction	Integer	reaction	None	none	1	0
+0x80E1	2.5	turn_off_objs_in_area	Integer,Integer,Integer,Integer	last hex, first hex, last elevation, first elevation	None	none	1	0
+0x80E2	2.5	turn_on_objs_in_area	Integer,Integer,Integer,Integer	last hex, first hex, last elevation, first elevation	None	none	1	0
+0x80E3	2.5	set_obj_visibility	Integer,Integer	invisible flag, object	None	none	1	0
+0x80E4	2.9	load_map	Integer,IntegerOrString	entrance parameter, map I or S	None	none	1	0
+0x80E5	2.7	barter_offer	Integer,Integer,Integer	third value, second value, first value	None	none	1	0
+0x80E6	2.7	barter_asking	Integer,Integer,Integer	third value, second value, first value	None	none	1	0
+0x80E7	2.6	anim_busy	Integer	object	Value	I state	1	0
+0x80E8	2.8	critter_heal	Integer,Integer	hit-point adjustment, object	Value	I zero on normal path	1	0
+0x80E9	2.9	set_light_level	Integer	level	None	none	1	0
+0x80EA	2.9	game_time	-	none	Value	I ticks	1	0
+0x80EB	2.9	game_time_in_seconds	-	none	Value	I seconds	1	0
+0x80EC	2.4	elevation	Integer	object	Value	I elevation	1	0
+0x80ED	2.9	kill_critter	Integer,Integer	death animation, object	None	none	1	0
+0x80EE	2.9	kill_critter_type	Integer,Integer	death mode, PID	None	none	1	0
+0x80EF	2.9	critter_damage	Integer,Integer,Integer	damage type/flags, amount, object	None	none	1	0
+0x80F0	2.9	add_timer_event	Integer,Integer,Integer	fixed parameter, delay ticks, object	None	none	1	0
+0x80F1	2.9	rm_timer_event	Integer	object	None	none	1	0
+0x80F2	2.9	game_ticks	Integer	seconds	Value	I ticks	1	0
+0x80F3	2.8	has_trait	Integer,Integer,Integer	selector, object, kind	Value	I value	1	0
+0x80F4	2.5	destroy_object	Integer	object	None	none	1	0
+0x80F5	2.5	obj_can_hear_obj	Integer,Integer	second object, first object	Value	I bool on valid non-null path	1	0
+0x80F6	2.9	game_time_hour	-	none	Value	I clock	1	0
+0x80F7	2.4	fixed_param	-	none	Value	I value	1	0
+0x80F8	2.9	tile_is_visible	Integer	hex	Value	I bool	1	0
+0x80F9	2.7	dialogue_system_enter	-	none	None	none	1	0
+0x80FA	2.4	action_being_used	-	none	Value	I action	1	0
+0x80FB	2.8	critter_state	Integer	object	Value	I flags	1	0
+0x80FC	2.9	game_time_advance	Integer	ticks	None	none	1	0
+0x80FD	2.8	radiation_inc	Integer,Integer	amount, object	None	none	1	0
+0x80FE	2.8	radiation_dec	Integer,Integer	amount, object	None	none	1	0
+0x80FF	2.5	critter_attempt_placement	Integer,Integer,Integer	elevation, desired hex, object	Value	I status, or no push on null	1	0
+0x8100	2.5	obj_pid	Integer	object	Value	I PID	1	0
+0x8101	2.4	cur_map_index	-	none	Value	I index	1	0
+0x8102	2.8	critter_add_trait	Integer,Integer,Integer,Integer	value, selector, kind, object	Value	I -1	1	0
+0x8103	2.8	critter_rm_trait	Integer,Integer,Integer,Integer	ignored value, selector, kind, object	Value	I -1, or no push on null	1	0
+0x8104	2.5	proto_data	Integer,Integer	member number, PID	Value	I or D	1	0
+0x8105	2.10	message_str	Integer,Integer	message number, message-list number	Text	D text	1	0
+0x8106	2.5	critter_inven_obj	Integer,Integer	selector, critter	Value	I object/count	1	0
+0x8107	2.5	obj_set_light_level	Integer,Integer,Integer	radius, intensity percent, object	None	none	1	0
+0x8108	2.9	world_map	-	none	None	none	1	0
+0x8109	2.9	town_map	-	none	None	none	1	0
+0x810A	2.10	float_msg	Integer,Unchecked,Integer	style, text U, object	None	none	1	0
+0x810B	2.9	metarule	Integer,Integer	parameter, rule	Value	I value	1	0
+0x810C	2.6	anim	Integer,Integer,Integer	frame/direction control, animation selector, object	None	none	1	0
+0x810D	2.5	obj_carrying_pid_obj	Integer,Integer	PID, owner	Value	I object	1	0
+0x810E	2.6	reg_anim_func	Integer,Integer	parameter, command	None	none	1	0
+0x810F	2.6	reg_anim_animate	Integer,Integer,Integer	delay, animation, object	None	none	1	0
+0x8110	2.6	reg_anim_animate_reverse	Integer,Integer,Integer	delay, animation, object	None	none	1	0
+0x8111	2.6	reg_anim_obj_move_to_obj	Integer,Integer,Integer	delay, destination object, moving object	None	none	1	0
+0x8112	2.6	reg_anim_obj_run_to_obj	Integer,Integer,Integer	delay, destination object, moving object	None	none	1	0
+0x8113	2.6	reg_anim_obj_move_to_tile	Integer,Integer,Integer	delay, hex, object	None	none	1	0
+0x8114	2.6	reg_anim_obj_run_to_tile	Integer,Integer,Integer	delay, hex, object	None	none	1	0
+0x8115	2.10	play_gmovie	Integer	movie number	None	none	1	0
+0x8116	2.5	add_mult_objs_to_inven	Integer,Integer,Integer	quantity, item, owner	None	none	1	0
+0x8117	2.5	rm_mult_objs_from_inven	Integer,Integer,Integer	requested quantity, item, owner	Value	I quantity, or no push on null	1	0
+0x8118	2.9	get_month	-	none	Value	I month	1	0
+0x8119	2.9	get_day	-	none	Value	I day	1	0
+0x811A	2.9	explosion	Integer,Integer,Integer	maximum damage, elevation, hex	None	none	1	0
+0x811B	2.9	days_since_visited	-	none	Value	I days	1	0
+0x811C	2.7	gsay_start	-	none	None	none	1	0
+0x811D	2.7	gsay_end	-	none	None	none	1	0
+0x811E	2.7	gsay_reply	IntegerOrString,Integer	message I or S, message-list number	None	none	1	0
+0x811F	2.7	gsay_option	Integer,Integer,IntegerOrString,Integer	reaction, procedure number, message I or S, message-list number	None	none	1	0
+0x8120	2.7	gsay_message	Integer,IntegerOrString,Integer	reaction, message I or S, message-list number	None	none	1	0
+0x8121	2.7	giq_option	Integer,Integer,IntegerOrString,Integer,Integer	reaction, procedure number, message I or S, message-list number, IQ threshold	None	none	1	0
+0x8122	2.8	poison	Integer,Integer	adjustment, object	None	none	1	0
+0x8123	2.8	get_poison	Integer	object	Value	I amount	1	0
+0x8124	2.5	party_add	Integer	object	None	none	1	0
+0x8125	2.5	party_remove	Integer	object	None	none	1	0
+0x8126	2.6	reg_anim_animate_forever	Integer,Integer	animation, object	None	none	1	0
+0x8127	2.8	critter_injure	Integer,Integer	injury mask, object	None	none	1	0
+0x8128	2.9	combat_is_initialized	-	none	Value	I bool	1	0
+0x8129	2.7	gdialog_barter	Integer	activation parameter	None	none	1	0
+0x812A	2.8	difficulty_level	-	none	Value	I difficulty	1	0
+0x812B	2.8	running_burning_guy	-	none	Value	I preference	1	0
+0x812C	2.5	inven_unwield	-	none	None	none	1	0
+0x812D	2.5	obj_is_locked	Integer	object	Value	I bool	1	0
+0x812E	2.5	obj_lock	Integer	object	None	none	1	0
+0x812F	2.5	obj_unlock	Integer	object	None	none	1	0
+0x8130	2.5	obj_is_open	Integer	object	Value	I bool	1	0
+0x8131	2.5	obj_open	Integer	object	None	none	1	0
+0x8132	2.5	obj_close	Integer	object	None	none	1	0
+0x8133	2.10	game_ui_disable	-	none	None	none	1	0
+0x8134	2.10	game_ui_enable	-	none	None	none	1	0
+0x8135	2.10	game_ui_is_disabled	-	none	Value	I bool	1	0
+0x8136	2.10	gfade_out	Integer	enabled	None	none	1	0
+0x8137	2.10	gfade_in	Integer	enabled	None	none	1	0
+0x8138	2.5	item_caps_total	Integer	owner	Value	I amount	1	0
+0x8139	2.5	item_caps_adjust	Integer,Integer	amount, owner	Value	I status	1	0
+0x813A	2.6	anim_action_frame	Integer,Integer	animation, object	Value	I frame	1	0
+0x813B	2.6	reg_anim_play_sfx	Integer,String,Integer	delay, sound name S, object	None	none	1	0
+0x813C	2.8	critter_mod_skill	Integer,Integer,Integer	points, skill number, object	Value	I zero	1	0
+0x813D	2.10	sfx_build_char_name	Integer,Integer,Integer	extra selector, animation, object	Text	D name	1	0
+0x813E	2.10	sfx_build_ambient_name	Integer	supposed base name I	Text	D only if downstream operations succeed	1	0
+0x813F	2.10	sfx_build_interface_name	Integer	supposed base name I	Text	D only if downstream operations succeed	1	0
+0x8140	2.10	sfx_build_item_name	Integer	supposed base name I	Text	D only if downstream operations succeed	1	0
+0x8141	2.10	sfx_build_weapon_name	Integer,Integer,Integer,Integer	target, hit mode, weapon, sound-effect type	Text	D name	1	0
+0x8142	2.10	sfx_build_scenery_name	Integer,Integer,Integer	active/passive selector, action, supposed base name I	Text	D only if downstream operations succeed	1	0
+0x8143	2.9	attack_setup	Integer,Integer	defender, attacker	None	none	1	0
+0x8144	2.5	destroy_mult_objs	Integer,Integer	requested quantity, object	Value	I count	1	0
+0x8145	2.5	use_obj_on_obj	Integer,Integer	target, item	None	none	1	0
+0x8146	2.9	endgame_slideshow	-	none	None	none	1	0
+0x8147	2.5	move_obj_inven_to_obj	Integer,Integer	destination owner, source owner	None	none	1	0
+0x8148	2.9	endgame_movie	-	none	None	none	1	0
+0x8149	2.5	obj_art_fid	Integer	object	Value	I art ID	1	0
+0x814A	2.5	art_anim	Integer	art identifier	Value	I animation	1	0
+0x814B	2.5	party_member_obj	Integer	PID	Value	I object	1	0
+0x814C	2.5	rotation_to_tile	Integer,Integer	target hex, source hex	Value	I orientation	1	0
+0x814D	2.5	jam_lock	Integer	object	None	none	1	0
+0x814E	2.7	gdialog_set_barter_mod	Integer	modifier	None	none	1	0
+0x814F	2.9	combat_difficulty	-	none	Value	I preference	1	0
+0x8150	2.5	obj_on_screen	Integer	object	Value	I bool	1	0
+0x8151	2.9	critter_is_fleeing	Integer	object	Value	I bool	1	0
+0x8152	2.9	critter_set_flee_state	Integer,Integer	enabled, object	None	none	1	0
+0x8153	2.9	terminate_combat	-	none	None	none	1	0
+0x8154	2.10	debug_msg	String	text S	None	none	1	0
+0x8155	2.9	critter_stop_attacking	Integer	object	None	none	1	0

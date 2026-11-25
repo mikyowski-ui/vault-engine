@@ -1,0 +1,22 @@
+# SPEC-008 section 3.8: the controlling campaign index of each holodisk.
+# ordinal: the disk ordinal, 0 to 17. global: its zero-based campaign index.
+# Read by crates/vault-guidance/build.rs. Checked by crates/vault-guidance/tests/table_sync.rs.
+ordinal	global
+0	162
+1	163
+2	161
+3	164
+4	165
+5	166
+6	167
+7	209
+8	210
+9	211
+10	212
+11	234
+12	235
+13	258
+14	259
+15	260
+16	237
+17	311

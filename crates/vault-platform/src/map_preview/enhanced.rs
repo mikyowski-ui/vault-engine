@@ -1797,7 +1797,7 @@ impl MapPreview {
             None if enhanced.inert => {
                 let painter = Painter {
                     assets: &self.host.assets,
-                    palette: &self.palette,
+                    palette: self.game_palette(),
                 };
                 painter.cursor(&mut scratch, cursor::ARROW.art, [middle, middle]);
             }

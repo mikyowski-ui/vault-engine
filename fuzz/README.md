@@ -27,10 +27,16 @@ parsers. This crate is excluded from the main workspace (it has its own
 | `moviefx` | `moviefx::parse`, then a `FadeHook` over 256 frames |
 | `ai` | `ai::Config::parse` and `ai::Packets::parse`, then `resolve` |
 | `validate` | `validate_asset`: the first input byte selects one of 16 asset paths (so the parser and its path-dependent rules), the rest is the asset |
+| `fallout2_save` | `SaveHeader::parse_for` and `check_fallout2`, then `SaveGame::parse_fallout2` and `write`: the first input byte's low bit selects one of two installed shapes, the rest is the save |
+| `mod_manifest` | `ModSetting::parse` and `ModManifest::parse`, then `scripted`, `ModRegistry::build`, `readme`, and `to_toml` read back |
+| `stack_check` | `IntProgram::parse_in`, then `stack_check::check` and `summary`: the first input byte selects the word set, the enhanced range and the mod words, the rest is the program |
 
-The `map` and `save` targets resolve each PID from its own bits (type byte,
-subtype from the low byte; `fuzz_targets/common.rs`), so every
+The `map`, `save` and `fallout2_save` targets resolve each PID from its own bits
+(type byte, subtype from the low byte; `fuzz_targets/common.rs`), so every
 prototype-dependent object layout is reachable without a prototype corpus.
+The `fallout2_save` target skips inputs over 1 MiB, and `mod_manifest` and
+`stack_check` skip inputs over 64 KiB. `stack_check` calls only what shares the
+model's step budget (SPEC-017 §8.2), which bounds each input's walk.
 The `acm` target skips inputs whose header would allocate more than 2^20
 samples or a 2^18-element block, since the decoder's own 64 MiB bound is too
 generous for a fuzzing loop. The import runs against a `WorldAssets` that has no
@@ -52,8 +58,9 @@ cargo install cargo-fuzz
 ## Seeds
 
 The starting corpora come from the committed synthetic fixtures
-(`tests/fixtures/` and `oracle/SPEC-012/synthetic/*.mve`). From the repository
-root:
+(`tests/fixtures/`, `mods/tactical-camera/` and
+`oracle/SPEC-012/synthetic/*.mve`). `fallout2_save`'s one seed is a complete
+save that `seed.py` writes from SPEC-018's layout. From the repository root:
 
 ```sh
 python3 -I fuzz/seed.py   # writes fuzz/corpus/<target>/

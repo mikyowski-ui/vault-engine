@@ -8,7 +8,13 @@ mod stack;
 mod trace;
 mod ui;
 
-use std::{collections::BTreeSet, error::Error, path::PathBuf, process::ExitCode, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    error::Error,
+    path::{Path, PathBuf},
+    process::ExitCode,
+    sync::Arc,
+};
 
 use clap::Parser;
 use vault_core::{
@@ -43,9 +49,15 @@ const VALIDATED: [&str; 17] = [
         .args(["report_script_stack", "report_fallout2_install"])
         .multiple(true)
 ))]
+#[command(group(
+    clap::ArgGroup::new("layered_report")
+        .args(["report_fallout2_install", "sfall_gap_report"])
+        .multiple(true)
+))]
 struct Args {
     /// Unpacked directory containing art/, data/, color.pal, fonts, etc.
-    /// Required by every mode except `--dump-vm-trace`.
+    /// Required by every mode except `--dump-vm-trace` and
+    /// `--sfall-gap-report`.
     #[arg(long, value_name = "PATH")]
     corpus_dir: Option<PathBuf>,
     /// SPEC-021 §3.7: write the VM opcode trace (§3.5) of FILE, a `.hex`
@@ -162,17 +174,18 @@ struct Args {
     /// location table and the new-game map.
     #[arg(long)]
     validate_ui: bool,
-    /// SPEC-008: stream every member of the master and critter archives
-    /// (directory tables plus one member in memory at a time), decode it,
-    /// and require its SHA-256 to match the loose corpus file at its path.
+    /// SPEC-008 and SPEC-015: stream every member of the master and critter
+    /// archives (directory tables plus one member in memory at a time),
+    /// decode it, and require its SHA-256 to match the loose corpus file at
+    /// its path. Each archive is read as the format it turns out to be.
     #[arg(long)]
     validate_dat: bool,
     /// Master archive for --validate-dat (default: MASTER.DAT beside the
-    /// corpus directory).
+    /// corpus directory, its name in any case).
     #[arg(long, value_name = "PATH", requires = "validate_dat")]
     master_dat: Option<PathBuf>,
     /// Critter archive for --validate-dat (default: CRITTER.DAT beside the
-    /// corpus directory).
+    /// corpus directory, its name in any case).
     #[arg(long, value_name = "PATH", requires = "validate_dat")]
     critter_dat: Option<PathBuf>,
     /// SPEC-004/SPEC-005: decode every `.INT` to the end of its code and
@@ -219,8 +232,8 @@ struct Args {
     /// `CRITTER.DAT` and `patch000.dat`, mounted as SPEC-018 §1 says) whose
     /// scripts the stack model checks with the Fallout 2 table, adding the
     /// per-word summary of SPEC-017's words and stubs that §8.5 records.
-    /// With `--report-script-stack`, `--report-fallout2-art` or
-    /// `--report-fallout2-install`.
+    /// With `--report-script-stack`, `--report-fallout2-art`,
+    /// `--report-fallout2-install` or `--sfall-gap-report`.
     #[arg(long, value_name = "PATH")]
     fallout2_dir: Option<PathBuf>,
     /// SPEC-019 §2.2 / D-2: which of the Fallout 2 interface art names the
@@ -238,17 +251,33 @@ struct Args {
     /// scripts running. A report: it never fails the run.
     #[arg(long, requires = "fallout2_dir")]
     report_fallout2_install: bool,
-    /// SPEC-024a §2.1: with `--report-fallout2-install`, a mod's loose
-    /// folder mounted above the install. Repeat it, lowest first, so a total
-    /// conversion's tables are read as the game reads them.
-    #[arg(long, value_name = "PATH", requires = "report_fallout2_install")]
+    /// SPEC-024b: every `.INT` the `--fallout2-dir` folder's mount reaches,
+    /// decoded with sfall mode's meanings, ranked by scripts affected, then
+    /// uses, then word. The folder is an install, or a mod's own folder with
+    /// no databases. Above it go its `.dat` files, and those in `mods`, and an
+    /// install's folders in `mods`, by name. Prints each word, `sfall_funcN`
+    /// function and hook with its status (P1, P2 stubbed, tier X,
+    /// unimplemented, or unresolved when the selector is not a constant).
+    /// Needs no `--corpus-dir`. A static scan and a report: it never fails
+    /// the run, and prints no script bytes.
+    #[arg(
+        long,
+        requires = "fallout2_dir",
+        conflicts_with_all = ["dump_vm_trace", "dump_combat_trace"]
+    )]
+    sfall_gap_report: bool,
+    /// SPEC-024a §2.1: with `--report-fallout2-install` or
+    /// `--sfall-gap-report`, a mod's loose folder or `.dat` mounted above the
+    /// install. Repeat it, lowest first, so a total conversion's tables are
+    /// read as the game reads them.
+    #[arg(long, value_name = "PATH", requires = "layered_report")]
     mod_layer: Vec<PathBuf>,
 }
 
 /// SPEC-019 §2.2 the interface-art report (`--report-fallout2-art`): per
 /// role, the first candidate `art/intrface/intrface.lst` lists, or
 /// `missing` (the engine then draws the role's stand-in).
-fn report_fallout2_art(folder: &std::path::Path) -> Result<(), Box<dyn Error>> {
+fn report_fallout2_art(folder: &Path) -> Result<(), Box<dyn Error>> {
     let install = vault_formats::fallout2::Fallout2Install::discover(folder)?;
     let provider = install.open()?.provider(None);
     let catalog = vault_formats::ArtCatalog::load(&provider)?;
@@ -314,7 +343,7 @@ fn report_sfall_script_stack(vfs: &dyn Vfs) -> Result<(), Box<dyn Error>> {
 
 /// SPEC-017 §8.1 a Fallout 2 install's scripts with the Fallout 2 table,
 /// with the per-word summary §8.5 records.
-fn report_fallout2_script_stack(folder: &std::path::Path) -> Result<(), Box<dyn Error>> {
+fn report_fallout2_script_stack(folder: &Path) -> Result<(), Box<dyn Error>> {
     let install = vault_formats::fallout2::Fallout2Install::discover(folder)?;
     let provider = install.open()?.provider(None);
     let (audit, table) = stack::audit(&provider, vault_vm::WordSet::FALLOUT2)?;
@@ -977,6 +1006,14 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
     if let Some(flag) = trace::stray(&args) {
         return Err(format!("{flag} applies to a dump mode only").into());
     }
+    if args.sfall_gap_report
+        && let Some(folder) = &args.fallout2_dir
+    {
+        fallout2::gap_report(folder, &args.mod_layer)?;
+        if args.corpus_dir.is_none() {
+            return Ok(());
+        }
+    }
     let corpus_dir = args
         .corpus_dir
         .clone()
@@ -1029,7 +1066,11 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
     }
     if args.validate_dat {
         failures.run("DAT", "archive member check(s)", || {
-            let beside = |name: &str| corpus_dir.join("..").join(name);
+            let beside = |name: &str| {
+                let parent = corpus_dir.join("..");
+                archives::entry_any_case(&parent, name, Path::is_file)
+                    .unwrap_or_else(|| parent.join(name))
+            };
             let master = args
                 .master_dat
                 .clone()
@@ -1126,8 +1167,8 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
     if args.report_script_stack && args.sfall {
         match &args.fallout2_dir {
             Some(folder) => {
-                let install = vault_formats::fallout2::Fallout2Install::discover(folder)?;
-                report_sfall_script_stack(&install.open()?.provider(None))?;
+                let (install, _) = archives::mount_install(folder, None)?;
+                report_sfall_script_stack(&*install)?;
             }
             None => report_sfall_script_stack(&*vfs)?,
         }

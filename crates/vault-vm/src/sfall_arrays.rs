@@ -21,6 +21,11 @@ const OLD_REVISION: u32 = 1;
 /// The longest list `create_array`, `temp_array` and `resize_array` will
 /// make (Decision D-60). Without it one word could ask for tens of GiB.
 pub const MAX_LIST_LENGTH: i32 = 1 << 20;
+/// The most elements all live arrays may hold for `create_array`, `temp_array`
+/// or `resize_array` to add more (the store's [`SfallArray::len`]s, so a map
+/// counts one for each pair). Without it, enough lists at
+/// [`MAX_LIST_LENGTH`] would do what one oversized list cannot.
+pub const MAX_TOTAL_ELEMENTS: usize = 4 << 20;
 /// The last ID a script can hold: IDs are ints (§5.2), so a higher one would
 /// reach it as a negative number, which names no array.
 const LAST_ID: u32 = i32::MAX as u32;
@@ -104,6 +109,10 @@ pub struct ArrayStore {
     next_id: u32,
     /// The array `arrayexpr` assigns to. Not saved, and a load clears it.
     last_created: Option<u32>,
+    /// The sum of every array's [`SfallArray::len`], kept so that checking
+    /// [`MAX_TOTAL_ELEMENTS`] never walks the arrays. A sidecar can put it
+    /// above that cap, which only stops further growth.
+    total: usize,
 }
 impl Default for ArrayStore {
     fn default() -> Self {
@@ -111,6 +120,7 @@ impl Default for ArrayStore {
             arrays: BTreeMap::new(),
             next_id: 1,
             last_created: None,
+            total: 0,
         }
     }
 }
@@ -125,6 +135,15 @@ impl ArrayStore {
     pub fn exists(&self, id: u32) -> bool {
         self.arrays.contains_key(&id)
     }
+    /// Every array's elements: a list's values and a map's pairs.
+    pub fn total_elements(&self) -> usize {
+        self.total
+    }
+    /// Whether the arrays can take `more` elements. Adding none always fits,
+    /// even in a store a sidecar left above the cap.
+    fn fits(&self, more: usize) -> bool {
+        more == 0 || self.total.saturating_add(more) <= MAX_TOTAL_ELEMENTS
+    }
     /// A new array under the next ID, or 0 with nothing made once the IDs
     /// have run out: 0 is never an ID, and an ID is never reused (§5.2).
     fn insert(&mut self, elements: Elements, storage: Storage) -> i32 {
@@ -133,28 +152,30 @@ impl ArrayStore {
             return 0;
         }
         self.next_id = id + 1;
-        self.arrays.insert(
-            id,
-            SfallArray {
-                elements,
-                storage,
-                save_key: None,
-            },
-        );
+        let array = SfallArray {
+            elements,
+            storage,
+            save_key: None,
+        };
+        self.total += array.len();
+        self.arrays.insert(id, array);
         self.last_created = Some(id);
         id as i32
     }
     /// `create_array` or `temp_array` (§5.4): a `size` from 0 to
     /// [`MAX_LIST_LENGTH`] makes a list of that many int 0 values, whatever
     /// `flags` says; `size == -1` makes a map, a lookup map when `flags == 2`.
-    /// Anything else makes no array, takes no ID and gives 0.
+    /// Anything else, or a list that would take the arrays past
+    /// [`MAX_TOTAL_ELEMENTS`], makes no array, takes no ID and gives 0.
     pub fn create(&mut self, size: i32, flags: i32, storage: Storage) -> i32 {
         let elements = match size {
             -1 => Elements::Map {
                 lookup: flags == 2,
                 pairs: Vec::new(),
             },
-            0..=MAX_LIST_LENGTH => Elements::List(vec![SfallValue::Int(0); size as usize]),
+            0..=MAX_LIST_LENGTH if self.fits(size as usize) => {
+                Elements::List(vec![SfallValue::Int(0); size as usize])
+            }
             _ => return 0,
         };
         self.insert(elements, storage)
@@ -184,7 +205,10 @@ impl ArrayStore {
     }
     /// `set_array` (§5.4's assignment tables).
     pub fn set(&mut self, id: i32, key: SfallValue, value: SfallValue) {
-        let Some(array) = self.array_mut(id) else {
+        let Some(array) = u32::try_from(id)
+            .ok()
+            .and_then(|id| self.arrays.get_mut(&id))
+        else {
             return;
         };
         match &mut array.elements {
@@ -197,9 +221,13 @@ impl ArrayStore {
                 let found = pairs.iter().position(|(other, _)| *other == key);
                 match (found, *lookup, value == SfallValue::Int(0)) {
                     (Some(_), true, _) | (None, false, true) => {}
-                    (None, _, _) => pairs.push((key, value)),
+                    (None, _, _) => {
+                        pairs.push((key, value));
+                        self.total += 1;
+                    }
                     (Some(at), false, true) => {
                         pairs.remove(at);
+                        self.total -= 1;
                     }
                     (Some(at), false, false) => pairs[at].1 = value,
                 }
@@ -234,8 +262,10 @@ impl ArrayStore {
     }
     /// `free_array`: gone, and out of the save set with it.
     pub fn free(&mut self, id: i32) {
-        if let Ok(id) = u32::try_from(id) {
-            self.arrays.remove(&id);
+        if let Ok(id) = u32::try_from(id)
+            && let Some(array) = self.arrays.remove(&id)
+        {
+            self.total -= array.len();
         }
     }
     /// `scan_array`: the first match's list index or map key, else int -1.
@@ -269,15 +299,20 @@ impl ArrayStore {
         }
     }
     /// `resize_array` (§5.4). `false` for a size that names no operation,
-    /// or that would grow a list past [`MAX_LIST_LENGTH`], and `draw(i)`
-    /// gives a uniform integer in 0 to i for a shuffle.
+    /// or that would grow a list past [`MAX_LIST_LENGTH`] or the arrays past
+    /// [`MAX_TOTAL_ELEMENTS`], and `draw(i)` gives a uniform integer in 0 to
+    /// i for a shuffle.
     pub fn resize<E>(
         &mut self,
         id: i32,
         size: i32,
         mut draw: impl FnMut(i32) -> Result<i32, E>,
     ) -> Result<bool, E> {
-        let Some(array) = self.array_mut(id) else {
+        let total = self.total;
+        let Some(array) = u32::try_from(id)
+            .ok()
+            .and_then(|id| self.arrays.get_mut(&id))
+        else {
             return Ok(true);
         };
         let length = array.len();
@@ -285,14 +320,20 @@ impl ArrayStore {
             (0.., elements) => {
                 let limit = MAX_LIST_LENGTH as usize;
                 let size = size as usize;
+                let grown = (total - length).saturating_add(size);
                 match elements {
-                    Elements::List(_) if size > length && size > limit => return Ok(false),
+                    Elements::List(_)
+                        if size > length && (size > limit || grown > MAX_TOTAL_ELEMENTS) =>
+                    {
+                        return Ok(false);
+                    }
                     Elements::List(values) if size > length => {
                         values.resize(size, SfallValue::Int(0));
                     }
                     Elements::List(values) => values.truncate(size),
                     Elements::Map { pairs, .. } => pairs.truncate(size),
                 }
+                self.total = total - length + array.len();
             }
             (-2 | -6, Elements::List(values)) => values.sort_by(value_order),
             (-3 | -7, Elements::List(values)) => values.sort_by(|a, b| value_order(b, a)),
@@ -360,8 +401,14 @@ impl ArrayStore {
     }
     /// The end of a frame's Simulation phase (§5.3): temporaries go.
     pub fn end_of_step(&mut self) {
-        self.arrays
-            .retain(|_, array| array.storage != Storage::Temporary);
+        let total = &mut self.total;
+        self.arrays.retain(|_, array| {
+            let keep = array.storage != Storage::Temporary;
+            if !keep {
+                *total -= array.len();
+            }
+            keep
+        });
     }
 }
 
@@ -528,6 +575,11 @@ fn valid_next_id(next_id: u32, arrays: &BTreeMap<u32, SfallArray>) -> bool {
 /// and the revision come first, and only then is a layout chosen. A revision
 /// 1 file has no fields of [`Header`], so they take their defaults. Both
 /// revisions' next array ID is checked last, against the arrays it follows.
+///
+/// [`MAX_TOTAL_ELEMENTS`] does not apply here, as [`MAX_LIST_LENGTH`] does not
+/// (Decision D-60): a game saved before the cap, or over it through `set_array`,
+/// is a valid save, and a sidecar's arrays are bounded by its own bytes. Such a
+/// store loads whole, and refuses growth until scripts free or shrink it.
 pub fn parse_sidecar(bytes: &[u8]) -> Result<Sidecar, SidecarError> {
     let mut reader = Reader { bytes, at: 0 };
     if reader.take(4).map_err(|_| SidecarError::Tag)? != SIDECAR_TAG {
@@ -604,10 +656,12 @@ pub fn parse_sidecar(bytes: &[u8]) -> Result<Sidecar, SidecarError> {
     if !valid_next_id(next_id, &arrays) {
         return Err(SidecarError::NextId(next_id));
     }
+    let total = arrays.values().map(SfallArray::len).sum();
     let store = ArrayStore {
         arrays,
         next_id,
         last_created: None,
+        total,
     };
     Ok((store, header, globals))
 }

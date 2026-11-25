@@ -118,6 +118,22 @@ fn spec020_settings_paths_come_before_the_default_locations() {
     assert!(find_edition(&broken, &found, GameProfile::Fallout1).is_ok());
 }
 
+/// A profile with only `install_dir` is found, as a launch would find it.
+#[test]
+fn a_profile_with_only_an_install_dir_is_found() {
+    let (first, second) = installs();
+    let config = Config {
+        install_dir: Some(second.path().to_path_buf()),
+        game: Some(GameProfile::Fallout2),
+        ..Config::default()
+    };
+    let none = per(Vec::new(), Vec::new());
+    let found = find_edition(&config, &none, GameProfile::Fallout2).unwrap();
+    assert!(found.master_dat.unwrap().starts_with(second.path()));
+    assert!(find_edition(&config, &none, GameProfile::Fallout1).is_err());
+    drop(first);
+}
+
 #[test]
 fn spec020_the_selector_says_what_it_must_and_starts_on_the_right_row() {
     let selector = Selector::new(&Config::default(), both(), None);

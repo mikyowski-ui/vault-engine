@@ -11,7 +11,8 @@
 //! progress is given up after [`STUCK_LIMIT`] decisions, so one dead end
 //! cannot burn a run's budget.
 use crate::{
-    ObjectAction, ObjectRef, ParkMiller, RandomSource, Refusal, ScriptEvent, WorldError,
+    ObjectAction, ObjectRef, ParkMiller, RandomSource, Refusal, ScriptEvent, VmObserver,
+    WorldError,
     assets::WorldAssets,
     clicks::{self, Click, Policy},
     combat::{Attack, damage_type},
@@ -33,6 +34,7 @@ use vault_formats::{
     Fid, HexGrid,
     pro::{BasicFlags, Category, ItemData, LockFlags, PrototypeData, Scenery, SceneryData},
 };
+use vault_vm::{RunOutcome, Vm, VmError, extensions};
 
 /// Decisions in a row that change nothing before a goal is given up.
 const STUCK_LIMIT: u32 = 12;
@@ -1187,7 +1189,7 @@ impl AutoplayAgent {
     }
 
     /// What to do next: take what lies around, talk, fight what cannot talk,
-    /// open the way, look around, and leave.
+    /// open the way, look around, climb, and leave.
     fn next_goal<A: WorldAssets>(&mut self, host: &WorldHost<A>) -> Option<Goal> {
         let world = &host.world;
         let player = world.player;
@@ -1241,11 +1243,11 @@ impl AutoplayAgent {
                 return Some(Goal::Explore(hexes[self.roll(hexes.len())]));
             }
         }
-        self.next_exit(host).or_else(|| {
-            self.nearest(host, |object, _| {
-                is_ladder(object).then_some(Goal::Climb(object.raw.id))
-            })
+        // A ladder comes before the exit grids, which leave the map for good.
+        self.nearest(host, |object, _| {
+            is_ladder(object).then_some(Goal::Climb(object.raw.id))
         })
+        .or_else(|| self.next_exit(host))
     }
 
     /// The exit grid used least, one to a map before one to the world map.
@@ -1372,6 +1374,10 @@ impl AutoplayAgent {
                 if let Some(pursuit) = self.go_to(host, ladder) {
                     return pursuit;
                 }
+                // A ladder may lead to another map, and a new map forgets the
+                // goal in hand: it is spent here, or two ladders would trade
+                // the bot back and forth for ever.
+                self.memory().tried.insert(goal);
                 Pursuit::Act(BotAction::Interact {
                     target: id,
                     verb: BotVerb::Use,
@@ -2864,4 +2870,113 @@ impl<A: WorldAssets> WorldHost<A> {
             refused("an opponent fights on")
         }
     }
+}
+
+/// The host words [`ScriptJournal`] keeps, by their numbers in SPEC-005.
+pub mod word {
+    pub const LOCAL_VAR: u16 = 0x80c1;
+    pub const SET_LOCAL_VAR: u16 = 0x80c2;
+    pub const MAP_VAR: u16 = 0x80c3;
+    pub const SET_MAP_VAR: u16 = 0x80c4;
+    pub const GLOBAL_VAR: u16 = 0x80c5;
+    pub const SET_GLOBAL_VAR: u16 = 0x80c6;
+    pub const MOVE_TO: u16 = 0x80b6;
+    pub const CRITTER_ATTEMPT_PLACEMENT: u16 = 0x80ff;
+    pub const CRITTER_ADD_TRAIT: u16 = 0x8102;
+    pub const OBJ_LOCK: u16 = 0x812e;
+    pub const OBJ_UNLOCK: u16 = 0x812f;
+    pub const JAM_LOCK: u16 = 0x814d;
+    pub const ITEM_CAPS_ADJUST: u16 = 0x8139;
+    /// The words that read a variable: the value they push is kept too.
+    pub(super) const READS: [u16; 3] = [LOCAL_VAR, MAP_VAR, GLOBAL_VAR];
+    pub(super) const KEPT: [u16; 13] = [
+        LOCAL_VAR,
+        SET_LOCAL_VAR,
+        MAP_VAR,
+        SET_MAP_VAR,
+        GLOBAL_VAR,
+        SET_GLOBAL_VAR,
+        MOVE_TO,
+        CRITTER_ATTEMPT_PLACEMENT,
+        CRITTER_ADD_TRAIT,
+        OBJ_LOCK,
+        OBJ_UNLOCK,
+        JAM_LOCK,
+        ITEM_CAPS_ADJUST,
+    ];
+}
+
+/// One host word a script ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptCall {
+    /// The running program, as `ScriptInstance::program` holds it.
+    pub program: u32,
+    pub word: u16,
+    /// The operands' payloads, top of the stack first, as SPEC-005's rows
+    /// list them.
+    pub operands: Vec<u32>,
+    /// What a read pushed.
+    pub pushed: Option<i32>,
+}
+
+impl ScriptCall {
+    /// An operand as the integer its word reads.
+    pub fn int(&self, index: usize) -> i32 {
+        self.operands.get(index).map_or(0, |value| *value as i32)
+    }
+}
+
+/// What a stretch of script execution did, [`word`] by word, in order. The
+/// [`VmObserver`] behind it changes nothing: an attached host runs each
+/// instruction as it would have.
+#[derive(Debug, Default)]
+pub struct ScriptJournal {
+    calls: Vec<ScriptCall>,
+    /// The steps under way, innermost last, since a host word can run another
+    /// script inside its step: each a kept call and the address it began at.
+    pending: Vec<Option<(ScriptCall, u32)>>,
+}
+
+impl ScriptJournal {
+    pub fn into_calls(self) -> Vec<ScriptCall> {
+        self.calls
+    }
+}
+
+impl VmObserver for ScriptJournal {
+    fn before_step(&mut self, vm: &Vm) {
+        self.pending.push(kept_call(vm).map(|call| (call, vm.pc)));
+    }
+    /// A blocked or waiting program steps without moving, and runs no word.
+    fn after_step(&mut self, vm: &Vm, _: &Result<RunOutcome, VmError>) {
+        if let Some(Some((mut call, pc))) = self.pending.pop()
+            && pc != vm.pc
+        {
+            if word::READS.contains(&call.word) {
+                call.pushed = vm.value_stack.top().ok().map(|value| value.payload as i32);
+            }
+            self.calls.push(call);
+        }
+    }
+}
+
+/// The kept word at `vm`'s address, with its operands, not yet popped.
+fn kept_call(vm: &Vm) -> Option<ScriptCall> {
+    let at = vm.pc as usize;
+    let code = vm.code().get(at..at.checked_add(2)?)?;
+    let code = u16::from_be_bytes(code.try_into().ok()?);
+    let spec = extensions::opcode(code).filter(|_| word::KEPT.contains(&code))?;
+    let stack = &vm.value_stack;
+    let operands = (1..=spec.operands.len())
+        .map(|depth| {
+            let offset = stack.byte_len().checked_sub(depth * 6)?;
+            Some(stack.get(offset).ok()?.payload)
+        })
+        .collect::<Option<_>>()?;
+    Some(ScriptCall {
+        program: vm.id,
+        word: code,
+        operands,
+        pushed: None,
+    })
 }

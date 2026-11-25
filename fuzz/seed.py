@@ -85,6 +85,59 @@ def dat2(members):
     return bytes(data)
 
 
+def fallout2_save(campaign=5):
+    """A complete SPEC-018 section 7 save of `campaign` globals, written from the
+    layout: the shape of section 8.9, one party member, and an empty inventory."""
+    be = lambda *words: b"".join(struct.pack(">i", word) for word in words)
+    header = bytearray(30051)
+    header[:18] = b"FALLOUT SAVE FILE\0"
+    header[24:28] = struct.pack(">HH", 1, 2)
+    header[0x74E3:0x74F3] = b"VAULTENG F2SAVE1"
+    header[0x74F3:0x74F7] = struct.pack(">I", campaign)
+    header[0x74F7] = 1
+    snapshot = lambda base: be(*range(base, base + campaign)) + b"\0"
+    player = be(1, 20100, 0, 0, 0, 0, 0, 0, 0x01000000, 0, 0, 0x01000000, -1)
+    player += be(0, 0, 0, -1, -1, 0, 1, 0)  # to the end of the common record
+    player += be(0, 0, 0, 8, 0, 0, 0, -1, 30, 0, 0)  # the critter's own words
+    discovery = bytes([2, 1, 0, 0, 0, 0, 0, 1, 1]) + bytes(33)
+    world = be(175, 125, 0, 0, 0, -1, -1, 0) + struct.pack(">HH", 7, 6) + discovery
+    world += be(1) + bytes([2, 0]) + be(175, 125) + bytes([3, 1, 0, 0])
+    world += be(3) + bytes([0, 0, 3]) + be(2, 0, 1, 0, 0, 3, 1)
+    member = be(0, 1, 0, 0, 0, 0, 3, 3, 4)
+    return b"".join(
+        (
+            bytes(header),
+            be(3),
+            snapshot(0),
+            be(1),
+            b"VAULT13.SAV\0",
+            be(797),
+            snapshot(100),
+            player,
+            be(20100, 1, 8),  # viewport, sneak, stat flags
+            be(*[5] * 35, *[1] * 35, *[2] * 18, 0, 0, 0),
+            be(*[1] * 15, 7, 8, 9, 10),  # kills, with Fallout 2's four more
+            be(0, 3, -1, -1),
+            be(*[0] * 119),  # perk ranks
+            be(0),  # not in combat
+            be(4, 2, 1500, 3, -5),
+            be(0),  # no timed events
+            be(-1, -1, 0),  # traits, automap flags
+            be(*[0] * 20),  # preferences
+            be(1),
+            b"\0",
+            be(len(world)),
+            world,
+            bytes(17),  # movies
+            be(*[0] * 54),  # skill uses
+            be(2, 4000, 11),
+            member,
+            be(0),  # no retained records
+            be(0, 0, 0, 0),
+        )
+    )
+
+
 def main():
     dat = read(FIXTURES / "archive" / "synthetic.dat.hex")
     write("dat", "synthetic.dat", dat)
@@ -138,6 +191,17 @@ def main():
         write("dat2", f"{name}.dat", dat2([(b"COLOR.PAL", b"pal", False, 3),
                                            (b"DATA\\" + name.upper().encode() + b".TXT",
                                             bytes(vectors[name]), True, sizes[name])]))
+    write("fallout2_save", "synthetic.sav", bytes([0]) + fallout2_save())
+    for path in sorted((FIXTURES / "spec024a").glob("vault-mod*.toml")):
+        write("mod_manifest", path.name, path.read_bytes())
+    tactical = ROOT / "mods" / "tactical-camera" / "vault-mod.toml"
+    write("mod_manifest", "tactical-camera.toml", tactical.read_bytes())
+    # The selector byte first: word set, enhanced range, mod words.
+    program = read(FIXTURES / "vm" / "program.int.hex")
+    for selector, name in ((0, "fallout1"), (1, "fallout2"), (2, "sfall"), (5, "enhanced")):
+        write("stack_check", f"program-{name}.int", bytes([selector]) + program)
+    registering = read(FIXTURES / "spec024a" / "gl_cheapap.int.hex")
+    write("stack_check", "gl_cheapap.int", bytes([1 | 8]) + registering)
     for directory in sorted(CORPUS.iterdir()):
         print(f"{directory.relative_to(ROOT)}: {len(list(directory.iterdir()))} seeds")
 

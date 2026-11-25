@@ -29,11 +29,14 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex, PoisonError},
 };
 use vault_core::{
-    CharacterSheet, GameProfile, ObjectRef, ScriptEvent, SequenceIds, WorldHost, WorldState,
+    CharacterSheet, GameProfile, ObjectRef, SequenceIds, WorldHost, WorldState,
     assets::{VfsWorldAssets, WorldAssets},
-    autoplay::{AutoplayAgent, BotAction, BotOutcome, BotStatus, BotView},
+    autoplay::{
+        AutoplayAgent, BotAction, BotOutcome, BotStatus, BotView, ScriptCall, ScriptJournal, word,
+    },
     checkpoints::{CheckpointStream, ExpectedStream},
     host_choreography::Playback,
     host_save::{SaveInfo, SlotImage},
@@ -41,12 +44,11 @@ use vault_core::{
     queue::EventKind,
     skills::{EXPLOSION_EVENT, PREMATURE_EVENT},
     state_hash::{Participant, ParticipantState, StateSnapshot},
-    world::WorldTrace,
 };
 use vault_formats::{
     AutomapDb, Fid,
     map::{MapObject, ObjectDetail, ObjectState},
-    pro::BasicFlags,
+    pro::{BasicFlags, LockFlags},
 };
 
 /// The bundle's four files.
@@ -265,6 +267,8 @@ pub struct AutoplayReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AuditReason {
     MapTransition,
+    /// The player changed elevation on one map, as a ladder does.
+    ElevationChange,
     Explosion,
     CombatEnd,
 }
@@ -273,6 +277,7 @@ impl AuditReason {
     pub fn name(self) -> &'static str {
         match self {
             Self::MapTransition => "map transition",
+            Self::ElevationChange => "elevation change",
             Self::Explosion => "explosion",
             Self::CombatEnd => "combat end",
         }
@@ -288,11 +293,26 @@ pub struct AuditTally {
     pub skipped: BTreeMap<&'static str, u64>,
     /// Differences an allowlist entry took, by entry.
     pub allowlisted: BTreeMap<&'static str, u64>,
+    /// The same differences, by the script or rule behind each.
+    pub causes: BTreeMap<String, u64>,
 }
 
 impl AuditTally {
     pub fn total(&self) -> u64 {
         self.audits.values().sum()
+    }
+    fn take(&mut self, entry: &'static str, cause: String) {
+        *self.allowlisted.entry(entry).or_default() += 1;
+        *self.causes.entry(cause).or_default() += 1;
+    }
+    /// Add what `other` took.
+    fn absorb(&mut self, other: AuditTally) {
+        for (entry, count) in other.allowlisted {
+            *self.allowlisted.entry(entry).or_default() += count;
+        }
+        for (cause, count) in other.causes {
+            *self.causes.entry(cause).or_default() += count;
+        }
     }
 }
 
@@ -384,6 +404,31 @@ struct ObjectRow {
 }
 
 impl ObjectRow {
+    /// The lock word of a door or a container.
+    fn lock(&self) -> Option<u32> {
+        match &self.state {
+            ObjectState::Other {
+                detail: ObjectDetail::Door(flags),
+                ..
+            } => Some(flags.0),
+            ObjectState::Other {
+                word,
+                detail: ObjectDetail::Plain,
+            } if self.pid >> 24 == 0 => Some(*word),
+            _ => None,
+        }
+    }
+    /// The state with `lock` for its lock word.
+    fn with_lock(&self, lock: u32) -> ObjectState {
+        let mut state = self.state.clone();
+        if let ObjectState::Other { word, detail } = &mut state {
+            match detail {
+                ObjectDetail::Door(flags) => *flags = LockFlags(lock),
+                _ => *word = lock,
+            }
+        }
+        state
+    }
     fn of(raw: &MapObject, holder: Option<u32>) -> Self {
         Self {
             pid: raw.pid,
@@ -399,25 +444,6 @@ impl ObjectRow {
                 .iter()
                 .map(|entry| (entry.object.id, entry.quantity))
                 .collect(),
-        }
-    }
-    /// The fields a scripted object's own Start or MapEnter may change.
-    fn scripted_fields(&self) -> impl PartialEq + use<> {
-        (
-            self.hex,
-            self.elevation,
-            self.orientation,
-            self.art_id,
-            self.flags,
-            self.state.clone(),
-        )
-    }
-    /// What no script's placement touches: a critter's hit points, poison and
-    /// radiation.
-    fn vitals(&self) -> Option<[i32; 3]> {
-        match &self.state {
-            ObjectState::Critter(state) => Some([state.hp, state.poison, state.radiation]),
-            ObjectState::Other { .. } => None,
         }
     }
 }
@@ -437,14 +463,13 @@ struct Ledger {
     objects: BTreeMap<u32, ObjectRow>,
     gvars: Vec<i32>,
     mvars: Vec<i32>,
-    /// By script record, without the records a load makes anew.
+    /// By script record, without the map's and the player's, which a load
+    /// makes anew.
     lvars: BTreeMap<u32, Vec<i32>>,
     /// Script records of temporary objects, which a load cannot bind.
     dropped_scripts: BTreeSet<u32>,
     clock: u64,
     queue: Vec<QueueRow>,
-    /// Identifiers from here on were made after the save.
-    next_id: u32,
     /// The player's `raw.id`.
     player: u32,
 }
@@ -519,9 +544,53 @@ impl Ledger {
             dropped_scripts,
             clock: world.clock.ticks,
             queue,
-            next_id: world.next_object_id(),
             player: world.get(world.player).map_or(0, |player| player.raw.id),
         }
+    }
+}
+
+/// What SPEC-005 §3.8's art rule asks of the player's inventory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct PlayerGear {
+    armored: bool,
+    holding: bool,
+}
+
+impl Ledger {
+    fn player_gear(&self) -> PlayerGear {
+        let held = |flags: BasicFlags| {
+            self.objects
+                .values()
+                .any(|row| row.holder == Some(self.player) && row.flags & flags.0 != 0)
+        };
+        PlayerGear {
+            armored: held(BasicFlags::WORN),
+            holding: held(BasicFlags(
+                BasicFlags::LEFT_HAND.0 | BasicFlags::RIGHT_HAND.0,
+            )),
+        }
+    }
+    /// What a load's scripts were given to read that this ledger did not
+    /// hold: a value lost and then written over.
+    fn lost_reads(&self, writes: &LoadWrites) -> Vec<String> {
+        writes
+            .read_first
+            .iter()
+            .filter_map(|(variable, read)| {
+                let held = match variable {
+                    Variable::Global(index) => self.gvars.get(*index),
+                    Variable::Map(index) => self.mvars.get(*index),
+                    Variable::Local(record, index) => {
+                        Some(self.lvars.get(record)?.get(*index).unwrap_or(&0))
+                    }
+                }?;
+                (held != read).then(|| {
+                    format!(
+                        "{variable:?}: the load's scripts read {read} where the save held {held}"
+                    )
+                })
+            })
+            .collect()
     }
 }
 
@@ -544,83 +613,286 @@ fn flatten(raw: &MapObject, holder: Option<u32>, out: &mut BTreeMap<u32, ObjectR
     }
 }
 
-/// What ran during a load: Start, MapEnter and the load's own map update.
-#[derive(Debug, Default)]
-struct LoadScripts {
-    records: BTreeSet<u32>,
-    /// The owners of those records, by `raw.id`.
-    owners: BTreeSet<u32>,
+/// A script variable, by where it lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Variable {
+    Global(usize),
+    Map(usize),
+    /// A script record's element.
+    Local(u32, usize),
 }
 
-impl LoadScripts {
-    fn of(world: &WorldState) -> Self {
-        let mut ran = Self::default();
-        for entry in &world.trace {
-            if let WorldTrace::Script { id, event, .. } = entry
-                && matches!(
-                    event,
-                    ScriptEvent::Start | ScriptEvent::MapEnter | ScriptEvent::MapUpdate
-                )
-            {
-                ran.records.insert(*id);
-                if let Some(owner) = world
-                    .scripts
-                    .get(id)
-                    .and_then(|script| world.get(script.owner))
-                {
-                    ran.owners.insert(owner.raw.id);
+/// A value a load's script put somewhere, and the script.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Written<T> {
+    value: T,
+    script: String,
+}
+
+/// What a load's scripts really did, read off their [`ScriptJournal`]: the last
+/// value each wrote, the first each read, and what each did to objects. It
+/// names the only changes a load may make, so a value that moved with nothing
+/// here to say why was lost.
+#[derive(Debug, Clone, Default)]
+struct LoadWrites {
+    /// The last value written to each variable.
+    written: BTreeMap<Variable, Written<i32>>,
+    /// The values scripts read before anything wrote them: what the load gave
+    /// them. A script can only branch on a lost value by reading it here.
+    read_first: BTreeMap<Variable, i32>,
+    /// The last placement of each object, by `raw.id`.
+    placed: BTreeMap<u32, Written<Place>>,
+    /// The last AI packet `critter_add_trait` set, by `raw.id`.
+    packets: BTreeMap<u32, Written<i32>>,
+    /// The last lock word to name each object, by `raw.id`.
+    locks: BTreeMap<u32, Written<u16>>,
+    /// The money `item_caps_adjust` moved, by the owner's `raw.id`.
+    caps: BTreeMap<u32, Written<i32>>,
+    /// The money prototype.
+    money: u32,
+}
+
+/// Where a word put an object: exactly (`move_to`), or near (the placement
+/// rule of `critter_attempt_placement`, which keeps only the elevation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Place {
+    hex: Option<i32>,
+    elevation: u8,
+}
+
+impl LoadWrites {
+    /// `calls`, as `world` names their programs and objects. Only a load's own
+    /// calls belong here: a handle means nothing in another load.
+    fn of(calls: &[ScriptCall], host: &WorldHost<VfsWorldAssets>) -> Self {
+        let world = &host.world;
+        let scripts: BTreeMap<u32, (u32, i32)> = world
+            .scripts
+            .values()
+            .map(|script| (script.program, (script.id, script.file)))
+            .collect();
+        let object = |value: i32| world.get(value as u32).map(|object| object.raw.id);
+        let mut writes = Self {
+            money: world.rules.money_pid(),
+            ..Self::default()
+        };
+        let mut names: BTreeMap<i32, String> = BTreeMap::new();
+        for call in calls {
+            let (record, file) = scripts.get(&call.program).copied().unzip();
+            let script = file.map_or_else(
+                || "a script now gone".to_owned(),
+                |file| {
+                    let name = names.entry(file).or_insert_with(|| {
+                        host.assets.program(file).map_or_else(
+                            |_| format!("script {file}"),
+                            |(name, _)| name.rsplit('/').next().unwrap_or(&name).to_owned(),
+                        )
+                    });
+                    name.clone()
+                },
+            );
+            let index = |at: usize| usize::try_from(call.int(at)).ok();
+            let variable = match call.word {
+                word::LOCAL_VAR => record.zip(index(0)).map(|(id, at)| Variable::Local(id, at)),
+                word::SET_LOCAL_VAR => record.zip(index(1)).map(|(id, at)| Variable::Local(id, at)),
+                word::MAP_VAR => index(0).map(Variable::Map),
+                word::SET_MAP_VAR => index(1).map(Variable::Map),
+                word::GLOBAL_VAR => index(0).map(Variable::Global),
+                word::SET_GLOBAL_VAR => index(1).map(Variable::Global),
+                _ => None,
+            };
+            match (call.word, variable) {
+                (word::LOCAL_VAR | word::MAP_VAR | word::GLOBAL_VAR, Some(variable)) => {
+                    if !writes.written.contains_key(&variable)
+                        && let Some(value) = call.pushed
+                    {
+                        writes.read_first.entry(variable).or_insert(value);
+                    }
                 }
+                (_, Some(variable)) => {
+                    let value = call.int(0);
+                    let script = script.clone();
+                    writes.written.insert(variable, Written { value, script });
+                }
+                (word::MOVE_TO, None) => {
+                    if let Some(id) = object(call.int(2)) {
+                        let value = Place {
+                            hex: Some(call.int(1)),
+                            elevation: call.int(0) as u8,
+                        };
+                        let script = script.clone();
+                        writes.placed.insert(id, Written { value, script });
+                    }
+                }
+                (word::CRITTER_ATTEMPT_PLACEMENT, None) => {
+                    if let Some(id) = object(call.int(2)) {
+                        let value = Place {
+                            hex: None,
+                            elevation: call.int(0) as u8,
+                        };
+                        let script = script.clone();
+                        writes.placed.insert(id, Written { value, script });
+                    }
+                }
+                (word::CRITTER_ADD_TRAIT, None) if (call.int(2), call.int(1)) == (1, 5) => {
+                    if let Some(id) = object(call.int(3)) {
+                        let value = call.int(0);
+                        let script = script.clone();
+                        writes.packets.insert(id, Written { value, script });
+                    }
+                }
+                (word::OBJ_LOCK | word::OBJ_UNLOCK | word::JAM_LOCK, None) => {
+                    if let Some(id) = object(call.int(0)) {
+                        let value = call.word;
+                        let script = script.clone();
+                        writes.locks.insert(id, Written { value, script });
+                    }
+                }
+                (word::ITEM_CAPS_ADJUST, None) => {
+                    if let Some(id) = object(call.int(1)) {
+                        let script = script.clone();
+                        let total = writes
+                            .caps
+                            .entry(id)
+                            .or_insert(Written { value: 0, script });
+                        total.value = total.value.saturating_add(call.int(0));
+                    }
+                }
+                _ => {}
             }
         }
-        ran
+        writes
+    }
+
+    /// Why `row` became `other` under this load, or `None` when nothing it did
+    /// accounts for that. Each field that moved needs its own word.
+    fn explain(
+        &self,
+        id: u32,
+        (row, live): (&ObjectRow, &Ledger),
+        (other, loaded): (&ObjectRow, &Ledger),
+    ) -> Option<Vec<String>> {
+        let mut causes = Vec::new();
+        let mut settled = row.clone();
+        if (row.hex, row.elevation) != (other.hex, other.elevation) {
+            let placed = self.placed.get(&id)?;
+            let exact = placed.value.hex.is_none_or(|hex| Some(hex) == other.hex);
+            if !exact || placed.value.elevation != other.elevation {
+                return None;
+            }
+            (settled.hex, settled.elevation) = (other.hex, other.elevation);
+            causes.push(format!("{} placed it", placed.script));
+        }
+        if let (ObjectState::Critter(from), ObjectState::Critter(to)) = (&row.state, &other.state)
+            && from.ai != to.ai
+        {
+            let packet = self.packets.get(&id).filter(|set| set.value == to.ai)?;
+            if let ObjectState::Critter(state) = &mut settled.state {
+                state.ai = to.ai;
+            }
+            causes.push(format!(
+                "{} set its AI packet with critter_add_trait",
+                packet.script
+            ));
+        }
+        if let (Some(from), Some(to)) = (row.lock(), other.lock())
+            && from != to
+        {
+            let lock = self.locks.get(&id)?;
+            let wanted = match lock.value {
+                word::OBJ_LOCK => from | LockFlags::LOCKED.0,
+                word::OBJ_UNLOCK => from & !LockFlags::LOCKED.0,
+                _ => from | LockFlags::JAMMED.0,
+            };
+            (wanted == to).then_some(())?;
+            settled.state = row.with_lock(to);
+            causes.push(format!("{} changed its lock", lock.script));
+        }
+        if row.contents != other.contents {
+            let caps = self.caps.get(&id)?;
+            let money = |ledger: &Ledger, contents: &BTreeMap<u32, u32>| {
+                let of = |id: &u32| ledger.objects.get(id).map(|row| row.pid);
+                let mine = |id: &&u32| of(id) == Some(self.money);
+                let total: i64 = contents
+                    .iter()
+                    .filter(|(id, _)| mine(id))
+                    .map(|(_, quantity)| i64::from(*quantity))
+                    .sum();
+                let rest: BTreeMap<u32, u32> = contents
+                    .iter()
+                    .filter(|(id, _)| !mine(id))
+                    .map(|(id, quantity)| (*id, *quantity))
+                    .collect();
+                (total, rest)
+            };
+            let (before, kept) = money(live, &row.contents);
+            let (after, still) = money(loaded, &other.contents);
+            (kept == still && after - before == i64::from(caps.value)).then_some(())?;
+            settled.contents = other.contents.clone();
+            causes.push(format!("{} moved money with item_caps_adjust", caps.script));
+        }
+        (settled == *other).then_some(causes)
+    }
+
+    /// The variable's value if a script of this load wrote it.
+    fn wrote(&self, variable: Variable, now: i32) -> Option<&Written<i32>> {
+        self.written
+            .get(&variable)
+            .filter(|written| written.value == now)
     }
 }
 
 /// The audit's allowlist. Each entry is a difference a load is entitled to
-/// make, and each one is counted in the report. Everything else that differs
-/// is a mismatch.
+/// make, each one is counted in the report with the script or rule behind it,
+/// and each needs its evidence: a script's change must be in the load's
+/// [`LoadWrites`]. Everything else that differs is a mismatch. SPEC-006 §3.5
+/// has every load rerun Start and MapEnter (steps 6 and 8) and the map update
+/// (step 9), which is what entitles a load's scripts to anything at all.
 mod allow {
-    /// A global changed while a Start, MapEnter or map update ran in the load.
+    /// A global a load's script wrote, to the value it holds.
     pub const GLOBAL: &str = "global written by a load's scripts";
     /// A map variable, likewise.
     pub const MAP_VARIABLE: &str = "map variable written by a load's scripts";
-    /// A script's own locals, when that script ran.
-    pub const LOCAL: &str = "local written by its own script in a load";
-    /// A scripted object's place, look or lock, when its own script ran.
-    pub const SCRIPTED_OBJECT: &str = "scripted object moved by its own script in a load";
-    /// An object no save held: its identifier is past the saved allocator, so
-    /// a script made it during the load.
-    pub const NEW_OBJECT: &str = "object a load's scripts made";
-    /// A script record no save held, made while the load ran.
-    pub const NEW_SCRIPT: &str = "script record a load's scripts made";
+    /// A script's own local, likewise.
+    pub const LOCAL: &str = "local written by a load's scripts";
+    /// What a word of a load's scripts set, to the value it holds: an object's
+    /// place, a critter's AI packet (SPEC-005 `0x8102`: selector 5 sets it even
+    /// in a load, where selector 6 is refused), a lock, or money, which
+    /// `item_caps_adjust` makes, the one thing a load can make: a saved map
+    /// refuses `create_object_sid`.
+    pub const SCRIPTED_OBJECT: &str = "object changed by a word a load's scripts ran";
     /// SPEC-003 §3.3 `[Must-match]`: reading an exit grid that leads to the
     /// town or world map moves its low art index up by 16, on every read,
     /// saved maps too. Shipped maps never qualify; the fixture's does.
     pub const EXIT_ART: &str = "exit-grid art a load moved";
-    /// SPEC-005 §3.8: a load ends in the gender update, which rebuilds the
-    /// player's art without its pose, unless armor is worn.
+    /// SPEC-003 §2.10 `[Must-match]`: a load replaces a held object's stored
+    /// elevation with the elevation of the tree it is in, so an item a critter
+    /// came by on an upper elevation reads that elevation, not the 0 it was
+    /// taken with. Shown by maps with objects above elevation 0.
+    pub const HELD_ELEVATION: &str = "held object's elevation replaced by a load";
+    /// SPEC-005 §3.8 steps 1-2: a load ends in the gender update, which
+    /// rebuilds the art of a player with no armor on, without its pose.
     pub const PLAYER_ART: &str = "player art rebuilt at the end of a load";
-    /// `state_hash` names entities by slot, and a load fills the slots in hex
-    /// order. A script that moves an object during load A changes the order
-    /// load B reads, so the same state lands in other slots. It is taken only
-    /// when a load did move something and nothing but the handles differs.
-    pub const RENUMBERED: &str = "same state under other handles after a load's scripts moved it";
-    /// Load B differs from load A, by the hash, in nothing but what the
-    /// entries above allow a load's scripts to change: a critter a script
-    /// places afresh on every load, say. Saving does not settle those.
-    pub const UNSETTLED: &str = "load B differs from load A only by its scripts";
+    /// `state_hash` names entities by slot (SPEC-021 §3.2), a save writes them
+    /// in hex-list order (SPEC-003 §3.3) and a load fills the slots in file
+    /// order. A word that places an object during load A changes the order
+    /// load B reads, so the same state lands in other slots. That needs a
+    /// placement in load A's journal, and nothing but the handles may differ.
+    pub const RENUMBERED: &str = "same state under other handles after a load's scripts placed it";
+    /// A script that writes something new on every load never settles, so
+    /// load B parts from load A. Every difference must be in load B's journal.
+    pub const UNSETTLED: &str = "load B differs from load A only by what its scripts wrote";
 }
 
-/// Differences between a world and what a load of it gave, as findings.
+/// Differences between a world and what a load of it gave, as findings. What
+/// `writes` accounts for goes in `taken`.
 fn diff_ledgers(
     live: &Ledger,
     loaded: &Ledger,
-    ran: &LoadScripts,
-    allowed: &mut BTreeMap<&'static str, u64>,
+    writes: &LoadWrites,
+    taken: &mut AuditTally,
 ) -> Vec<String> {
     let mut findings = Vec::new();
-    let mut allow = |entry: &'static str| *allowed.entry(entry).or_default() += 1;
-    let scripts_ran = !ran.records.is_empty();
+    let gear = live.player_gear();
     for (id, row) in &live.objects {
         let Some(other) = loaded.objects.get(id) else {
             findings.push(format!("object {id} ({:#010x}) is gone", row.pid));
@@ -629,15 +901,27 @@ fn diff_ledgers(
         if row == other {
             continue;
         }
+        let other = &if holder_elevation(row, other, loaded) {
+            taken.take(allow::HELD_ELEVATION, allow::HELD_ELEVATION.to_owned());
+            ObjectRow {
+                elevation: row.elevation,
+                ..other.clone()
+            }
+        } else {
+            other.clone()
+        };
+        if row == other {
+            continue;
+        }
         let moved = if shifted_exit_art(row, other) {
             Some(allow::EXIT_ART)
-        } else if *id == live.player && rebuilt_player_art(row, other) {
+        } else if *id == live.player && rebuilt_player_art(row, other, gear) {
             Some(allow::PLAYER_ART)
         } else {
             None
         };
         if let Some(entry) = moved {
-            allow(entry);
+            taken.take(entry, entry.to_owned());
         }
         let other = &ObjectRow {
             art_id: moved.map_or(other.art_id, |_| row.art_id),
@@ -646,70 +930,87 @@ fn diff_ledgers(
         if row == other {
             continue;
         }
-        let same_contents = same_held(&row.contents, &other.contents, live.next_id);
-        if row.pid != other.pid || row.holder != other.holder || !same_contents {
-            findings.push(format!("object {id}: {row:?} became {other:?}"));
-        } else if row.scripted_fields() == other.scripted_fields() {
-            // Only made-in-the-load contents differ.
-            allow(allow::NEW_OBJECT);
-        } else if ran.owners.contains(id) && row.vitals() == other.vitals() {
-            allow(allow::SCRIPTED_OBJECT);
-        } else {
-            findings.push(format!("object {id}: {row:?} became {other:?}"));
+        match writes.explain(*id, (row, live), (other, loaded)) {
+            Some(causes) => {
+                for cause in causes {
+                    taken.take(allow::SCRIPTED_OBJECT, cause);
+                }
+            }
+            None => findings.push(format!("object {id}: {row:?} became {other:?}")),
         }
     }
     for (id, row) in &loaded.objects {
         if !live.objects.contains_key(id) {
-            if *id >= live.next_id {
-                allow(allow::NEW_OBJECT);
-            } else {
-                findings.push(format!("object {id} ({:#010x}) appeared", row.pid));
+            let paid = row.holder.and_then(|holder| writes.caps.get(&holder));
+            match paid.filter(|_| row.pid == writes.money) {
+                Some(caps) => {
+                    let cause = format!("{} made money with item_caps_adjust", caps.script);
+                    taken.take(allow::SCRIPTED_OBJECT, cause);
+                }
+                None => findings.push(format!("object {id} ({:#010x}) appeared", row.pid)),
             }
         }
     }
-    let mut variables = |name: &str, entry, live: &[i32], loaded: &[i32]| {
-        if live.len() != loaded.len() {
-            findings.push(format!(
-                "{name}: {} values became {}",
-                live.len(),
-                loaded.len()
-            ));
+    let mut variable = |name: String, entry, which, was: i32, now: i32| {
+        if was == now {
             return;
         }
-        for (index, (was, now)) in live.iter().zip(loaded).enumerate() {
-            if was != now {
-                if scripts_ran {
-                    allow(entry);
-                } else {
-                    findings.push(format!("{name} {index}: {was} became {now}"));
-                }
-            }
+        match writes.wrote(which, now) {
+            Some(written) => taken.take(entry, format!("{name}: {}", written.script)),
+            None => findings.push(format!("{name}: {was} became {now}")),
         }
     };
-    variables("global", allow::GLOBAL, &live.gvars, &loaded.gvars);
-    variables(
+    let mut array =
+        |name: &str, entry, which: fn(usize) -> Variable, live: &[i32], loaded: &[i32]| {
+            if live.len() != loaded.len() {
+                return Some(format!(
+                    "{name}: {} values became {}",
+                    live.len(),
+                    loaded.len()
+                ));
+            }
+            for (index, (was, now)) in live.iter().zip(loaded).enumerate() {
+                variable(format!("{name} {index}"), entry, which(index), *was, *now);
+            }
+            None
+        };
+    let globals = array(
+        "global",
+        allow::GLOBAL,
+        Variable::Global,
+        &live.gvars,
+        &loaded.gvars,
+    );
+    let mvars = array(
         "map variable",
         allow::MAP_VARIABLE,
+        Variable::Map,
         &live.mvars,
         &loaded.mvars,
     );
     for (id, values) in &live.lvars {
-        match loaded.lvars.get(id) {
-            None => findings.push(format!("script {id:#x} is gone")),
-            Some(other) if other == values => {}
-            Some(_) if ran.records.contains(id) => allow(allow::LOCAL),
-            Some(other) => findings.push(format!(
-                "script {id:#x} locals: {values:?} became {other:?}"
-            )),
+        let Some(other) = loaded.lvars.get(id) else {
+            continue;
+        };
+        // A slice no one used has no values yet, and it starts as zeros.
+        for index in 0..values.len().max(other.len()) {
+            let was = values.get(index).copied().unwrap_or(0);
+            let now = other.get(index).copied().unwrap_or(0);
+            let name = format!("script {id:#x} local {index}");
+            variable(name, allow::LOCAL, Variable::Local(*id, index), was, now);
+        }
+    }
+    findings.extend(globals);
+    findings.extend(mvars);
+    findings.extend(live.lost_reads(writes));
+    for id in live.lvars.keys() {
+        if !loaded.lvars.contains_key(id) {
+            findings.push(format!("script {id:#x} is gone"));
         }
     }
     for id in loaded.lvars.keys() {
         if !live.lvars.contains_key(id) && !live.dropped_scripts.contains(id) {
-            if ran.records.contains(id) {
-                allow(allow::NEW_SCRIPT);
-            } else {
-                findings.push(format!("script {id:#x} appeared"));
-            }
+            findings.push(format!("script {id:#x} appeared"));
         }
     }
     if live.clock != loaded.clock {
@@ -719,6 +1020,19 @@ fn diff_ledgers(
         findings.extend(queue_findings(&live.queue, &loaded.queue));
     }
     findings
+}
+
+/// Whether the one change is SPEC-003 §2.10's: a held object has no place, and
+/// loading replaces its stored elevation with that of the tree it is in.
+fn holder_elevation(row: &ObjectRow, other: &ObjectRow, loaded: &Ledger) -> bool {
+    let mut top = other;
+    for _ in 0..=vault_formats::map::MAX_INVENTORY_DEPTH {
+        match top.holder.and_then(|holder| loaded.objects.get(&holder)) {
+            Some(holder) => top = holder,
+            None => break,
+        }
+    }
+    row.hex.is_none() && row.elevation != other.elevation && other.elevation == top.elevation
 }
 
 /// The art change SPEC-003 makes when an exit grid to the town or world map is
@@ -735,26 +1049,18 @@ fn shifted_exit_art(live: &ObjectRow, loaded: &ObjectRow) -> bool {
         && to == Fid::new(from.category(), from.base() + 16, from.animation(), 0, 0)
 }
 
-/// The art SPEC-005 §3.8 gives the player: the same critter art, with no pose
-/// and no selector, keeping the weapon code only while something is held.
-fn rebuilt_player_art(live: &ObjectRow, loaded: &ObjectRow) -> bool {
+/// The art SPEC-005 §3.8 gives a player with no armor on: the same critter art
+/// with no pose and no selector, keeping the weapon code only while either hand
+/// holds something. A worn armor leaves the art alone.
+fn rebuilt_player_art(live: &ObjectRow, loaded: &ObjectRow, gear: PlayerGear) -> bool {
     let (from, to) = (Fid(live.art_id), Fid(loaded.art_id));
-    to.category() == 1
+    let weapon = if gear.holding { from.weapon() } else { 0 };
+    !gear.armored
+        && to.category() == 1
         && to.base() == from.base()
         && to.animation() == 0
         && to.selector() == 0
-        && (to.weapon() == from.weapon() || to.weapon() == 0)
-}
-
-/// Held objects match but for objects made after the save.
-fn same_held(live: &BTreeMap<u32, u32>, loaded: &BTreeMap<u32, u32>, next_id: u32) -> bool {
-    let kept = |held: &BTreeMap<u32, u32>| -> BTreeMap<u32, u32> {
-        held.iter()
-            .filter(|(id, _)| **id < next_id)
-            .map(|(id, quantity)| (*id, *quantity))
-            .collect()
-    };
-    kept(live) == kept(loaded)
+        && to.weapon() == weapon
 }
 
 /// The events only one side holds.
@@ -820,15 +1126,29 @@ impl LiveState {
 pub struct ParityAuditor {
     session: SessionRuntime,
     tally: AuditTally,
+    /// What the second host's scripts run.
+    journal: Arc<Mutex<ScriptJournal>>,
 }
 
 impl ParityAuditor {
     /// A second host set up as `args` sets up the run's: the same corpus,
     /// preset, sfall mode, profile and layers.
     pub fn new(args: &PreviewArgs) -> AppResult<Self> {
+        let mut session = start_world(args)?;
+        let journal = Arc::new(Mutex::new(ScriptJournal::default()));
+        let world = interactive_world(&mut session).ok_or("an audit needs a map session")?;
+        world.host.vm_observer = Some(journal.clone());
+        // A load ends where the game's own load ends. Headless play finishes
+        // a sequence as it is registered, but a walk a Start registers takes
+        // time in the game (SPEC-007 §3.11), so at the end of a load it has
+        // not moved anything, and no save holds a sequence. Played at once it
+        // would land inside the load, and every load would walk the critter
+        // on and shuffle the slots after it.
+        world.host.playback = Playback::RealTime;
         Ok(Self {
-            session: start_world(args)?,
+            session,
             tally: AuditTally::default(),
+            journal,
         })
     }
     #[cfg(test)]
@@ -894,28 +1214,29 @@ impl ParityAuditor {
             return;
         };
         let host = &mut second.host;
+        let journal = self.journal.clone();
+        let calls = || std::mem::take(&mut *journal.lock().unwrap_or_else(PoisonError::into_inner));
         let mut load = |host: &mut WorldHost<VfsWorldAssets>, image: &mut SlotImage, name: u8| {
+            calls();
             host.world.rng = rng.clone();
             let loaded = host.load_slot(image);
             host.world.rng = rng.clone();
             host.world.effects.clear();
+            let journal = calls();
             faults.after_load(host, name);
-            loaded
+            loaded.map(|()| LoadWrites::of(&journal.into_calls(), host))
         };
-        if let Err(error) = load(host, &mut image, 0) {
-            findings.push(format!("load A refused the slot: {error}"));
-            return;
-        }
-        let ran = LoadScripts::of(&host.world);
+        let writes = match load(host, &mut image, 0) {
+            Ok(writes) => writes,
+            Err(error) => {
+                findings.push(format!("load A refused the slot: {error}"));
+                return;
+            }
+        };
         let first = Ledger::of(&host.world);
         let snapshot = host.world.state_snapshot();
         let hash = snapshot.state_hash();
-        findings.extend(diff_ledgers(
-            ledger,
-            &first,
-            &ran,
-            &mut self.tally.allowlisted,
-        ));
+        findings.extend(diff_ledgers(ledger, &first, &writes, &mut self.tally));
         let mut again = match host.slot_image(&SaveInfo::default()) {
             Ok(image) => image,
             Err(error) => {
@@ -923,29 +1244,35 @@ impl ParityAuditor {
                 return;
             }
         };
-        if let Err(error) = load(host, &mut again, 1) {
-            findings.push(format!("load B refused the slot: {error}"));
-            return;
-        }
+        let last_writes = match load(host, &mut again, 1) {
+            Ok(writes) => writes,
+            Err(error) => {
+                findings.push(format!("load B refused the slot: {error}"));
+                return;
+            }
+        };
         let last = host.world.state_snapshot();
         let other = last.state_hash();
         if hash == other {
             return;
         }
-        let allowed = &mut self.tally.allowlisted;
-        if moved_in_load(ledger, &first) && only_handles_differ(&snapshot, &last) {
-            *allowed.entry(allow::RENUMBERED).or_default() += 1;
+        if !writes.placed.is_empty() && only_handles_differ(&snapshot, &last) {
+            let scripts: BTreeSet<&str> = writes
+                .placed
+                .values()
+                .map(|placed| placed.script.as_str())
+                .collect();
+            let cause = format!("{scripts:?} placed objects in load A");
+            self.tally.take(allow::RENUMBERED, cause);
             return;
         }
         let second_load = Ledger::of(&host.world);
-        let ran = LoadScripts::of(&host.world);
-        let mut taken = BTreeMap::new();
-        let left = diff_ledgers(&first, &second_load, &ran, &mut taken);
-        if left.is_empty() && !taken.is_empty() {
-            *allowed.entry(allow::UNSETTLED).or_default() += 1;
-            for (entry, count) in taken {
-                *allowed.entry(entry).or_default() += count;
-            }
+        let mut taken = AuditTally::default();
+        let left = diff_ledgers(&first, &second_load, &last_writes, &mut taken);
+        if left.is_empty() && !taken.causes.is_empty() {
+            self.tally
+                .take(allow::UNSETTLED, allow::UNSETTLED.to_owned());
+            self.tally.absorb(taken);
             return;
         }
         findings.push(format!(
@@ -1030,17 +1357,6 @@ fn hashed_parts(first: &StateSnapshot, second: &StateSnapshot) -> Vec<String> {
     findings
 }
 
-/// Whether a load's scripts moved anything: an object it kept stands on
-/// another hex than it did in the save.
-fn moved_in_load(live: &Ledger, loaded: &Ledger) -> bool {
-    live.objects.iter().any(|(id, row)| {
-        loaded
-            .objects
-            .get(id)
-            .is_some_and(|other| other.hex != row.hex)
-    })
-}
-
 /// Why saving is refused now, if it is. No map is loaded on the world map, and
 /// a debugger's VM holds the world until it ends.
 fn refused_moment(host: &WorldHost<VfsWorldAssets>) -> Option<&'static str> {
@@ -1080,6 +1396,7 @@ fn stale_ids(world: &WorldState) -> Vec<String> {
 struct Triggers {
     /// The working name of the loaded map.
     place: Option<String>,
+    elevation: u8,
     combat: bool,
     /// An explosion is in progress.
     blast: bool,
@@ -1094,6 +1411,9 @@ impl Triggers {
                 .map_loaded()
                 .then(|| world.current_map_name())
                 .flatten(),
+            elevation: world
+                .get(world.player)
+                .map_or(0, |player| player.raw.elevation),
             combat: world.combat,
             blast: world.explosion.is_some()
                 || world.pending_explosion.is_some()
@@ -1116,6 +1436,8 @@ impl Triggers {
         let mut due = Vec::new();
         if now.place.is_some() && now.place != self.place {
             due.push(AuditReason::MapTransition);
+        } else if now.place.is_some() && now.elevation != self.elevation {
+            due.push(AuditReason::ElevationChange);
         }
         if self.combat && !now.combat {
             due.push(AuditReason::CombatEnd);
@@ -1419,6 +1741,10 @@ pub struct BundleManifest {
     pub corpus_dir: Option<String>,
     pub master_dat: Option<String>,
     pub critter_dat: Option<String>,
+    /// The folders a profile links, as Et Tu links Fallout 1's data. Bundles
+    /// from before this field link none.
+    #[serde(default)]
+    pub linked_dirs: Vec<String>,
     pub player_gcd: Option<String>,
     pub language: Option<String>,
     /// Ticks run, the failing one included.
@@ -1469,6 +1795,11 @@ impl BundleManifest {
             corpus_dir: path_text(&args.corpus_dir),
             master_dat: path_text(&args.master_dat),
             critter_dat: path_text(&args.critter_dat),
+            linked_dirs: args
+                .linked_dirs
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
             player_gcd: args.player_gcd.clone(),
             language: args.language.clone(),
             ticks: 0,
@@ -1505,6 +1836,7 @@ impl BundleManifest {
             corpus_dir: self.corpus_dir.as_ref().map(PathBuf::from),
             master_dat: self.master_dat.as_ref().map(PathBuf::from),
             critter_dat: self.critter_dat.as_ref().map(PathBuf::from),
+            linked_dirs: self.linked_dirs.iter().map(PathBuf::from).collect(),
             preview_map: Some(self.map.clone()),
             player_gcd: self.player_gcd.clone(),
             language: self.language.clone(),
@@ -1573,6 +1905,9 @@ fn report_text(manifest: &BundleManifest, report: &AutoplayReport) -> String {
     rows("audited at", &report.tally.audits, &mut line);
     rows("skipped because", &report.tally.skipped, &mut line);
     rows("allowlisted", &report.tally.allowlisted, &mut line);
+    for (cause, count) in &report.tally.causes {
+        line(format!("because {cause}: {count}"));
+    }
     line(format!(
         "throughput: {:.0} ticks per wall-clock second",
         report.ticks_per_second
@@ -1694,8 +2029,11 @@ mod tests {
         map_preview::test_support::synthetic_corpus,
         replay::{CheckpointsDiverged, replay_with_checkpoints},
     };
-    use vault_core::{autoplay::BotVerb, critical::state::END_REQUESTED};
-    use vault_fixtures::campaign::{self, Edition};
+    use vault_core::{ScriptEvent, autoplay::BotVerb, critical::state::END_REQUESTED};
+    use vault_fixtures::{
+        campaign::{self, Edition},
+        state,
+    };
 
     const EDITIONS: [(Edition, GameProfile); 2] = [
         (Edition::Fallout1, GameProfile::Fallout1),
@@ -1743,6 +2081,21 @@ mod tests {
         }
         fn read(&self, name: &str) -> String {
             std::fs::read_to_string(self.output.path().join(name)).unwrap()
+        }
+        /// The door script runs `body` on every load.
+        fn door_enters(&self, body: Vec<u8>) {
+            self.script("campdoor.int", body);
+        }
+        /// `file` is a script whose `map_enter_p_proc` runs `body`: a first
+        /// request runs no procedure of a fixture's program, but SPEC-006 §3.5
+        /// step 8's broadcast does.
+        fn script(&self, file: &str, body: Vec<u8>) {
+            let path = self.corpus.path().join("scripts").join(file);
+            let procedures = [
+                (b"start".as_slice(), state::returning(Vec::new())),
+                (b"map_enter_p_proc".as_slice(), state::returning(body)),
+            ];
+            std::fs::write(path, state::program(&[], &procedures)).unwrap();
         }
         fn manifest(&self) -> BundleManifest {
             serde_json::from_str(&self.read(MANIFEST_FILE)).unwrap()
@@ -2003,6 +2356,30 @@ mod tests {
         }
     }
 
+    /// A bundle keeps the folders a profile links, or its replay would run
+    /// without their data; a bundle from before the field links none.
+    #[test]
+    fn a_bundle_keeps_its_linked_folders() {
+        let fixture = Fixture::new(EDITIONS[0]);
+        run_with(fixture.options(4), exits(), NoFaults).unwrap();
+        let mut manifest = fixture.manifest();
+        assert!(manifest.linked_dirs.is_empty());
+        assert!(manifest.session_args().unwrap().linked_dirs.is_empty());
+
+        manifest.linked_dirs = vec!["/games/fallout1".into()];
+        let text = serde_json::to_string(&manifest).unwrap();
+        let read: BundleManifest = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            read.session_args().unwrap().linked_dirs,
+            [PathBuf::from("/games/fallout1")]
+        );
+
+        let mut old = serde_json::to_value(&manifest).unwrap();
+        old.as_object_mut().unwrap().remove("linked_dirs");
+        let read: BundleManifest = serde_json::from_value(old).unwrap();
+        assert!(read.linked_dirs.is_empty());
+    }
+
     /// Every map change, explosion and combat end is audited: the triggers
     /// fire on what the game really does, through logged actions only.
     #[test]
@@ -2121,42 +2498,91 @@ mod tests {
         }
     }
 
+    /// A script's word, to the value it wrote.
+    fn wrote<T>(value: T) -> Written<T> {
+        Written {
+            value,
+            script: "test.int".to_owned(),
+        }
+    }
+
     /// What differs and the allowlist does not take is a finding, and what it
-    /// takes is counted.
+    /// takes is counted, by the script behind it.
     #[test]
-    fn autoplay_the_allowlist_takes_only_its_own_differences() {
+    fn autoplay_only_the_value_a_script_wrote_may_change_a_variable() {
         let live = Ledger {
             mvars: vec![1, 2],
-            next_id: 100,
+            gvars: vec![5, 6],
+            lvars: BTreeMap::from([(0x0400_0001, vec![8, 9])]),
             clock: 7,
             ..Ledger::default()
         };
         let mut loaded = live.clone();
         loaded.mvars[1] = 3;
-        let mut allowed = BTreeMap::new();
-        let none = LoadScripts::default();
-        let findings = diff_ledgers(&live, &loaded, &none, &mut allowed);
-        assert_eq!(findings, ["map variable 1: 2 became 3"], "no script ran");
-        assert!(allowed.is_empty());
-        let ran = LoadScripts {
-            records: BTreeSet::from([0x0400_0001]),
-            owners: BTreeSet::new(),
-        };
-        assert!(diff_ledgers(&live, &loaded, &ran, &mut allowed).is_empty());
-        assert_eq!(allowed[allow::MAP_VARIABLE], 1);
+        let mut taken = AuditTally::default();
+        let none = LoadWrites::default();
+        let lost = diff_ledgers(&live, &loaded, &none, &mut taken);
+        assert_eq!(lost, ["map variable 1: 2 became 3"], "no script wrote it");
+        assert!(taken.allowlisted.is_empty());
+        // A script that ran and wrote something else does not excuse it.
+        let mut writes = LoadWrites::default();
+        writes.written.insert(Variable::Map(0), wrote(1));
+        writes.written.insert(Variable::Global(1), wrote(3));
+        assert_eq!(diff_ledgers(&live, &loaded, &writes, &mut taken), lost);
+        // Nor does a write of another value.
+        writes.written.insert(Variable::Map(1), wrote(4));
+        assert_eq!(diff_ledgers(&live, &loaded, &writes, &mut taken), lost);
+        writes.written.insert(Variable::Map(1), wrote(3));
+        assert!(diff_ledgers(&live, &loaded, &writes, &mut taken).is_empty());
+        assert_eq!(taken.allowlisted[allow::MAP_VARIABLE], 1);
+        assert_eq!(taken.causes["map variable 1: test.int"], 1);
+        // The other kinds, the same way.
+        loaded.gvars[1] = 3;
+        loaded.lvars.get_mut(&0x0400_0001).unwrap()[1] = 4;
+        let findings = diff_ledgers(&live, &loaded, &writes, &mut taken);
+        assert_eq!(findings, ["script 0x4000001 local 1: 9 became 4"]);
+        assert_eq!(taken.allowlisted[allow::GLOBAL], 1);
+        writes
+            .written
+            .insert(Variable::Local(0x0400_0001, 1), wrote(4));
+        assert!(diff_ledgers(&live, &loaded, &writes, &mut taken).is_empty());
+        assert_eq!(taken.allowlisted[allow::LOCAL], 1);
         // Nothing allows the clock, whatever ran.
         loaded.clock = 8;
-        let findings = diff_ledgers(&live, &loaded, &ran, &mut allowed);
+        let findings = diff_ledgers(&live, &loaded, &writes, &mut taken);
         assert_eq!(findings, ["clock: 7 became 8"]);
     }
 
-    /// An object's own script may move it, but not another's, and only an
-    /// identifier past the saved allocator is an object the load made.
+    /// A lost value a script reads and then writes over ends as the script
+    /// left it, so the first read is what shows it.
     #[test]
-    fn autoplay_the_allowlist_knows_whose_script_ran() {
-        let row = ObjectRow {
+    fn autoplay_a_lost_value_a_script_writes_over_is_a_finding_too() {
+        let live = Ledger {
+            gvars: vec![5],
+            ..Ledger::default()
+        };
+        let loaded = Ledger {
+            gvars: vec![9],
+            ..Ledger::default()
+        };
+        let mut writes = LoadWrites::default();
+        writes.written.insert(Variable::Global(0), wrote(9));
+        writes.read_first.insert(Variable::Global(0), 5);
+        let mut taken = AuditTally::default();
+        assert!(diff_ledgers(&live, &loaded, &writes, &mut taken).is_empty());
+        writes.read_first.insert(Variable::Global(0), 0);
+        let findings = diff_ledgers(&live, &loaded, &writes, &mut taken);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].contains("read 0 where the save held 5"),
+            "{findings:?}"
+        );
+    }
+
+    fn scenery(hex: i32) -> ObjectRow {
+        ObjectRow {
             pid: 0x0200_0001,
-            hex: Some(100),
+            hex: Some(hex),
             elevation: 0,
             orientation: 0,
             art_id: 1,
@@ -2167,121 +2593,412 @@ mod tests {
             },
             holder: None,
             contents: BTreeMap::new(),
-        };
-        let live = Ledger {
-            objects: BTreeMap::from([(7, row.clone())]),
-            next_id: 100,
-            ..Ledger::default()
-        };
-        let mut loaded = live.clone();
-        loaded.objects.get_mut(&7).unwrap().hex = Some(101);
-        loaded.objects.insert(100, row.clone());
-        let mut allowed = BTreeMap::new();
-        let mut ran = LoadScripts::default();
-        let findings = diff_ledgers(&live, &loaded, &ran, &mut allowed);
-        assert_eq!(findings.len(), 1, "{findings:?}");
-        assert!(findings[0].starts_with("object 7: "), "{findings:?}");
-        assert_eq!(allowed[allow::NEW_OBJECT], 1);
-        ran.owners.insert(7);
-        assert!(diff_ledgers(&live, &loaded, &ran, &mut allowed).is_empty());
-        assert_eq!(allowed[allow::SCRIPTED_OBJECT], 1);
-        // A script may place a critter, but its hit points stay.
-        let critter = |hp: i32, hex: i32| ObjectRow {
+        }
+    }
+
+    fn critter(pack: i32, hp: i32) -> ObjectRow {
+        ObjectRow {
             pid: 0x0100_0001,
-            hex: Some(hex),
             state: ObjectState::Critter(vault_formats::map::CritterState {
                 reaction: 0,
                 damage: 0,
                 maneuvers: 0,
                 ap: 0,
                 results: Default::default(),
-                ai: 0,
+                ai: pack,
                 team: 0,
                 attacker: -1,
                 hp,
                 radiation: 0,
                 poison: 0,
             }),
-            ..row.clone()
+            ..scenery(100)
+        }
+    }
+
+    fn holding(row: ObjectRow) -> Ledger {
+        Ledger {
+            objects: BTreeMap::from([(7, row)]),
+            ..Ledger::default()
+        }
+    }
+
+    /// Whichever script ran, a field moves only by a word that names the
+    /// object, to where the word put it, and each word answers for its own
+    /// field alone.
+    #[test]
+    fn autoplay_an_object_changes_only_by_a_word_that_names_it() {
+        let live = holding(scenery(100));
+        let mut loaded = holding(scenery(101));
+        let mut taken = AuditTally::default();
+        let mut writes = LoadWrites::default();
+        let place = |hex| Place {
+            hex: Some(hex),
+            elevation: 0,
         };
-        let mut hurt = (live.clone(), loaded.clone());
-        hurt.0.objects.insert(7, critter(30, 100));
-        hurt.1.objects.insert(7, critter(29, 100));
-        let findings = diff_ledgers(&hurt.0, &hurt.1, &ran, &mut allowed);
+        let lost = diff_ledgers(&live, &loaded, &writes, &mut taken);
+        assert!(lost[0].starts_with("object 7: "), "{lost:?}");
+        writes.placed.insert(7, wrote(place(102)));
+        assert_eq!(diff_ledgers(&live, &loaded, &writes, &mut taken), lost);
+        writes.placed.insert(7, wrote(place(101)));
+        assert!(diff_ledgers(&live, &loaded, &writes, &mut taken).is_empty());
+        assert_eq!(taken.allowlisted[allow::SCRIPTED_OBJECT], 1);
+        assert_eq!(taken.causes["test.int placed it"], 1);
+        // A placement says nothing of the rest of the record.
+        loaded.objects.get_mut(&7).unwrap().flags = 8;
+        let findings = diff_ledgers(&live, &loaded, &writes, &mut taken);
         assert!(findings[0].starts_with("object 7: "), "{findings:?}");
-        hurt.1.objects.insert(7, critter(30, 101));
-        assert!(diff_ledgers(&hurt.0, &hurt.1, &ran, &mut allowed).is_empty());
-        // An object gone is never taken.
-        loaded.objects.remove(&7);
-        let findings = diff_ledgers(&live, &loaded, &ran, &mut allowed);
+        // The placement rule keeps only the elevation.
+        loaded.objects.get_mut(&7).unwrap().flags = 0;
+        let near = Place {
+            hex: None,
+            elevation: 0,
+        };
+        writes.placed.insert(7, wrote(near));
+        assert!(diff_ledgers(&live, &loaded, &writes, &mut taken).is_empty());
+        // An object gone is never taken, nor is one that appeared.
+        loaded.objects.clear();
+        let findings = diff_ledgers(&live, &loaded, &writes, &mut taken);
         assert!(findings[0].contains("is gone"), "{findings:?}");
-        // An identifier below the allocator did not come from the load.
-        loaded.objects.insert(7, row.clone());
-        loaded.objects.insert(50, row.clone());
-        let findings = diff_ledgers(&live, &loaded, &ran, &mut allowed);
+        let findings = diff_ledgers(&Ledger::default(), &live, &writes, &mut taken);
         assert!(findings[0].contains("appeared"), "{findings:?}");
     }
 
-    /// A Start that moves an object past another makes load B fill its slots
-    /// in another order. The hash differs, the state does not: that is taken
-    /// for a scripted object, and an unscripted one's move is still a finding.
+    /// SPEC-005 `0x8102`: the packet a script sets, and nothing else of the
+    /// critter: its hit points stay.
+    #[test]
+    fn autoplay_only_a_set_ai_packet_changes_a_critter() {
+        let live = holding(critter(5, 30));
+        let mut taken = AuditTally::default();
+        let mut writes = LoadWrites::default();
+        let lost = diff_ledgers(&live, &holding(critter(6, 30)), &writes, &mut taken);
+        assert_eq!(lost.len(), 1, "{lost:?}");
+        writes.packets.insert(7, wrote(4));
+        assert_eq!(lost.len(), 1);
+        writes.packets.insert(7, wrote(6));
+        let loaded = holding(critter(6, 30));
+        assert!(diff_ledgers(&live, &loaded, &writes, &mut taken).is_empty());
+        let cause = "test.int set its AI packet with critter_add_trait";
+        assert_eq!(taken.causes[cause], 1);
+        let hurt = holding(critter(6, 29));
+        let findings = diff_ledgers(&live, &hurt, &writes, &mut taken);
+        assert!(findings[0].starts_with("object 7: "), "{findings:?}");
+    }
+
+    /// SPEC-005 `0x812E`-`0x812F`, `0x814D`: a lock word does what it says.
+    #[test]
+    fn autoplay_a_lock_changes_only_as_its_word_says() {
+        let door = |lock: u32| ObjectRow {
+            state: ObjectState::Other {
+                word: 0,
+                detail: ObjectDetail::Door(LockFlags(lock)),
+            },
+            ..scenery(100)
+        };
+        let live = holding(door(0));
+        let locked = holding(door(LockFlags::LOCKED.0));
+        let mut taken = AuditTally::default();
+        let mut writes = LoadWrites::default();
+        assert_eq!(diff_ledgers(&live, &locked, &writes, &mut taken).len(), 1);
+        writes.locks.insert(7, wrote(word::OBJ_UNLOCK));
+        assert_eq!(diff_ledgers(&live, &locked, &writes, &mut taken).len(), 1);
+        writes.locks.insert(7, wrote(word::OBJ_LOCK));
+        assert!(diff_ledgers(&live, &locked, &writes, &mut taken).is_empty());
+        assert_eq!(taken.causes["test.int changed its lock"], 1);
+    }
+
+    /// Money is the one thing a load can make: exactly what `item_caps_adjust`
+    /// moved, in money, into the owner it names.
+    #[test]
+    fn autoplay_money_comes_only_from_item_caps_adjust() {
+        let money = ObjectRow {
+            pid: 41,
+            hex: None,
+            holder: Some(7),
+            ..scenery(100)
+        };
+        let live = holding(critter(5, 30));
+        let mut loaded = live.clone();
+        loaded.objects.get_mut(&7).unwrap().contents.insert(9, 8);
+        loaded.objects.insert(9, money);
+        let mut taken = AuditTally::default();
+        let mut writes = LoadWrites {
+            money: 41,
+            ..LoadWrites::default()
+        };
+        assert_eq!(diff_ledgers(&live, &loaded, &writes, &mut taken).len(), 2);
+        writes.caps.insert(7, wrote(7));
+        assert_eq!(diff_ledgers(&live, &loaded, &writes, &mut taken).len(), 1);
+        writes.caps.insert(7, wrote(8));
+        assert!(diff_ledgers(&live, &loaded, &writes, &mut taken).is_empty());
+        // Anything else that appears is a finding.
+        loaded.objects.get_mut(&9).unwrap().pid = 42;
+        let findings = diff_ledgers(&live, &loaded, &writes, &mut taken);
+        assert!(
+            findings.iter().any(|line| line.contains("appeared")),
+            "{findings:?}"
+        );
+    }
+
+    /// SPEC-003 §2.10: a held object reads the elevation of its tree, and a
+    /// placed one keeps its own.
+    #[test]
+    fn autoplay_only_a_held_object_takes_the_elevation_of_its_tree() {
+        let holder = ObjectRow {
+            elevation: 1,
+            contents: BTreeMap::from([(9, 1)]),
+            ..scenery(100)
+        };
+        let held = |elevation| ObjectRow {
+            hex: None,
+            elevation,
+            holder: Some(7),
+            ..scenery(100)
+        };
+        let ledger = |item| Ledger {
+            objects: BTreeMap::from([(7, holder.clone()), (9, item)]),
+            ..Ledger::default()
+        };
+        let mut taken = AuditTally::default();
+        let writes = LoadWrites::default();
+        assert!(diff_ledgers(&ledger(held(0)), &ledger(held(1)), &writes, &mut taken).is_empty());
+        assert_eq!(taken.allowlisted[allow::HELD_ELEVATION], 1);
+        let other = ledger(held(2));
+        assert_eq!(
+            diff_ledgers(&ledger(held(0)), &other, &writes, &mut taken).len(),
+            1
+        );
+    }
+
+    /// Audit `world` once, as a change of map would.
+    fn audited(
+        auditor: &mut ParityAuditor,
+        world: &mut MapPreview,
+        faults: &mut impl Faults,
+    ) -> AuditVerdict {
+        auditor.audit(world, &[AuditReason::Explosion], faults)
+    }
+
+    /// A map entry that walks its critter only registers the walk: it has moved
+    /// nothing when the load ends, so a save and a load of it stay equal with
+    /// nothing allowed, though headless play finishes the same walk at once.
+    #[test]
+    fn autoplay_a_walk_a_load_registers_moves_nothing_by_its_end() {
+        for edition in EDITIONS {
+            let fixture = Fixture::new(edition);
+            let body = [
+                state::push(1),
+                state::push(1),
+                state::instruction(0x810e),
+                state::instruction(0x80bc),
+                state::push(campaign::ENTRY - 400),
+                state::push(-1),
+                state::instruction(0x8113),
+                state::push(3),
+                state::push(0),
+                state::instruction(0x810e),
+            ];
+            fixture.script("synthetic.int", body.concat());
+            let args = fixture.args();
+            let mut session = start_world(&args).unwrap();
+            let mut auditor = ParityAuditor::new(&args).unwrap();
+            let world = interactive_world(&mut session).unwrap();
+            let verdict = audited(&mut auditor, world, &mut NoFaults);
+            assert_eq!(verdict, AuditVerdict::Clean, "{edition:?}");
+            let taken = &auditor.tally().allowlisted;
+            assert!(taken.is_empty(), "{edition:?}: {taken:?}");
+            // Played at once, the same walk lands inside the load.
+            let second = interactive_world(&mut auditor.session).unwrap();
+            second.host.playback = Playback::Instant;
+            let AuditVerdict::Mismatch(findings) = audited(&mut auditor, world, &mut NoFaults)
+            else {
+                panic!("a walk that lands in a load moved its critter");
+            };
+            assert!(findings[0].starts_with("object 15: "), "{findings:?}");
+        }
+    }
+
+    /// `move_to` of `self` to (`hex`, 0).
+    fn self_to(hex: i32) -> Vec<u8> {
+        [
+            state::instruction(0x80bc),
+            state::push(hex),
+            state::push(0),
+            state::instruction(0x80b6),
+            state::instruction(0x801a),
+        ]
+        .concat()
+    }
+
+    fn object_of(host: &mut WorldHost<VfsWorldAssets>, id: u32) -> ObjectRef {
+        host.world.reference_for_id(id).unwrap()
+    }
+
+    /// A map entry that moves its object past another makes load B fill its slots
+    /// in another order. The hash differs and the state does not. The journal
+    /// names the move; with no word behind it the same move is a finding.
     #[test]
     fn autoplay_a_scripted_move_only_renumbers_the_handles() {
         for edition in EDITIONS {
+            let fixture = Fixture::new(edition);
+            fixture.door_enters(self_to(20307));
+            let args = fixture.args();
+            let mut session = start_world(&args).unwrap();
+            let mut auditor = ParityAuditor::new(&args).unwrap();
+            let world = interactive_world(&mut session).unwrap();
+            let door = object_of(&mut world.host, campaign::SCRIPTED_DOOR);
+            let live = &mut world.host.world;
+            live.move_object(door, campaign::ENTRY - 500, 0, false)
+                .unwrap();
+            let verdict = audited(&mut auditor, world, &mut NoFaults);
+            assert_eq!(verdict, AuditVerdict::Clean, "{edition:?}");
+            let tally = auditor.tally();
+            assert_eq!(tally.allowlisted[allow::RENUMBERED], 1, "{tally:?}");
+            assert_eq!(tally.allowlisted[allow::SCRIPTED_OBJECT], 1, "{tally:?}");
+            assert_eq!(tally.causes["campdoor.int placed it"], 1, "{tally:?}");
+            // The same move of a door no script placed.
+            let mut faults = Injected {
+                load: Some((0, |host| {
+                    let door = object_of(host, campaign::PLAIN_DOOR);
+                    host.world.get_mut(door).unwrap().raw.hex = Some(campaign::ENTRY - 500);
+                })),
+                ..Injected::default()
+            };
+            let AuditVerdict::Mismatch(findings) = audited(&mut auditor, world, &mut faults) else {
+                panic!("an unscripted move is a finding");
+            };
+            assert!(findings[0].starts_with("object 10: "), "{findings:?}");
+        }
+    }
+
+    /// SPEC-014 §3.44: a move reinserts its object even onto the hex it is on,
+    /// so on a shared hex a script that changes no hex still changes the order
+    /// a save writes. The journal sees that where a comparison of hexes cannot;
+    /// the same reinsertion with no word behind it is a finding.
+    #[test]
+    fn autoplay_a_scripted_reinsertion_on_a_shared_hex_renumbers_too() {
+        for edition in EDITIONS {
+            let share = |world: &mut MapPreview| {
+                let bag = object_of(&mut world.host, campaign::CONTAINER);
+                let live = &mut world.host.world;
+                live.move_object(bag, 20307, 0, false).unwrap();
+            };
+            let fixture = Fixture::new(edition);
+            fixture.door_enters(self_to(20307));
+            let args = fixture.args();
+            let mut session = start_world(&args).unwrap();
+            let mut auditor = ParityAuditor::new(&args).unwrap();
+            let world = interactive_world(&mut session).unwrap();
+            share(world);
+            let verdict = audited(&mut auditor, world, &mut NoFaults);
+            assert_eq!(verdict, AuditVerdict::Clean, "{edition:?}");
+            let tally = auditor.tally();
+            assert_eq!(tally.allowlisted[allow::RENUMBERED], 1, "{tally:?}");
+            assert!(!tally.allowlisted.contains_key(allow::SCRIPTED_OBJECT));
+
             let fixture = Fixture::new(edition);
             let args = fixture.args();
             let mut session = start_world(&args).unwrap();
             let mut auditor = ParityAuditor::new(&args).unwrap();
             let world = interactive_world(&mut session).unwrap();
-            let why = [AuditReason::Explosion];
+            share(world);
             let mut faults = Injected {
                 load: Some((0, |host| {
-                    let door = host.world.reference_for_id(campaign::SCRIPTED_DOOR);
-                    let door = host.world.get_mut(door.unwrap()).unwrap();
-                    door.raw.hex = Some(campaign::ENTRY - 500);
+                    let door = object_of(host, campaign::SCRIPTED_DOOR);
+                    host.world.move_object(door, 20307, 0, false).unwrap();
                 })),
                 ..Injected::default()
             };
-            assert_eq!(auditor.audit(world, &why, &mut faults), AuditVerdict::Clean);
-            let allowed = &auditor.tally().allowlisted;
-            assert_eq!(allowed[allow::RENUMBERED], 1, "{allowed:?}");
-            assert_eq!(allowed[allow::SCRIPTED_OBJECT], 1, "{allowed:?}");
+            let AuditVerdict::Mismatch(findings) = audited(&mut auditor, world, &mut faults) else {
+                panic!("a reinsertion no script made is a finding");
+            };
+            assert!(findings[0].starts_with("state_hash(A) "), "{findings:?}");
+            let last = findings.last().unwrap();
+            assert_eq!(
+                last, "the same entities under other handles",
+                "{findings:?}"
+            );
+        }
+    }
+
+    /// `global_var(0)` plus one, in global 0.
+    fn counting() -> Vec<u8> {
+        [
+            state::push(0),
+            state::push(0),
+            state::instruction(0x80c5),
+            state::push(1),
+            state::instruction(0x8039),
+            state::instruction(0x80c6),
+        ]
+        .concat()
+    }
+
+    /// A map entry that counts its loads never settles: world, A and B differ,
+    /// by exactly what the journals of A and B say. A variable no script
+    /// wrote changing beside it is still a finding.
+    #[test]
+    fn autoplay_a_script_that_never_settles_is_taken_and_a_lost_global_is_not() {
+        for edition in EDITIONS {
+            let fixture = Fixture::new(edition);
+            fixture.door_enters(counting());
+            let args = fixture.args();
+            let mut session = start_world(&args).unwrap();
+            let mut auditor = ParityAuditor::new(&args).unwrap();
+            let world = interactive_world(&mut session).unwrap();
+            let verdict = audited(&mut auditor, world, &mut NoFaults);
+            assert_eq!(verdict, AuditVerdict::Clean, "{edition:?}");
+            let tally = auditor.tally();
+            assert_eq!(tally.allowlisted[allow::UNSETTLED], 1, "{tally:?}");
+            assert_eq!(tally.allowlisted[allow::GLOBAL], 2, "{tally:?}");
+            assert_eq!(tally.causes["global 0: campdoor.int"], 2, "{tally:?}");
+            // On a load whose scripts ran, global 1 was not theirs to change.
             let mut faults = Injected {
                 load: Some((0, |host| {
-                    let door = host.world.reference_for_id(campaign::PLAIN_DOOR);
-                    let door = host.world.get_mut(door.unwrap()).unwrap();
-                    door.raw.hex = Some(campaign::ENTRY - 500);
+                    host.world.gvars.as_mut().unwrap()[1] += 1;
                 })),
                 ..Injected::default()
             };
-            let AuditVerdict::Mismatch(findings) = auditor.audit(world, &why, &mut faults) else {
-                panic!("an unscripted move is a finding");
+            let AuditVerdict::Mismatch(findings) = audited(&mut auditor, world, &mut faults) else {
+                panic!("a lost global is a finding on any map");
             };
-            assert!(findings[0].starts_with("object 10: "), "{findings:?}");
-            // A script that places its object afresh on each load never
-            // settles: load B is a finding only for what scripts may not do.
+            assert!(findings[0].starts_with("global 1: "), "{findings:?}");
+            // Nor may load B change what its own journal does not hold.
             let mut faults = Injected {
                 load: Some((1, |host| {
-                    let door = host.world.reference_for_id(campaign::SCRIPTED_DOOR);
-                    let door = host.world.get_mut(door.unwrap()).unwrap();
-                    door.raw.hex = Some(campaign::ENTRY - 500);
+                    let door = object_of(host, campaign::PLAIN_DOOR);
+                    host.world.get_mut(door).unwrap().raw.hex = Some(campaign::ENTRY - 500);
                 })),
                 ..Injected::default()
             };
-            assert_eq!(auditor.audit(world, &why, &mut faults), AuditVerdict::Clean);
-            assert_eq!(auditor.tally().allowlisted[allow::UNSETTLED], 1);
-            let mut faults = Injected {
-                load: Some((1, |host| {
-                    let door = host.world.reference_for_id(campaign::PLAIN_DOOR);
-                    let door = host.world.get_mut(door.unwrap()).unwrap();
-                    door.raw.hex = Some(campaign::ENTRY - 500);
-                })),
-                ..Injected::default()
-            };
-            let AuditVerdict::Mismatch(findings) = auditor.audit(world, &why, &mut faults) else {
+            let AuditVerdict::Mismatch(findings) = audited(&mut auditor, world, &mut faults) else {
                 panic!("load B moved what no script of its own moves");
             };
             assert!(findings[0].starts_with("state_hash(A) "), "{findings:?}");
+        }
+    }
+
+    /// The bot climbs in a real run, on both editions: each change of
+    /// elevation is audited, the two-word ladder of a Fallout 2 map survives
+    /// the working set and the log replays.
+    #[test]
+    fn autoplay_a_climb_is_audited_on_both_editions() {
+        for edition in EDITIONS {
+            let fixture = Fixture::new(edition);
+            let mut options = fixture.options(20_000);
+            options.seed = 7;
+            options.session.seed = Some(7);
+            options.chaos = true;
+            let report = run_headless_autoplay(options).unwrap();
+            assert_eq!(report.failure, None, "{edition:?}");
+            assert_eq!(report.tally.audits["elevation change"], 2, "{edition:?}");
+            let log = fixture.read(INPUTS_FILE);
+            for ladder in [campaign::LADDER_UP, campaign::LADDER_DOWN] {
+                let climbed = format!(r#""op":"interact","target":{ladder},"verb":"use""#);
+                assert!(log.contains(&climbed), "{edition:?}: {ladder}");
+            }
+            let replayed = replay_bundle(fixture.output.path()).unwrap();
+            assert_eq!(replayed.state_hash, Some(report.state_hash), "{edition:?}");
         }
     }
 
@@ -2307,34 +3024,6 @@ mod tests {
         let mut third = first.clone();
         third.mvars = Some(vec![1]);
         assert!(!only_handles_differ(&first, &third));
-    }
-
-    /// The load's scripts are read from its trace, by record and owner.
-    #[test]
-    fn autoplay_a_load_names_the_scripts_it_ran() {
-        struct Saw(Option<LoadScripts>);
-        impl Faults for &mut Saw {
-            fn after_load(&mut self, host: &mut WorldHost<VfsWorldAssets>, load: u8) {
-                if load == 0 {
-                    self.0 = Some(LoadScripts::of(&host.world));
-                }
-            }
-        }
-        let fixture = Fixture::new(EDITIONS[0]);
-        let args = fixture.args();
-        let mut session = start_world(&args).unwrap();
-        let mut auditor = ParityAuditor::new(&args).unwrap();
-        let mut saw = Saw(None);
-        let world = interactive_world(&mut session).unwrap();
-        let why = [AuditReason::Explosion];
-        assert_eq!(
-            auditor.audit(world, &why, &mut &mut saw),
-            AuditVerdict::Clean
-        );
-        let ran = saw.0.unwrap();
-        assert!(ran.owners.contains(&campaign::SCRIPTED_DOOR), "{ran:?}");
-        assert!(ran.owners.contains(&campaign::FRIEND), "{ran:?}");
-        assert!(!ran.owners.contains(&campaign::FOE), "{ran:?}");
     }
 
     /// SPEC-003 moves a grid to the world map up by 16 on every read. That is
@@ -2367,8 +3056,9 @@ mod tests {
         assert!(!shifted_exit_art(&grid(3, art(16)), &grid(3, art(32))));
     }
 
-    /// The load's gender update takes the player's pose away and leaves the
-    /// rest of the art.
+    /// SPEC-005 §3.8: the gender update takes the pose of a player with no
+    /// armor on and leaves the rest of the art, keeping the weapon code only
+    /// while a hand holds something.
     #[test]
     fn autoplay_only_the_pose_of_the_player_art_may_go() {
         let row = |art: Fid| ObjectRow {
@@ -2385,12 +3075,58 @@ mod tests {
             holder: None,
             contents: BTreeMap::new(),
         };
+        let bare = PlayerGear::default();
+        let armed = PlayerGear {
+            holding: true,
+            ..bare
+        };
         let posed = row(Fid::new(1, 11, 0x22, 0, 6));
-        assert!(rebuilt_player_art(&posed, &row(Fid::new(1, 11, 0, 0, 0))));
-        assert!(!rebuilt_player_art(&posed, &row(Fid::new(1, 12, 0, 0, 0))));
-        assert!(!rebuilt_player_art(&posed, &row(Fid::new(1, 11, 1, 0, 0))));
-        let armed = row(Fid::new(1, 11, 0, 3, 0));
-        assert!(!rebuilt_player_art(&armed, &row(Fid::new(1, 11, 0, 4, 0))));
+        assert!(rebuilt_player_art(
+            &posed,
+            &row(Fid::new(1, 11, 0, 0, 0)),
+            bare
+        ));
+        assert!(!rebuilt_player_art(
+            &posed,
+            &row(Fid::new(1, 12, 0, 0, 0)),
+            bare
+        ));
+        assert!(!rebuilt_player_art(
+            &posed,
+            &row(Fid::new(1, 11, 1, 0, 0)),
+            bare
+        ));
+        let held = row(Fid::new(1, 11, 0x22, 3, 6));
+        assert!(rebuilt_player_art(
+            &held,
+            &row(Fid::new(1, 11, 0, 3, 0)),
+            armed
+        ));
+        assert!(!rebuilt_player_art(
+            &held,
+            &row(Fid::new(1, 11, 0, 0, 0)),
+            armed
+        ));
+        assert!(rebuilt_player_art(
+            &held,
+            &row(Fid::new(1, 11, 0, 0, 0)),
+            bare
+        ));
+        assert!(!rebuilt_player_art(
+            &held,
+            &row(Fid::new(1, 11, 0, 3, 0)),
+            bare
+        ));
+        // A worn armor leaves the art alone.
+        let worn = PlayerGear {
+            armored: true,
+            ..bare
+        };
+        assert!(!rebuilt_player_art(
+            &posed,
+            &row(Fid::new(1, 11, 0, 0, 0)),
+            worn
+        ));
     }
 
     /// A dead player ends the run, and that is no failure: nothing is left

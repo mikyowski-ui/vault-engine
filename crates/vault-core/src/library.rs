@@ -50,7 +50,7 @@ pub struct NamedBinding {
     pub hits: u32,
     pub busy: bool,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LibraryState {
     pub windows: BTreeMap<Vec<u8>, ManagedWindow>,
     pub current: i32,

@@ -2,20 +2,21 @@
 //! agent's determinism, the tactician, the goal spine, and the chaos audit,
 //! whose every check is also made to fail.
 use crate::{
-    CharacterSheet, EnginePreset, ObjectRef, WorldEffect, WorldHost, WorldState,
+    CharacterSheet, EnginePreset, GameProfile, ObjectRef, WorldEffect, WorldHost, WorldState,
     assets::VfsWorldAssets,
     autoplay::{AutoplayAgent, BotAction, BotOutcome, BotScreen, BotStatus, BotVerb, BotView},
     critical::{hit_mode, location},
     dialogue::{DialogueOption, DialogueText},
     fallout2::Fallout2World,
     host_choreography::Playback,
+    host_save::SaveInfo,
     queue::EventKind,
     skills::{self, skill},
     test_support::{dir_assets, hp, patched, set_hp},
 };
 use vault_fixtures::campaign::{self, Edition};
 use vault_formats::{
-    HexGrid,
+    AutomapDb, HexGrid,
     map::{ObjectDetail, ObjectState},
     pro::{BasicFlags, LockFlags},
 };
@@ -43,8 +44,11 @@ fn seeded_host(edition: Edition, seed: i32) -> (tempfile::TempDir, Host) {
     host.interactive_dialogue = true;
     host.load_campaign().unwrap();
     if edition == Edition::Fallout2 {
+        host.set_game_profile(GameProfile::Fallout2);
         let tables = host.load_fallout2_tables().unwrap();
         let start = tables.maps.match_name(b"artemple.map");
+        host.world.persistence.automap =
+            AutomapDb::fallout2(|map| tables.maps.excluded(map as i32));
         host.world.fallout2 = Some(Box::new(Fallout2World::new_game(tables, start)));
     }
     host.load_map(&campaign::start(edition)).unwrap();
@@ -914,6 +918,94 @@ fn the_spine_walks_the_campaign_to_the_world_map() {
         });
         assert_eq!(run.status().violation, None);
     }
+}
+
+/// The player's elevation.
+fn elevation(host: &Host) -> u8 {
+    host.world.get(host.world.player).unwrap().raw.elevation
+}
+
+/// A second host holding what `host` saves, loaded: `host` and it must agree
+/// on where the player stands, and a load of that load on the hash.
+fn reloaded(host: &mut Host, corpus: &std::path::Path, edition: Edition) {
+    let mut second = WorldHost::new(
+        WorldState::new(CharacterSheet::default(), 1).unwrap(),
+        dir_assets(corpus),
+    );
+    second.load_campaign().unwrap();
+    if edition == Edition::Fallout2 {
+        second.set_game_profile(GameProfile::Fallout2);
+        let tables = second.load_fallout2_tables().unwrap();
+        let start = tables.maps.match_name(b"artemple.map");
+        second.world.fallout2 = Some(Box::new(Fallout2World::new_game(tables, start)));
+    }
+    let place = |host: &Host| {
+        let player = host.world.get(host.world.player).unwrap();
+        (player.raw.hex, player.raw.elevation, host.world.elevation)
+    };
+    let mut image = host.slot_image(&SaveInfo::default()).unwrap();
+    second.world.rng = host.world.rng.clone();
+    second.load_slot(&mut image).unwrap();
+    assert_eq!(place(&second), place(host), "{edition:?}");
+    let first = second.world.state_hash();
+    let mut again = second.slot_image(&SaveInfo::default()).unwrap();
+    second.world.rng = host.world.rng.clone();
+    second.load_slot(&mut again).unwrap();
+    assert_eq!(second.world.state_hash(), first, "{edition:?}");
+    assert_eq!(place(&second), place(host), "{edition:?}");
+}
+
+/// The bot takes the ladder up and comes back by the one down, the script of
+/// each moving it (SPEC-013 §3.23), with the chaos audit on and a save of
+/// either elevation loading back to where it stood.
+#[test]
+fn the_bot_climbs_to_the_second_elevation_and_back() {
+    for edition in [Edition::Fallout1, Edition::Fallout2] {
+        let mut run = Run::new(edition, 7, true);
+        let climbed = |run: &Run, target: u32| {
+            run.did(|action| {
+                matches!(action, BotAction::Interact { target: id, verb: BotVerb::Use }
+                    if *id == target)
+            })
+        };
+        assert_eq!(elevation(&run.host), 0);
+        run.until(20_000, |run| elevation(&run.host) == 1);
+        assert!(climbed(&run, campaign::LADDER_UP), "{edition:?}");
+        assert_eq!(hex(&run.host), campaign::UPPER_LANDING, "{edition:?}");
+        assert_eq!(run.host.world.elevation, 1, "{edition:?}");
+        let corpus = run._dir.path().to_path_buf();
+        reloaded(&mut run.host, &corpus, edition);
+        run.until(4000, |run| elevation(&run.host) == 0);
+        assert!(climbed(&run, campaign::LADDER_DOWN), "{edition:?}");
+        assert_eq!(hex(&run.host), campaign::LOWER_LANDING, "{edition:?}");
+        reloaded(&mut run.host, &corpus, edition);
+        let status = run.status();
+        assert_eq!(status.violation, None, "{edition:?}");
+        assert_eq!(status.abandoned, 0, "{edition:?}: {status:#?}");
+    }
+}
+
+/// A ladder up is the bot's before the exit grid, and each ladder is tried once.
+#[test]
+fn a_ladder_comes_before_the_way_out_and_only_once() {
+    let mut run = Run::new(Edition::Fallout1, 7, false);
+    // A walk to the foe crosses the exit grid, and the map is left early.
+    let foe = object(&run.host, campaign::FOE);
+    run.host.world.erase(foe);
+    let first = run.host.world.current_map_name();
+    run.until(20_000, |run| run.host.world.current_map_name() != first);
+    let uses: Vec<u32> = run
+        .actions
+        .iter()
+        .filter_map(|action| match action {
+            BotAction::Interact {
+                target,
+                verb: BotVerb::Use,
+            } if [campaign::LADDER_UP, campaign::LADDER_DOWN].contains(target) => Some(*target),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(uses, [campaign::LADDER_UP, campaign::LADDER_DOWN]);
 }
 
 #[test]

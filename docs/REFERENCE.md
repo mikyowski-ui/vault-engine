@@ -20,7 +20,7 @@ Each holds the `vault-engine` binary, the README, this reference
 (`docs/REFERENCE.md`), `LICENSE`, `PROVENANCE.md` and the example mod layer
 `mods/tactical-camera/`, the
 enhanced widescreen camera at 1.25× with the cursor X-ray. Add it in the
-launcher's Mods tab. Unpack the archive anywhere and run `vault-engine`;
+launcher's **Paths & Mods** pill. Unpack the archive anywhere and run `vault-engine`;
 the launcher opens to find your games.
 - **Linux** needs ALSA (`libasound2`) and a Wayland or X11 session at
   run time.
@@ -42,9 +42,9 @@ cargo run -p vault-platform --release
    **launcher** opens instead.
 2. **Launcher.** Point it at your installs: type a path, use **Browse**, or
    drop `MASTER.DAT` or the game folder on the window. The **Game** row
-   toggles `fallout1` and `fallout2`, and the Display & audio tab sets the
-   preset, the viewport, the zoom and the Touch UI. **Play** saves and
-   starts. To open it again later, run:
+   toggles `fallout1` and `fallout2`, the **Enhanced & Visuals** pill sets the
+   preset, the viewport and the zoom, and **Audio & Input** sets the Touch UI.
+   **Play** saves and starts. To open it again later, run:
 
    ```sh
    cargo run -p vault-platform --release -- --launcher
@@ -158,7 +158,11 @@ an unreadable file is an error, not a pass.
 
 The dev profile builds `vault-formats` and `vault-core` at `opt-level = 2`, so
 debug runs of the desktop decode, decompress, light and route at near-release
-speed while the other crates keep full debug builds.
+speed. External dependencies also build at `opt-level = 2`, with no debug info.
+Every workspace crate, in both the dev and test profiles, keeps line tables only
+(`debug = "line-tables-only"`): enough for backtraces, at about 60% less `target/`
+space than full debug info. The dev profile unpacks split debug info, and other
+workspace crates stay at the default `opt-level`.
 
 CI (`.github/workflows/ci.yml`, read-only permissions, cached builds, every
 Cargo command `--locked`) runs these jobs on each push and pull request:
@@ -405,10 +409,9 @@ manifests and the settings for that boot, and `preset` joins the same commit. Wi
 toggle, `preset` is not written, and at a later start a manifest can win again.
 Toggling back is no toggle.
 
-`S  Setup` opens the launcher on its Game data tab, with the highlighted edition in
-its Game row, and **S**, **Tab** or a click opens it. Choosing a mod stack happens
-there, on the Mods tab, because the engine keeps one load order for each settings
-file and has no named mod profiles. Its Quit button reads **Back**, which returns to
+`S  Setup` opens the launcher on its **Paths & Mods** pill, with the highlighted
+edition in its Game row, and **S**, **Tab** or a click opens it. Choosing a mod stack
+happens there, and each profile keeps its own load order. Its Quit button reads **Back**, which returns to
 the boot menu and looks for the installs again, forgetting a toggle. Save works as it
 always does. Play counts as a choice, and also sets `last_played`.
 
@@ -429,7 +432,8 @@ works here too, and the session stays stopped under it: Save and Back leave it a
 Alt+L does nothing until Back, and Play is a switch. Then the session ends as
 at quit, with nothing saved: its log ends, and the world, its scripts, its decoded
 assets and its `Vfs` go with it. The new one is a cold start of that edition, and is
-not recorded. Only the window, the renderer and the storage carry over. Of the
+not recorded. Only the window and the renderer carry over, and the new session
+builds its own storage on its profile's save root. Of the
 command line, only `--scaling`, `--fullscreen`, `--touch-ui`, `--preset`, `--viewport`,
 `--zoom`, `--render-path` and `--no-audio` cross a switch, so a session started with
 `--sfall` or `--master-dat` does not pass them on: the settings file and manifests
@@ -532,7 +536,10 @@ and `--play-movie` flags never show it, and `--launcher` conflicts with them.
 A Shift-held-at-startup trigger is not offered: winit reports modifiers only
 through later events, not when the window opens.
 
-It has three tabs and a bottom bar:
+It is the Studio: a card for each profile, four pills and a bottom bar. The
+**Paths & Mods** pill shows the first and last of the lists below together.
+SPEC-020 section 2.7 has the rest, and [The launcher studio](#the-launcher-studio)
+the settings.
 
 - **Game data**: `MASTER.DAT`, `CRITTER.DAT` and the data folder. Each takes
   typed text, **Browse** (a built-in folder browser over `std::fs`), or a file
@@ -553,14 +560,12 @@ It has three tabs and a bottom bar:
     its data discovered as above (and a start whose active game has none does
     the same, showing the launcher with what it found). Save and Play write
     both profiles.
-- **Display & audio**: two columns of evenly spaced rows, with one help
-  line below them for the focused (else hovered) row.
-  - **Left column:** scaling (`aspect_fit` or `integer`), fullscreen, the
-    touch UI, preset (`vanilla` or `enhanced`), audio on or off, the debug
-    overlay, and hotkey hints (`Once`, `Always` or `Off`), under both presets.
-  - **Right column, enhanced preset only:** these rows are hidden, and out
-    of the focus order, under Vanilla, where the column says how to show
-    them.
+- **Enhanced & Visuals**: the built-in and saved presets, then rows of
+  settings, with a help card beside them for the focused (else hovered) row.
+  - **Under both presets:** preset (`vanilla` or `enhanced`), scaling
+    (`aspect_fit` or `integer`) and fullscreen.
+  - **Enhanced preset only:** these rows are hidden, and out of the focus
+    order, under Vanilla.
     - **Widescreen:** `On`, or `Off (4:3 Classic)`, the
       `viewport_mode`; Alt+V toggles it in play too.
     - **Default zoom:** a stepper over 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5
@@ -569,8 +574,12 @@ It has three tabs and a bottom bar:
     - **Roof peek mode.**
     - **Interface scale:** auto, 1, 1.5, 2, 2.5 or 3.
     - **Game speed:** 1.0x, 1.5x or 2.0x.
+    - **Tactical overlay.**
 
   Left and Right step the rows back and forth; Save writes them.
+- **Audio & Input**: audio on or off, the touch UI, and hotkey hints (`Once`,
+  `Always` or `Off`), under both presets.
+- **Debug & Replays**: the debug overlay, and notes on the bot and on replays.
 - **Mods**: the `load_order.toml` layers, lowest first, with their per-layer
   check (each layer is mounted on its own over an empty base) and the whole
   stack's check. Layers can be added (typed, browsed or dropped while the tab
@@ -642,7 +651,7 @@ table overrides.
 A touch layer for phones and tablets, testable on a desktop touch screen
 (or with a mouse, for the on-screen buttons). It is off by default; turn it
 on with `--touch-ui`, `touch_ui = true` in `vault-engine.toml`, or the
-**Touch UI** row of the launcher's Display & audio tab. The flag wins over
+**Touch UI** row of the launcher's **Audio & Input** pill. The flag wins over
 the file, as `--fullscreen` does.
 
 It works under both presets, and panning and zooming do too. Under
@@ -1124,7 +1133,7 @@ A setup can be exported as a ready-to-share mod folder in two ways:
   [--export-from DIR]...`.
 
 Both write the folder's `vault-mod.toml`, a `README.txt` on loading it in
-the launcher's Mods tab, and the setup's files:
+the launcher's **Paths & Mods** pill, and the setup's files:
 
 - every `data/vault-engine/<table>.txt` override in the game data, mod layers
   or `--from` folders;
@@ -1333,6 +1342,13 @@ underflow at `start_gdialog` (`0x80de`). On the owner's retail Fallout 2
 install the `fallout2` table gives 1248 scripts (40 listed ones absent),
 29956 units and 0 findings; that audit is recorded in SPEC-017 Revision 3,
 which opens the §8.5 gate, so Fallout 2 scripts run.
+
+`--sfall-gap-report --fallout2-dir <install>` ranks the sfall words and hooks the
+folder's `.INT` scripts use that are stubbed, unimplemented or unresolved, by scripts
+affected and then uses, with `--mod-layer` for a mod on top. It prints counts and
+names only. It reads what the files contain, not what a run reaches, so guarded
+code counts and a computed hook ID shows as `unresolved`. `--validate-dat` reads
+DAT1 and DAT2.
 
 `--report-fallout2-install --fallout2-dir <install>` checks a Fallout 2
 install over SPEC-018 §1's mount (its loose `data` folder as the data root):
@@ -2230,7 +2246,7 @@ changes, loads and new games); a script without `critter_p_proc` runs procedure
 1, and programs stopped by a VM error or suspended are skipped. A map's entrance
 placement checks exit grids like any placement (SPEC-013 §3.22).
 
-The extension ABI is compiled from the approved SPEC-005 table at build time.
+The extension ABI is compiled at build time from `oracle/SPEC-005/host-opcodes.tsv`, which a test holds to the approved SPEC-005 table.
 All 266 slots are present: 264 registered words and holes `0x807D`/`0x807E`.
 `vault-vm::extensions` preserves raw tags, uses mask `0xF7FF`, implements the
 I/S/F/U/O/N/C/T checks and variable region arity, and does not synthesize statement
@@ -2320,8 +2336,7 @@ goal, and charges 1/4/8 AP per hex (free movement first) in combat.
 `combat` holds the explicit attack arithmetic: AP costs and ranges, the exact hit
 chance (no lower cap; ammunition AC/DR/multiplier/divisor are not consumed), the
 first-day-gated critical upgrade and forced upgrades, the 864 critical-success
-entries and failure masks (compiled from the approved specification at build
-time), per-round DT/DR damage, knockback that stops one hex short of the first
+entries and failure masks (compiled at build time from the `oracle/SPEC-007/` tables), per-round DT/DR damage, knockback that stops one hex short of the first
 blocker (safe rule; the reference's double decrement stops two short),
 burst/continuous sprays (budgets, direct trials, side rays, extra targets at
 normal scale), death-animation selection (a rear hit falls back to 21 when
@@ -2476,7 +2491,7 @@ the thumbnail and host date/time (`SaveInfo`). The base calendar year is
 non-leap month/day calendar.
 
 `worldmap` compiles the terrain, frequency, and region grids, the town table,
-and the hotspot catalog from the approved specification at build time. It
+and the hotspot catalog from the `oracle/SPEC-008/` tables at build time. It
 implements the asymmetric pixel stepper (the X-major branch can finish one Y
 pixel short), W/Q travel speed (binary32, with the Pathfinder factor in binary64;
 Outdoorsman is clamped below at 0 and Pathfinder ranks to 0-4 under the safe
@@ -3396,9 +3411,18 @@ vault-platform --autoplay-headless --corpus-dir DATA --preview-map maps/NAME.map
   --ticks 50000 --seed 42 --chaos-doors-c4 --autoplay-output run
 vault-platform --replay-bundle run
 
+# The same run on a settings profile: its edition, data, linked data, mods and sfall.
+vault-platform --autoplay-headless --profile ettu --preview-map maps/NAME.map \
+  --ticks 50000 --seed 42 --chaos-doors-c4
+
 # Watch Mode: the bot plays the visible game.
 vault-platform --autoplay-watch --game
 ```
+
+A headless run starts on the map `--preview-map` names, and `--game` does not stand in
+for it. `--profile` reads the settings and writes nothing. A name the settings do not
+have is an error. The rules stay Vanilla whatever the profile says, because a bundle
+holds no Enhanced settings to replay them with.
 
 `--autoplay-output` receives `inputs.jsonl`, `checkpoints.tsv`, `manifest.json` and
 `report.txt`, cut at the failing tick if a run fails. A run ends at its tick budget,
@@ -3840,7 +3864,7 @@ procedure = "ap_cost"  # default start
 
 `id` and `api` are needed with any of those three tables. `file` is a base name under
 `scripts/`, up to 32 letters, digits, `_` and `-`, then `.int` in any case. `point` is
-a name from `tests/fixtures/spec024a/hook-points.tsv`, as exact bytes. A layer with
+a name from `oracle/SPEC-024/hook-points.tsv`, as exact bytes. A layer with
 `[settings]` and no script row is valid and not scripted.
 
 Each of these stops the launch with `mod_list:` and the folder's name, and the

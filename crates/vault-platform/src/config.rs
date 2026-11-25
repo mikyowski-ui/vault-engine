@@ -511,7 +511,7 @@ pub struct Config {
     /// game's paths are, and put back by [`Config::switch_game`]. A launch
     /// reads this field, so it can only see the game it runs.
     pub mod_list: Option<ModList>,
-    /// The game whose data this is; only Fallout 1 runs today.
+    /// The game whose data this is.
     pub game: Option<GameProfile>,
     /// `profile`: the custom profile its edition runs under, kept as
     /// written. An edition's own name selects no custom profile.

@@ -6,6 +6,7 @@ Vectors backing `SPEC-024b-sfall-opcodes-arrays-and-hooks.md` section 7. These h
 | --- | --- |
 | `sfall-opcodes.tsv` | 449 rows: all 300 words `0x8156` to `0x8281`, 133 `sfall_funcN` rows, 7 `metarule3` rows, 9 `metarule2_explosions` rows |
 | `sfall-hooks.tsv` | 50 hooks plus the reserved range 49-60 |
+| `hook-points.tsv` | 51 rows: the SPEC-024a hook list, with every row of `sfall-hooks.tsv` and a `fires` column. Team A wrote it, not the research vault. It moved here from `tests/fixtures/spec024a/` because `vault-formats` compiles it in |
 | `sfall-array-vectors.tsv` | 371 rows: array vectors A to F3, hook-chain vectors H1 to H33, vectors V1 to V4, U1, M1, T1, and E1 for the rows promoted in Revision 3, sidecar migration vectors MG1 and MG2, string-value vectors SS1 and SS2, and vectors W1 to W30 for the words promoted in Revision 4 |
 | `mod-opcode-usage.tsv` | 108 rows: every Tier P2 opcode row and hook the two target mods use, ranked. This is evidence, not a test input |
 

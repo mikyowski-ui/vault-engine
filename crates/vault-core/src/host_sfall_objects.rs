@@ -4,7 +4,7 @@ use crate::{assets::WorldAssets, host::WorldHost, world::ObjectRef};
 use std::sync::Arc;
 use vault_formats::{
     map::{ObjectDetail, ObjectState},
-    pro::{ExtendedFlags, ItemData, Light, Prototype, PrototypeData},
+    pro::{BasicFlags, ExtendedFlags, ItemData, Light, Prototype, PrototypeData},
 };
 
 /// One prototype field, read and written as a 32-bit value.
@@ -284,15 +284,16 @@ impl<A: WorldAssets> WorldHost<A> {
             self.world.set_object_id(object, value as u32);
             return;
         }
+        if offset == 0x04 {
+            self.sfall_set_hex(object, value);
+            return;
+        }
         let Some(found) = self.world.get_mut(object) else {
             return;
         };
         let raw = &mut found.raw;
+        let was_flat = raw.flags.contains(BasicFlags::FLAT);
         let done = match offset {
-            0x04 => {
-                raw.hex = (value >= 0).then_some(value);
-                true
-            }
             0x18 => {
                 raw.frame = value.max(0) as usize;
                 true
@@ -382,9 +383,33 @@ impl<A: WorldAssets> WorldHost<A> {
                 _ => false,
             },
         };
+        // SPEC-014 §3.44: a new elevation is another group of the hex list,
+        // and so is a flip between flat and not flat.
+        if offset == 0x28 || found.raw.flags.contains(BasicFlags::FLAT) != was_flat {
+            self.world.reinsert(object);
+        }
         if !done {
             self.world.diagnostic(format!(
                 "set_object_data: offset {offset:#x} of {object:#x} is not a listed field"
+            ));
+        }
+    }
+    /// A hex write is a move to that hex on the object's own elevation, so
+    /// the object goes to the end of its group there (SPEC-014 §3.44). A
+    /// negative value takes it off the map, and a hex past the map is refused
+    /// with a diagnostic, as no save could write it.
+    fn sfall_set_hex(&mut self, object: ObjectRef, value: i32) {
+        let Some(found) = self.world.get_mut(object) else {
+            return;
+        };
+        if value < 0 {
+            found.raw.hex = None;
+            return;
+        }
+        let elevation = found.raw.elevation;
+        if let Err(error) = self.world.move_object(object, value, elevation, false) {
+            self.world.diagnostic(format!(
+                "set_object_data: hex {value} of {object:#x}: {error}"
             ));
         }
     }
@@ -402,7 +427,96 @@ impl<A: WorldAssets> WorldHost<A> {
 
 #[cfg(test)]
 mod tests {
-    use crate::spec024_tests::sfall_host;
+    use crate::{WorldEffect, spec024_tests::sfall_host, test_support::npc_prototype};
+    use vault_formats::pro::BasicFlags;
+
+    const HEX: i32 = 20010;
+
+    /// The object IDs a save writes for `HEX`, in file order.
+    fn written_ids<A: crate::assets::WorldAssets>(host: &crate::host::WorldHost<A>) -> Vec<u32> {
+        host.world.export_map(false).objects.elevations[0]
+            .iter()
+            .filter(|object| object.hex == Some(HEX))
+            .map(|object| object.id)
+            .collect()
+    }
+    /// A flat object and two others on `HEX`, all inserted after `me`.
+    fn neighbors<A: crate::assets::WorldAssets>(host: &mut crate::host::WorldHost<A>) -> Vec<u32> {
+        let placed: Vec<_> = (0..3)
+            .map(|_| host.world.spawn(npc_prototype(), HEX, 0).unwrap())
+            .collect();
+        for object in &placed {
+            let found = host.world.get_mut(*object).unwrap();
+            found.raw.flags = BasicFlags(0);
+        }
+        host.world.set_flat(placed[2], true);
+        [placed[2], placed[0], placed[1]]
+            .map(|object| host.world.get(object).unwrap().raw.id)
+            .to_vec()
+    }
+
+    #[test]
+    fn spec014_a_hex_write_sorts_last_on_its_hex_after_a_save() {
+        let (mut host, me) = sfall_host();
+        host.world.get_mut(me).unwrap().raw.flags = BasicFlags(0);
+        let mut order = neighbors(&mut host);
+        host.world.set_offset(me, [3, 4]);
+
+        host.sfall_object_set(me, 0x04, HEX);
+        assert_eq!(host.sfall_object_get(me, 0x04), HEX);
+        assert_eq!(host.world.get(me).unwrap().raw.displacement, [0; 2]);
+        order.push(host.world.get(me).unwrap().raw.id);
+        assert_eq!(written_ids(&host), order);
+
+        // A write of the hex it is on moves it to the end all the same.
+        let first_other = host.world.reference_for_id(order[1]).unwrap();
+        host.sfall_object_set(first_other, 0x04, HEX);
+        let moved = order.remove(1);
+        order.push(moved);
+        assert_eq!(written_ids(&host), order);
+    }
+    #[test]
+    fn spec014_elevation_and_flat_writes_reinsert_the_object() {
+        let (mut host, me) = sfall_host();
+        host.world.get_mut(me).unwrap().raw.flags = BasicFlags(0);
+        host.world.get_mut(me).unwrap().raw.elevation = 1;
+        host.sfall_object_set(me, 0x04, HEX);
+        let mut order = neighbors(&mut host);
+        let id = host.world.get(me).unwrap().raw.id;
+
+        host.sfall_object_set(me, 0x28, 0);
+        order.push(id);
+        assert_eq!(written_ids(&host), order);
+
+        // Into the flat group's end, through `set_flags`' path.
+        host.sfall_object_set(me, 0x24, BasicFlags::FLAT.0 as i32);
+        order.pop();
+        order.insert(1, id);
+        assert_eq!(written_ids(&host), order);
+        // A flags write that keeps the class does not reinsert.
+        let flat = host.world.reference_for_id(order[0]).unwrap();
+        let flags = host.world.get(flat).unwrap().raw.flags.0;
+        host.sfall_object_set(flat, 0x24, (flags | 1) as i32);
+        assert_eq!(written_ids(&host), order);
+    }
+    #[test]
+    fn spec024b_a_hex_write_past_the_map_changes_nothing() {
+        let (mut host, me) = sfall_host();
+        host.world.set_offset(me, [3, 4]);
+        let stamp = host.world.insertion(me);
+        host.sfall_object_set(me, 0x04, 40000);
+        let found = host.world.get(me).unwrap();
+        assert_eq!(found.raw.hex, Some(20000));
+        assert_eq!(found.raw.displacement, [3, 4]);
+        assert_eq!(host.world.insertion(me), stamp);
+        assert!(matches!(
+            host.world.effects.back(),
+            Some(WorldEffect::Diagnostic(text)) if text.contains("hex 40000")
+        ));
+
+        host.sfall_object_set(me, 0x04, -1);
+        assert_eq!(host.sfall_object_get(me, 0x04), -1);
+    }
 
     /// `reference_for_id` walks the objects, so only the uniqueness check of
     /// an insert shows what the ID index believes.

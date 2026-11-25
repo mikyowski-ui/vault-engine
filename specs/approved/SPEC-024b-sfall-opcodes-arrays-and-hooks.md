@@ -1,6 +1,6 @@
 # SPEC-024b: sfall Extended Opcodes, Dynamic Arrays, and Hook Scripts
 
-**Status:** research hand-off, Revision 5, 2026-10-31. Revision 1 was ingested on the owner's brief of 2026-10-30, which approves Decision D-3, and Revision 2 (Team A) made that amendment. Revision 3, built on Revision 2's text with Team A's prose correction merged, and Revision 4 have been ingested. Revision 5 (Team A) carries in SPEC-024c section 5 and the implementer's notes. See "Revision history".
+**Status:** research hand-off, Revision 5, 2026-10-31. Revision 1 was ingested on the owner's brief of 2026-10-30, which approves Decision D-3, and Revision 2 (Team A) made that amendment. Revision 3, built on Revision 2's text with Team A's prose correction merged, and Revision 4 have been ingested. Revision 5 (Team A) carries in SPEC-024c section 5 and the implementer's notes. Revision 6 (2026-11-01), by the implementing side as an owner instruction, records per-profile `sfall` and the array caps. See "Revision history".
 
 **Provenance:** written on the research side from the published sfall scripting documentation at tag v4.5.1 (reference revision S1): the opcode list, the function reference, the function notes, the hook reference, the arrays guide, the compiler guide, and the public script headers. The engine's own approved specs supplied the anchors. sfall's implementation code was **not** read, and nothing here was checked against a running sfall or against Et Tu or Restoration Project scripts (Decisions D-1 and D-26).
 
@@ -11,6 +11,8 @@
 **Provenance of Revision 4.** Written on the research side from the published sfall documents and headers of revision S1, *Fallout Et Tu* 2.0.3911's scripts and script list, the approved specs in the research vault, and the owner's measurements of an installed *Fallout Et Tu* (brief of 2026-10-31). sfall's implementation code was still **not** read. SPEC-018 and SPEC-019 were not re-read for this revision, so their sections are cited as earlier revisions recorded them (Decision D-58).
 
 **Provenance of Revision 5.** Author: the Spec-Author sub-agent (Team A), 2026-10-31, on the owner's brief of 2026-10-31. Sources: the owner's brief; this spec; SPEC-024c; SPEC-007, SPEC-008, SPEC-018, and SPEC-019, for Decision D-58's anchors; and the implementer's notes in `docs/REFERENCE.md`. No decompilation, disassembly, re-implementation source, game asset, or engine Rust code was used, and no sfall material was consulted on this side.
+
+**Provenance of Revision 6.** The owner ended the Team A/B split on 2026-11-01, and this revision is an owner instruction, on the owner's brief for Phase B of that date. The implementing side wrote it, after reading the engine's code, so this is the first revision for which engine Rust code was read. It states what the code does. Its sources are the owner's brief, this spec, SPEC-020, SPEC-023, and the engine's own code. No decompilation, disassembly, re-implementation source, or game asset was used, and no sfall material was consulted.
 
 **Oracle:** `oracle/SPEC-024/` holds the complete tables and computed vectors. Section 7 says how they relate to this text. Revision 3 changes three oracle files and adds a fourth.
 
@@ -52,6 +54,11 @@
   - **Section 6.19.** `HOOK_CARTRAVEL`'s arg0 is the engine's step count from SPEC-019: 1, 2, or 4.
   - No word number, stack contract, tier, vector, or oracle file changes.
 - **Amendment to Revision 5 (2026-11-01).** On the owner's brief of 2026-11-01, which caps list creation and growth (Decision D-60). The implementing agent recorded this on that brief's instruction; Team A did not write it. No word number, stack contract, tier, vector, or oracle file changes.
+- **Revision 6 (2026-11-01, the implementing side).** On the owner's brief for Phase B of the same day, as an owner instruction. The Team A/B split ended that day.
+  - **Section 3.1.** The settings file's `sfall` belongs to one profile, and the old `[scripting]` key reads as Fallout 2's (Decision D-61).
+  - **Sections 5.4 and 9.** The size rows name Decision D-60's caps, and D-60 gains the total cap.
+  - **Section 5.8.** The refusal row gains the saved next-array ID rules, and the other refusals the code makes (Decision D-62).
+  - No word number, stack contract, tier, vector, or oracle file changes.
 
 ## Clean-Room Rules for Research Agents
 
@@ -147,10 +154,10 @@ SPEC-004 and SPEC-005 conventions apply unless a rule here says otherwise. `[Mus
 ### 3.1 Activation
 
 - **sfall mode** is a session setting, off by default. `[Safe rule]`, as an owner instruction (Decision D-3).
-- **Settings file.** `sfall = true` under `[scripting]` in `vault-engine.toml`. The key name is a default. `[Safe rule]`
-- **Mod manifest.** The same table and key in a layer's `vault-mod.toml`, which adds them to the manifest's grammar. They work as `[enhanced]` keys do: only enabled layers count, they apply over the settings file with the lowest layer first, and the highest layer that sets the key wins. `[Safe rule]`
+- **Settings file (Revision 6).** `sfall = true` in a `[profiles.*]` table of `vault-engine.toml`: `[profiles.fallout2]`, or a custom profile such as `[profiles.ettu]` (SPEC-020 section 2.7). Each profile has its own value, so one Fallout 2 profile can run with sfall mode and another without. The key name is a default. An older file's `sfall = true` under `[scripting]` still reads, as `[profiles.fallout2]`'s value unless that table sets its own, and the next commit moves it there. `[Safe rule]` (Decision D-61)
+- **Mod manifest.** `sfall` under `[scripting]` in a layer's `vault-mod.toml`, which adds them to the manifest's grammar. They work as `[enhanced]` keys do: only enabled layers count, they apply over the running profile's value with the lowest layer first, and the highest layer that sets the key wins. `[Safe rule]`
 - **Command line.** `--sfall` turns it on and wins over both files. A replay reads neither file, so a replay of an sfall session needs this flag. `[Safe rule]`
-- It is accepted only under the `fallout2` profile. *Et Tu 2.0* and *Restoration Project Updated* both run on Fallout 2 data. Requesting it under `fallout1` is refused when the session is built, with an explicit error. `[Safe rule]`
+- It is accepted only under the `fallout2` game profile, which a custom profile with `edition = "fallout2"` runs. *Et Tu 2.0* and *Restoration Project Updated* both run on Fallout 2 data. Requesting it under `fallout1` is refused when the session is built, with an explicit error. `[Safe rule]`
 - It is fixed when the session is built. Loading a save does not change it. `[Safe rule]`
 - As SPEC-017 section 2.3 requires, a word's meaning comes from the session and never from inspecting a script. `[Must-match]`
 
@@ -811,7 +818,7 @@ The operand classes here are the `arg_classes` column's. Section 4.1 relates the
 
 **Creation.**
 
-- `size >= 0` makes a list of that many int 0 values. `[Must-match]`
+- `size >= 0` makes a list of that many int 0 values, up to Decision D-60's caps. Above them it makes no array and pushes 0. `[Must-match]`; `[Safe rule]` above the caps
 - `size == -1` makes a map, and `flags == 2` makes it a lookup map. `[Must-match]`
 - `flags` is ignored for a list. **Compiler output passes nonzero values here**, such as `temp_array(4, 2)` for a list. `[Must-match]`
 - Any other flags on a map give an ordinary map. `size < -1` makes no array and pushes 0. `[Safe rule]`
@@ -835,7 +842,7 @@ The operand classes here are the `arg_classes` column's. Section 4.1 relates the
 
 | Size | Operation |
 | --- | --- |
-| Above current length, list | Appends int 0 values. `[Must-match]` |
+| Above current length, list | Appends int 0 values, up to Decision D-60's caps. Past them nothing changes, with a diagnostic. `[Must-match]`; `[Safe rule]` past the caps |
 | Above current length, map | Nothing changes. `[Must-match]` |
 | 0 up to current length | Keeps the first `size` entries of iteration order. `[Must-match]`; `[Safe rule]` for which entries |
 | -2 | Sort ascending; a list by value, a map by key. `[Must-match]` |
@@ -950,7 +957,8 @@ The type bytes equal `typeof`'s results.
 | Sfall mode on, revision 1 sidecar present and valid | Migrates, as below |
 | Sfall mode on, no sidecar | Empty state, next array ID 1, next unique ID `0x10000000`, no pending encounter. A vanilla save can start using sfall |
 | Sfall mode off, sidecar of either revision present | Refuses the slot, with an explicit message: its programs were written for other word meanings |
-| Bad tag, a revision other than 1 or 2, truncation, trailing bytes, unknown type byte, a duplicate ID, or a shape byte outside 0-1 | Refuses the slot, with an explicit message. Saved data is never dropped silently |
+| Bad tag, a revision other than 1 or 2, truncation, trailing bytes, unknown type byte, a duplicate ID, a shape byte outside 0-1, a storage byte outside 0-2, an option byte outside 0-1, or a global key that is neither an int nor an 8-byte string (Revision 6) | Refuses the slot, with an explicit message. Saved data is never dropped silently |
+| A next array ID of either revision that is 0, that is above `2^31` (one past the last ID an int can hold), or that is not above every saved ID (Revision 6) | Refuses the slot in the same way. The check runs last, against the arrays read. A next ID of `2^31` is allowed: it means the IDs have run out, so the next creation makes no array and pushes 0 |
 
 **Migrating a revision 1 sidecar (Decision D-32).** The engine has written format revision 1 since this specification's Revision 1, so revision 1 sidecars exist beside players' saves. Revision 1 differs from revision 2 only in its header, which stops at offset 12. Its global, array, and value records are the ones above.
 
@@ -1707,6 +1715,7 @@ All data is synthetic. `oracle/SPEC-024/README.md` explains the files.
 - [x] Revision 4: every name in the owner's measurements is promoted or has a decision
 - [x] Revision 4: the SPEC-018 and SPEC-019 anchors of Decision D-58 checked at ingestion. Three do not hold, and Decision D-58 records the result
 - [x] Revision 5, by Team A: the ingestion grep finds no implementation-source path and no 40-character hexadecimal string, and this text has no code listing. The research linter was not re-run on this side, because Team A has no access to it
+- [x] Revision 6, by the implementing side: `cargo xtask clean-room-check` finds no implementation-source path and no 40-character hexadecimal string, and this text has no code listing. Engine Rust code was read for this revision, and the research linter was not run
 
 ## 9. Decisions
 
@@ -1773,5 +1782,7 @@ Every decision is a research default unless the Class column says otherwise.
 | D-57 | `set_map_time_multi` multiplies with Pathfinder in one product, with one truncation | Default, from the published example | The example gives 25 percent for 0.5 and two ranks, and either order satisfies it. One truncation loses least |
 | D-58 | SPEC-018 and SPEC-019 anchors were not re-read for Revision 4 | Research limit | Those specs are on the engine side, and this revision did not open them. `encounter_detection`, `remove_wm_town_names`, `npc_engine_level_up`, `car_gas_amount`, and `HOOK_CARTRAVEL` cite them as earlier revisions recorded. Ingestion must check each, along with the Fallout 2 hit-chance term beside `set_fo1_hit_chance`. **Result, recorded by Revision 5.** `remove_wm_town_names`, `npc_engine_level_up`, and `car_gas_amount` hold. `encounter_detection` and `set_fo1_hit_chance` have nothing to act on, and neither does `set_car_intface_art`, which was not on this list, so all three are stored only until the subsystem each needs exists. `HOOK_CARTRAVEL` takes SPEC-019's step count |
 | D-59 | Word `0x8274` and the two redraw functions of section 4.12 are not named in this text | Default | Their public names also occur as R1 identifiers, so the spec linter refuses them here. `sfall-opcodes.tsv` and vectors W12 and W20 hold the names, as `oracle/SPEC-024/README.md` says for such names. The linter's allowlist is unchanged |
-| D-60 | A list made or grown by a script holds at most 1,048,576 (`1 << 20`) elements. `create_array` or `temp_array` with a size above that makes no array, takes no ID, leaves the last-created record alone, and pushes 0, as `size < -1` does. `resize_array` that would grow a list past that changes nothing, with a diagnostic, as size -1 does. A shrink, and a size above a map's length, keep section 5.4's rows. A saved list is not measured against the cap when it loads. `[Safe rule]`, narrowing section 5.4's `size >= 0` and "above current length, list" rules above the cap | Owner instruction (brief of 2026-11-01) | The documents state no limit, and one operand must not be able to ask for tens of GiB and stop the program. The word's published failure shape is kept: no script stops, and the rule is the same on every host, so replays stay deterministic |
+| D-60 | A list made or grown by a script holds at most 1,048,576 (`1 << 20`) elements. `create_array` or `temp_array` with a size above that makes no array, takes no ID, leaves the last-created record alone, and pushes 0, as `size < -1` does. `resize_array` that would grow a list past that changes nothing, with a diagnostic, as size -1 does. A shrink, and a size above a map's length, keep section 5.4's rows. **The total cap (Revision 6).** All live arrays together hold at most 4,194,304 (`4 << 20`) elements, a list's values and a map's pairs alike, for `create_array`, `temp_array`, or `resize_array` to add more, so enough lists at the first cap cannot do what one oversized list cannot. A creation or growth past it fails exactly as past the per-list cap. Adding no elements always fits. The caps bind those three words only: `set_array` adding a pair to a map, and an array another word returns, are not refused, and each counts toward the total. Neither cap applies to a loaded sidecar, whose arrays are bounded by its own bytes. A store that loads above the total cap loads whole and refuses growth until scripts free or shrink it. `[Safe rule]`, narrowing section 5.4's `size >= 0` and "above current length, list" rules above the caps | Owner instruction (brief of 2026-11-01; the total cap from the owner's brief for Phase B, 2026-11-01) | The documents state no limit, and one operand must not be able to ask for tens of GiB and stop the program. The word's published failure shape is kept: no script stops, and the rule is the same on every host, so replays stay deterministic |
+| D-61 | The settings file's `sfall` belongs to one profile, in its `[profiles.*]` table. `[scripting]`'s `sfall` remains the manifest's key, and in a settings file it reads as `[profiles.fallout2]`'s value | Owner instruction (brief for Phase B, 2026-11-01). It narrows D-28, which stands for manifests and `--sfall` | One Fallout 2 profile can run Et Tu under sfall mode beside a plain one, and a setting of one mod stack must not reach another |
+| D-62 | Section 5.8 refuses a next array ID that is 0, above `2^31`, or not above every saved ID, and also a storage byte, an option byte, or a global key outside their ranges | Owner instruction (brief for Phase B, 2026-11-01) | A later `create_array` would otherwise overwrite a saved array, or hand a script a negative ID that names no array. Saved data is never dropped silently |
 | D-T1 | Superseded in part by D-46. Where the prose and `sfall-opcodes.tsv` disagree on an operand class, the table's class stands: `scan_array`'s value is `N`, and `set_sfall_arg`'s value is `I`. **The part that stands:** `ret_class` chooses a failed operand's default and does not limit the pushed value | Owner instruction for the direction (brief of 2026-10-30); Team A default for the meaning of `ret_class` | The engine compiles its word table from this file. Vector B step 9 pushes `F:5.0` from a row with `ret_class` `I`, so `ret_class` cannot limit the value. This ID stays outside the numbered series because Team A wrote it before the research revision's numbers were known on that side |

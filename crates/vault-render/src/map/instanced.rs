@@ -760,19 +760,40 @@ impl PaletteInputs {
 /// of the canvas, so a frame asks for the same tables many times. The key is
 /// the palette's contents rather than its address or a version, so a palette
 /// replaced in place can never serve stale tables.
+///
+/// Comparing the contents walks the whole palette, so a frame does it once:
+/// a caller that has opened a frame ([`SceneRenderer::begin_frame`]) borrows
+/// one palette for all of that frame's refreshes, and nothing can replace it
+/// while it is borrowed, so a later refresh with the same address needs no
+/// new comparison. The next frame compares again. A refresh outside any frame
+/// always compares.
 #[derive(Default)]
 struct TableCache {
     held: Option<(PaletteInputs, LookupTables)>,
     /// How many times the tables were built.
     builds: usize,
+    /// How many times a palette was compared with the held contents.
+    comparisons: usize,
+    /// A caller has opened a frame.
+    framed: bool,
+    /// The address of the palette the open frame found equal to `held`.
+    proved: Option<usize>,
 }
 
 impl TableCache {
+    fn begin_frame(&mut self) {
+        self.framed = true;
+        self.proved = None;
+    }
     fn tables(&mut self, palette: &Palette) -> &LookupTables {
-        let held = self
-            .held
-            .take()
-            .filter(|(inputs, _)| inputs.matches(palette));
+        let address = std::ptr::from_ref(palette).addr();
+        let proved = self.proved == Some(address);
+        let held = self.held.take().filter(|(inputs, _)| {
+            proved || {
+                self.comparisons += 1;
+                inputs.matches(palette)
+            }
+        });
         let held = held.unwrap_or_else(|| {
             self.builds += 1;
             (
@@ -780,6 +801,7 @@ impl TableCache {
                 LookupTables::from_palette(palette),
             )
         });
+        self.proved = self.framed.then_some(address);
         &self.held.insert(held).1
     }
 }
@@ -851,6 +873,18 @@ impl SceneRenderer {
     /// How many times the lookup tables were built.
     pub fn table_builds(&self) -> usize {
         self.tables.builds
+    }
+    /// How many times a palette's contents were compared with the held
+    /// tables' (once per frame after [`Self::begin_frame`]).
+    pub fn table_comparisons(&self) -> usize {
+        self.tables.comparisons
+    }
+    /// A new frame starts: the next refresh compares its palette's contents
+    /// with the held tables', and the frame's later refreshes with the same
+    /// palette reference do not. Every refresh up to the next call must
+    /// borrow that palette for as long as they run, as one frame's loop does.
+    pub fn begin_frame(&mut self) {
+        self.tables.begin_frame();
     }
     /// The GPU executor, if one is in use.
     pub fn gpu(&self) -> Option<&GpuExecutor> {
@@ -1110,6 +1144,48 @@ mod tests {
             assert_eq!(draw(&palette), builds, "{label}");
             assert_eq!(draw(&palette), builds, "{label}, repeated");
         }
+    }
+
+    /// A frame compares its palette's contents once, however many refreshes
+    /// it holds; the next frame compares again, so a palette assigned over
+    /// the last between frames (the same address) is noticed. A repeated
+    /// frame builds nothing.
+    #[test]
+    fn a_frame_compares_the_palette_once() {
+        let (map, art) = (map(), art());
+        let objects = scene(Vec::new());
+        let view = view_of(640, 380);
+        let tiles = vec![40000_i64; 40000];
+        let mut renderer = SceneRenderer::cpu();
+        let frame = |renderer: &mut SceneRenderer, palette: &Palette| {
+            renderer.begin_frame();
+            let light = MapLight {
+                palette,
+                ambient: 30000,
+                tiles: &tiles,
+            };
+            let scene = scene_of(Some(light), None);
+            for _ in 0..4 {
+                renderer.render(&map, &objects, view, &art, scene).unwrap();
+            }
+            (renderer.table_builds(), renderer.table_comparisons())
+        };
+
+        let bytes = palette_bytes();
+        let mut palette = Palette::parse(&bytes).unwrap();
+        assert_eq!(frame(&mut renderer, &palette), (1, 0), "nothing to compare");
+        assert_eq!(frame(&mut renderer, &palette), (1, 1), "a repeat");
+        assert_eq!(frame(&mut renderer, &palette), (1, 2), "a repeat");
+
+        let mut changed = bytes.clone();
+        changed[768 + 12345] ^= 1;
+        palette = Palette::parse(&changed).unwrap();
+        assert_eq!(frame(&mut renderer, &palette), (2, 3), "the same address");
+        let held = &renderer.tables.held.as_ref().unwrap().1;
+        assert!(
+            *held == LookupTables::from_palette(&palette),
+            "stale tables"
+        );
     }
 
     /// A refresh with no palette draws without building any tables.

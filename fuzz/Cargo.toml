@@ -178,3 +178,24 @@ path = "fuzz_targets/dat2.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fallout2_save"
+path = "fuzz_targets/fallout2_save.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mod_manifest"
+path = "fuzz_targets/mod_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stack_check"
+path = "fuzz_targets/stack_check.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,16 @@
+# SPEC-008 section 3.8: the quest campaign indices of each town, before the trailing zeros of its nine positions.
+# town: the town id. globals: comma-separated in row order, with - for a town with none.
+# Read by crates/vault-guidance/build.rs. Checked by crates/vault-guidance/tests/table_sync.rs.
+town	globals
+0	238,309,308,101,188
+1	-
+2	239,240,103,43
+3	144,105,143,145,104,555
+4	-
+5	29,31
+6	100,112,111,106,107
+7	108,109
+8	-
+9	140,139
+10	135,127,129,133,138,130,128
+11	-

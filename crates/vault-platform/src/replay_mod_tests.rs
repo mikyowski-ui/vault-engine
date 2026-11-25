@@ -403,7 +403,7 @@ fn the_desktop_logs_no_stack_without_a_scripted_layer() {
 fn no_chain_starts_in_the_checkpoint_or_presentation_phases() {
     let dir = corpus();
     let root = dir.path();
-    let rows: String = include_str!("../../../tests/fixtures/spec024a/hook-points.tsv")
+    let rows: String = include_str!("../../../oracle/SPEC-024/hook-points.tsv")
         .lines()
         .skip(1)
         .map(|line| line.split('\t').collect::<Vec<_>>())

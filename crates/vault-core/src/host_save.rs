@@ -9,10 +9,11 @@ use crate::{
     combat_state::CombatState,
     critical::state,
     host::WorldHost,
-    queue::{EventKind, TimedEvent},
+    library::LibraryState,
+    queue::{EventKind, TimedEvent, TimedQueue},
     worldmap::WorldMap,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use vault_formats::{
     AutomapDb, ParseError,
     map::{MapObject, ObjectState},
@@ -20,7 +21,7 @@ use vault_formats::{
         CombatSave, CritterStats, QueuePayload, QueueRecord, SaveGame, SaveHeader, THUMBNAIL_LEN,
     },
 };
-use vault_vm::VmHost;
+use vault_vm::{BasicHost, Vm};
 
 #[cfg(feature = "host-fs")]
 mod folder;
@@ -242,6 +243,85 @@ fn event_kind(record: &QueueRecord) -> Result<EventKind, WorldError> {
             )));
         }
     })
+}
+
+/// Copy every public field of `from` to `to`. `LibraryState` has no `Clone`,
+/// and its private window counter stays as it is in `to`.
+fn copy_library(from: &LibraryState, to: &mut LibraryState) {
+    to.clone_from(from);
+}
+/// The host fields a load's reset or its scripts can change, copied before
+/// the reset and put back by a failed load.
+macro_rules! host_fields {
+    ($($field:ident: $kind:ty,)*) => {
+        struct HostFields { $($field: $kind,)* }
+        impl<A: WorldAssets> WorldHost<A> {
+            fn host_fields(&self) -> HostFields {
+                HostFields { $($field: self.$field.clone(),)* }
+            }
+            fn restore_host_fields(&mut self, kept: HostFields) {
+                $(self.$field = kept.$field;)*
+            }
+        }
+    };
+}
+host_fields! {
+    callbacks: VecDeque<(u32, u32)>,
+    active: BTreeSet<u32>,
+    building_animation: Option<crate::host::AnimationSequence>,
+    building_program: Option<u32>,
+    floating_style: i32,
+    motions: Vec<crate::motion::MotionSequence>,
+    running_motions: Vec<crate::host_motion::Running>,
+    next_motion: u64,
+    combat_lock: crate::clicks::CombatLock,
+    motion_time: u64,
+    paused: crate::host_motion::Paused,
+    countdown_movie: bool,
+    fidget: Option<crate::host_fidget::Fidget>,
+    unnamed_words: BTreeSet<u32>,
+    transition_world_map: bool,
+    arriving: bool,
+    script_action: bool,
+    last_push: Option<crate::host_fallout2_party::Push2>,
+    pending_dialogue: Option<ObjectRef>,
+    presentation_rng: crate::ParkMiller,
+    debug_paused: bool,
+    debug_vm: Option<Vm>,
+    last_music: Option<String>,
+    script_messages: crate::dialogue::ScriptMessages,
+    host_busy: Vec<u32>,
+    departed: BTreeMap<u32, (bool, i32)>,
+    first_view: Option<[i32; 2]>,
+    program_scripts: BTreeMap<u32, u32>,
+    next_program: u32,
+    dialogue_waiters: Vec<u32>,
+    dialogue_callbacks: Vec<u32>,
+    presentation: Option<crate::host::PresentationState>,
+}
+/// The highest object id in `raw` and everything it carries.
+fn highest_id(raw: &MapObject) -> u32 {
+    raw.inventory
+        .iter()
+        .map(|entry| highest_id(&entry.object))
+        .fold(raw.id, u32::max)
+}
+
+/// The session a load replaces, kept until the restore has succeeded. The
+/// reset builds a new world and frees the programs anyway, so the world, the
+/// programs and the registry move here and nothing of theirs is copied.
+///
+/// [`WorldHost::with_rollback`] says what this cannot give back.
+struct LiveSession {
+    world: WorldState,
+    programs: BTreeMap<u32, Vm>,
+    registry: BasicHost,
+    library: LibraryState,
+    /// `calls` only grows during a load.
+    calls: usize,
+    /// `set_scr_name`'s own names, which the map teardown spends.
+    sfall_names: Option<BTreeMap<ObjectRef, Vec<u8>>>,
+    fields: HostFields,
 }
 
 impl<A: WorldAssets> WorldHost<A> {
@@ -715,23 +795,12 @@ impl<A: WorldAssets> WorldHost<A> {
     }
     /// Reset like a new game, keeping rules and generator state (the random
     /// component has no bytes and is not restored, so the fresh world's
-    /// startup diagnostic draws are skipped).
-    fn reset_game(&mut self) -> Result<(), WorldError> {
-        for program in self.programs.keys().copied().collect::<Vec<_>>() {
-            self.registry.purge(program)?;
-            self.library.cleanup(program);
-        }
-        // SPEC-005 §2.2: a full game reset clears the whole exported-variable
-        // registry, all owners.
-        self.registry.clear();
-        self.programs.clear();
-        self.clear_program_bindings();
-        self.motions.clear();
-        self.building_animation = None;
-        self.pending_dialogue = None;
+    /// startup diagnostic draws are skipped). Returns the session it
+    /// replaced.
+    fn reset_game(&mut self) -> Result<LiveSession, WorldError> {
         let sheet = self.world.player_sheet().cloned().unwrap_or_default();
         let mut world = WorldState::fresh(sheet, 1)?;
-        world.rules = std::mem::take(&mut self.world.rules);
+        world.rules = self.world.rules.clone();
         world.rng = self.world.rng.clone();
         // The head updater's idle state lasts the whole program run.
         world.dialogue.idle = self.world.dialogue.idle;
@@ -757,22 +826,89 @@ impl<A: WorldAssets> WorldHost<A> {
         world.sfall = self
             .install_sfall
             .take()
-            .or_else(|| self.world.sfall.take());
-        self.world = world;
-        Ok(())
+            .or_else(|| self.world.sfall.clone());
+        let mut library = LibraryState::default();
+        copy_library(&self.library, &mut library);
+        let fields = self.host_fields();
+        let sfall_names = self.promoted().map(|promoted| promoted.names.clone());
+        for program in self.programs.keys() {
+            self.library.cleanup(*program);
+        }
+        // SPEC-005 §2.2: a full game reset clears the whole exported-variable
+        // registry, all owners.
+        let milliseconds = self.registry.milliseconds;
+        let registry = std::mem::take(&mut self.registry);
+        self.registry.milliseconds = milliseconds;
+        let programs = std::mem::take(&mut self.programs);
+        self.clear_program_bindings();
+        self.motions.clear();
+        self.building_animation = None;
+        self.pending_dialogue = None;
+        Ok(LiveSession {
+            world: std::mem::replace(&mut self.world, world),
+            programs,
+            registry,
+            library,
+            calls: self.calls.len(),
+            sfall_names,
+            fields,
+        })
+    }
+    /// Put `live` back after a failed restore.
+    fn roll_back(&mut self, live: LiveSession) {
+        self.clear_program_bindings();
+        self.world = live.world;
+        self.programs = live.programs;
+        self.registry = live.registry;
+        copy_library(&live.library, &mut self.library);
+        self.calls.truncate(live.calls);
+        self.restore_host_fields(live.fields);
+        if let (Some(promoted), Some(names)) = (self.promoted(), live.sfall_names) {
+            promoted.names = names;
+        }
+    }
+    /// Reset the game and run `restore`. When it fails, the session from
+    /// before the reset comes back whole, so a failed load changes nothing:
+    /// the world (generator, effects and trace included), the programs, the
+    /// registry, the library and the host's own fields.
+    ///
+    /// This is what makes a load safe, not [`Self::check_restorable`]. Map
+    /// scripts run inside the restore and can trip any limit, so no check
+    /// before the reset could cover it all, and moving the old session aside
+    /// costs nothing the reset was not already doing.
+    ///
+    /// Not given back: what the restore's scripts did to the assets
+    /// (prototypes, virtual files), told an observer or wrote to a combat
+    /// trace; the sfall hook programs and the host's other sfall state (only
+    /// `set_scr_name`'s names return); and the program and window IDs spent.
+    /// The dialogue resume lists and saved presentation are private to
+    /// `host`, so a dialogue open at a failed load does not resume.
+    fn with_rollback(
+        &mut self,
+        restore: impl FnOnce(&mut Self) -> Result<(), WorldError>,
+    ) -> Result<(), WorldError> {
+        let live = self.reset_game()?;
+        let restored = restore(self);
+        if restored.is_err() {
+            self.roll_back(live);
+        }
+        restored
     }
     /// SPEC-008 §3.3 safe rule: what would fail the restore once the reset
-    /// has replaced the world, checked while nothing has changed yet. The
-    /// map is read as [`load_map`](Self::load_map) will read it after the
-    /// reset, from the save's own working set and not the live one, and its
-    /// entry hex must pass SPEC-014 §3.29.
+    /// has replaced the world, checked while nothing has changed yet, so that
+    /// a bad slot runs no script. The saved events go through a queue of
+    /// their own, which refuses what the restored one would. The map is read
+    /// as [`load_map`](Self::load_map) will read it after the reset, from the
+    /// save's own working set and not the live one, and its entry hex must
+    /// pass SPEC-014 §3.29.
     fn check_restorable(
         &self,
         save: &SaveGame,
         maps: &BTreeMap<String, Vec<u8>>,
     ) -> Result<(), WorldError> {
+        let mut queue = TimedQueue::default();
         for record in &save.queue {
-            event_kind(record)?;
+            queue.insert(u64::from(record.due), 0, 0, event_kind(record)?)?;
         }
         let path = format!("maps/{}", save_map_file(save));
         let (map, ..) = self.read_map_in(maps, &path)?;
@@ -786,7 +922,8 @@ impl<A: WorldAssets> WorldHost<A> {
     /// campaign snapshot A, the companion working set, then the current area
     /// map **before** the player, queue, world-map, and later components.
     /// Snapshot B is consumed but ignored. Finalization restores the header's
-    /// player name and requests combat continuation when it was active.
+    /// player name and requests combat continuation when it was active. A
+    /// failed restore leaves the live session ([`Self::with_rollback`]).
     pub fn apply_save(
         &mut self,
         save: SaveGame,
@@ -794,7 +931,15 @@ impl<A: WorldAssets> WorldHost<A> {
         automap: AutomapDb,
     ) -> Result<(), WorldError> {
         self.check_restorable(&save, &maps)?;
-        self.reset_game()?;
+        self.with_rollback(|host| host.restore_save(save, maps, automap))
+    }
+    /// Everything [`Self::apply_save`] does after the reset.
+    fn restore_save(
+        &mut self,
+        save: SaveGame,
+        maps: BTreeMap<String, Vec<u8>>,
+        automap: AutomapDb,
+    ) -> Result<(), WorldError> {
         self.world.clock.set(u64::from(save.header.game_ticks));
         self.world.gvars = Some(save.campaign.clone());
         self.world.persistence.campaign_status = save.campaign_status;
@@ -802,8 +947,11 @@ impl<A: WorldAssets> WorldHost<A> {
         self.world.persistence.automap = automap;
         // Installed before the map load as well, so temporary objects created
         // during map entry cannot take saved inventory identities.
+        // The saved counter can sit at or below an item the player holds, which
+        // comes back later than the map's own objects: keep its id free.
+        let reserved = highest_id(&save.player).saturating_add(1);
         self.world
-            .set_next_object_id(save.next_item_id.max(1) as u32);
+            .set_next_object_id((save.next_item_id.max(1) as u32).max(reserved));
         let map_file = save_map_file(&save);
         self.load_map(&format!("maps/{map_file}"))?;
         self.restore_player(&save)?;
@@ -1014,9 +1162,19 @@ impl<A: WorldAssets> WorldHost<A> {
 mod tests {
     use super::*;
     use crate::{
-        CharacterSheet, assets::VfsWorldAssets, fixture_state as fixture, test_support::dir_assets,
+        CharacterSheet,
+        assets::VfsWorldAssets,
+        fixture_state as fixture,
+        test_support::dir_assets,
+        world::{ScriptEvent, ScriptRequest},
     };
     use std::path::Path;
+    use vault_formats::{
+        MapFile,
+        map::{InventoryEntry, MapScript, ScriptBlock},
+        pro::Category,
+    };
+    use vault_vm::{ExternalValue, VmHost};
 
     type Host = WorldHost<VfsWorldAssets>;
 
@@ -1024,6 +1182,15 @@ mod tests {
     /// on, so that a load which touched anything would show.
     fn saved_host(dir: &Path) -> (Host, SaveGame) {
         fixture::write_corpus(dir);
+        // Miscellaneous PID 4, what a revisit turns a corpse into.
+        std::fs::write(
+            dir.join("proto/misc/misc.lst"),
+            b"synthetic.pro\nsynthetic.pro\nsynthetic.pro\nremains.pro\n",
+        )
+        .unwrap();
+        let mut remains = fixture::world::prototype(5, 0);
+        fixture::world::word(&mut remains, 0, 0x0500_0004);
+        std::fs::write(dir.join("proto/misc/remains.pro"), remains).unwrap();
         let map = fixture::interactive_map();
         std::fs::write(dir.join("maps/synth.map"), &map).unwrap();
         std::fs::write(dir.join("maps/broken.map"), &map[..map.len() / 2]).unwrap();
@@ -1035,6 +1202,19 @@ mod tests {
         host.world.clock.set(save_tick(&save) + 77);
         host.world.gvars.as_mut().unwrap()[0] += 1;
         host.world.diagnostic("live");
+        assert!(
+            !host.programs.is_empty(),
+            "the session has programs to lose"
+        );
+        host.world
+            .queue
+            .insert(save_tick(&save), 5, 0, EventKind::Poison)
+            .unwrap();
+        host.library.font = 3;
+        host.library.keys.insert(65, (1, 2));
+        host.callbacks.push_back((1, 2));
+        host.registry.milliseconds = 11;
+        host.last_music = Some("live".into());
         (host, save)
     }
     fn save_tick(save: &SaveGame) -> u64 {
@@ -1053,14 +1233,84 @@ mod tests {
             world.persistence.automap.clone(),
             world.effects.len(),
             world.trace.len(),
-            host.programs.len(),
+            host.programs.keys().copied().collect::<Vec<_>>(),
+            world.queue.events().cloned().collect::<Vec<_>>(),
         )
     }
-    fn assert_refused(host: &mut Host, save: SaveGame, maps: BTreeMap<String, Vec<u8>>) {
-        let before = fingerprint(host);
+    /// What lives on the host, beside the world.
+    fn host_parts(host: &Host) -> impl PartialEq + std::fmt::Debug + use<> {
+        let library = &host.library;
+        (
+            (library.font, library.keys.clone(), host.callbacks.clone()),
+            host.registry.milliseconds,
+            host.calls.len(),
+            host.last_music.clone(),
+            // Each program still answers for its script.
+            host.programs
+                .values()
+                .map(|vm| (vm.id, host.sid(vm)))
+                .collect::<Vec<_>>(),
+        )
+    }
+    fn assert_refused(host: &mut Host, save: SaveGame, maps: BTreeMap<String, Vec<u8>>) -> String {
+        let before = (fingerprint(host), host_parts(host));
         let automap = host.world.persistence.automap.clone();
         let error = host.apply_save(save, maps, automap).unwrap_err();
-        assert_eq!(fingerprint(host), before, "after {error}");
+        assert_eq!(
+            (fingerprint(host), host_parts(host)),
+            before,
+            "after {error}"
+        );
+        error.to_string()
+    }
+    /// `save` with its current map rewritten by `edit`: the set a load gets.
+    fn edited_maps(
+        host: &Host,
+        save: &SaveGame,
+        edit: impl FnOnce(&mut MapFile),
+    ) -> BTreeMap<String, Vec<u8>> {
+        let mut maps = host.world.persistence.maps.clone();
+        let name = save_map_file(save);
+        let lookup = |pid| host.prototype_info(pid);
+        let game = host.assets.game_profile();
+        let mut map = MapFile::parse_for(&maps[&name], &lookup, game).unwrap();
+        edit(&mut map);
+        maps.insert(name, map.write().unwrap());
+        maps
+    }
+    /// A root object of `map` of `category`, without its script.
+    fn plain_object(map: &MapFile, category: Category) -> MapObject {
+        let mut object = map.objects.elevations[0]
+            .iter()
+            .find(|object| Category::from_pid(object.pid).ok() == Some(category))
+            .unwrap()
+            .clone();
+        object.script_id = -1;
+        object
+    }
+    /// Fills `map` so that loading it, the player included, makes `objects`.
+    fn crowd(map: &mut MapFile, objects: usize) {
+        let item = plain_object(map, Category::Item);
+        let room = objects - 1 - map.objects.total;
+        map.objects.elevations[0].extend(std::iter::repeat_n(item, room));
+        for (id, object) in map.objects.elevations[0].iter_mut().enumerate() {
+            object.id = 1000 + id as u32;
+        }
+        map.objects.total = objects - 1;
+    }
+    /// `damage` runs in a reset game and fails: nothing of it may stay.
+    fn assert_rolled_back(
+        host: &mut Host,
+        damage: impl FnOnce(&mut Host) -> Result<(), WorldError>,
+    ) -> String {
+        let before = (fingerprint(host), host_parts(host));
+        let error = host.with_rollback(damage).unwrap_err().to_string();
+        assert_eq!(
+            (fingerprint(host), host_parts(host)),
+            before,
+            "after {error}"
+        );
+        error
     }
 
     #[test]
@@ -1113,5 +1363,252 @@ mod tests {
         });
         let maps = host.world.persistence.maps.clone();
         assert_refused(&mut host, save, maps);
+    }
+    #[test]
+    fn spec008_a_queue_past_its_limit_is_refused_before_the_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut host, mut save) = saved_host(dir.path());
+        let maps = host.world.persistence.maps.clone();
+        let event = QueueRecord {
+            due: 0,
+            kind: 1,
+            owner: -2,
+            payload: QueuePayload::None,
+        };
+        save.queue = vec![event; 100_001];
+        let error = assert_refused(&mut host, save.clone(), maps.clone());
+        assert!(error.contains("queue limit"), "{error}");
+
+        // The queue's own limit, to the event.
+        save.queue.pop();
+        let automap = host.world.persistence.automap.clone();
+        host.apply_save(save, maps, automap).unwrap();
+        assert_eq!(host.world.queue.events().count(), 100_000);
+    }
+    /// The parser caps a map and a player tree at 100,000 objects each, so
+    /// only the two together reach the world's limit.
+    #[test]
+    fn spec008_a_failure_past_the_object_limit_rolls_back() {
+        const MAP_LIMIT: usize = 100_000;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut host, mut save) = saved_host(dir.path());
+        let mut item = None;
+        let maps = edited_maps(&host, &save, |map| {
+            item = Some(plain_object(map, Category::Item));
+            crowd(map, MAP_LIMIT + 1);
+        });
+        let entry = InventoryEntry {
+            quantity: 1,
+            object: item.unwrap(),
+        };
+        save.player.inventory = vec![entry; MAP_LIMIT];
+        let error = assert_refused(&mut host, save, maps);
+        assert!(error.contains("object limit"), "{error}");
+    }
+    /// SPEC-014 §3.35: a saved corpse holding an entry of no units parses,
+    /// and the revisit that drops its inventory cannot remove that entry.
+    #[test]
+    fn spec008_a_failure_in_the_revisit_rules_rolls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut host, mut save) = saved_host(dir.path());
+        let maps = edited_maps(&host, &save, |map| {
+            let mut corpse = plain_object(map, Category::Critter);
+            if let ObjectState::Critter(state) = &mut corpse.state {
+                state.hp = 0;
+            }
+            corpse.id = 900;
+            corpse.inventory_capacity = 1;
+            corpse.inventory.push(InventoryEntry {
+                quantity: 0,
+                object: plain_object(map, Category::Item),
+            });
+            map.objects.elevations[0].push(corpse);
+            map.objects.total += 2;
+        });
+        save.header.game_ticks += 145 * 36_000;
+        let error = assert_refused(&mut host, save, maps);
+        assert!(error.contains("nonpositive removal"), "{error}");
+    }
+    /// A map's update broadcast asks every record, so 10,000 records and the
+    /// player's pass the request limit inside `map_update`.
+    #[test]
+    fn spec008_a_failure_past_the_request_limit_rolls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut host, save) = saved_host(dir.path());
+        let maps = edited_maps(&host, &save, |map| {
+            let mut record = map.scripts[4].active().next().unwrap().clone();
+            record.file_index = 9999;
+            record.object_id = -1;
+            record.local_base = -1;
+            record.local_count = 0;
+            record.stored_local_count = 0;
+            let slots: Vec<_> = (2..10_002)
+                .map(|number| MapScript {
+                    id: (4 << 24) | number,
+                    ..record.clone()
+                })
+                .collect();
+            map.scripts[4].declared_count += slots.len();
+            map.scripts[4].blocks.push(ScriptBlock {
+                active: slots.len(),
+                slots,
+            });
+        });
+        let error = assert_refused(&mut host, save, maps);
+        assert!(error.contains("request limit"), "{error}");
+    }
+    /// A stage that no map's data reaches fails here by a limit filled in by
+    /// hand, inside a restore that has run to the end.
+    #[test]
+    fn spec008_every_later_restore_stage_rolls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut host, save) = saved_host(dir.path());
+        let maps = host.world.persistence.maps.clone();
+        let automap = host.world.persistence.automap.clone();
+        let restored = |host: &mut Host| {
+            host.restore_save(save.clone(), maps.clone(), automap.clone())?;
+            assert_eq!(host.world.clock.ticks, save_tick(&save));
+            assert!(host.library.keys.is_empty(), "the reset cleaned it up");
+            host.library.font = 9;
+            host.callbacks.push_back((9, 9));
+            host.registry.milliseconds = 99;
+            host.last_music = Some("failed".into());
+            Ok::<_, WorldError>(())
+        };
+
+        let error = assert_rolled_back(&mut host, |host| {
+            restored(host)?;
+            let record = host.world.scripts.values().next().unwrap().clone();
+            for number in 1..=100_000 {
+                let id = (1 << 24) | number;
+                let copy = crate::world::ScriptInstance {
+                    id,
+                    ..record.clone()
+                };
+                host.world.scripts.insert(id, copy);
+            }
+            host.world.replace_player_script(-1, None).map(|_| ())
+        });
+        assert!(error.contains("script limit"), "{error}");
+
+        let error = assert_rolled_back(&mut host, |host| {
+            restored(host)?;
+            for _ in host.world.queue.events().count()..100_000 {
+                host.world.queue.insert(0, 0, 0, EventKind::Poison)?;
+            }
+            host.world.enqueue_map_timers()
+        });
+        assert!(error.contains("queue limit"), "{error}");
+
+        let error = assert_rolled_back(&mut host, |host| {
+            restored(host)?;
+            let prototype = host.assets.prototype(0x0100_0001)?;
+            let member = host.world.spawn(prototype, 20500, 0)?;
+            host.world.party.insert(member);
+            let player = host.world.player;
+            host.world.get_mut(player).unwrap().raw.elevation = 3;
+            host.world.place_party()
+        });
+        assert!(error.contains("movement destination"), "{error}");
+
+        let error = assert_rolled_back(&mut host, |host| {
+            restored(host)?;
+            let script = host.world.script_ids()[0];
+            for _ in 0..10_001 {
+                host.world.requests.push_back(ScriptRequest {
+                    script,
+                    event: ScriptEvent::MapUpdate,
+                    source: 0,
+                    target: 0,
+                    fixed: 0,
+                    action: -1,
+                    only_present: true,
+                });
+            }
+            host.drain_requests()
+        });
+        assert!(error.contains("request limit"), "{error}");
+
+        let error = assert_rolled_back(&mut host, |host| {
+            restored(host)?;
+            host.load_map("maps/absent.map")
+        });
+        assert!(error.contains("absent"), "{error}");
+    }
+    #[test]
+    fn spec008_a_rolled_back_session_goes_on_as_if_nothing_was_tried() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut host, save) = saved_host(dir.path());
+        let owner = host.programs.keys().copied().next().unwrap();
+        host.registry.register_program(owner, b"live.int");
+        host.registry.export_variable(owner, b"kept").unwrap();
+        let maps = host.world.persistence.maps.clone();
+        let automap = host.world.persistence.automap.clone();
+
+        assert_rolled_back(&mut host, |host| {
+            host.restore_save(save.clone(), maps.clone(), automap.clone())?;
+            host.registry.export_variable(1, b"failed").unwrap();
+            Err(WorldError::Arithmetic)
+        });
+
+        // The exports came back, and the failed load's went with it.
+        assert!(matches!(
+            host.registry.fetch_variable(b"kept"),
+            Ok(ExternalValue::Value(_))
+        ));
+        assert!(host.registry.fetch_variable(b"failed").is_err());
+        // The programs still run: nothing asks for a first request again.
+        let bound = host.programs.len();
+        host.map_update().unwrap();
+        assert_eq!(host.programs.len(), bound);
+
+        // A later good load is the load it would have been, and it clears
+        // the registry as ever while keeping the host's clock.
+        let expected = {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut other, save) = saved_host(dir.path());
+            let (maps, automap) = (
+                other.world.persistence.maps.clone(),
+                other.world.persistence.automap.clone(),
+            );
+            other.map_update().unwrap();
+            other.apply_save(save, maps, automap).unwrap();
+            other.world.state_hash()
+        };
+        host.apply_save(save, maps, automap).unwrap();
+        assert_eq!(host.world.state_hash(), expected);
+        assert_eq!(host.registry.milliseconds, 11);
+        assert!(host.registry.fetch_variable(b"kept").is_err());
+    }
+    #[test]
+    fn spec024b_a_rolled_back_load_keeps_the_sfall_store_and_names() {
+        use vault_vm::sfall_arrays::{ArrayStore, Storage};
+        fn store<A: WorldAssets>(host: &mut WorldHost<A>) -> &mut ArrayStore {
+            &mut host.world.sfall.as_deref_mut().unwrap().arrays
+        }
+        let (mut host, me) = crate::spec024_tests::sfall_host();
+        let kept = store(&mut host).create(3, 0, Storage::Permanent);
+        host.promoted().unwrap().names.insert(me, b"own".to_vec());
+
+        // A load: the slot's own store is what the restore sees.
+        host.install_sfall = Some(Box::default());
+        host.with_rollback(|host| {
+            assert!(store(host).is_empty());
+            store(host).create(5, 0, Storage::Permanent);
+            Err(WorldError::Arithmetic)
+        })
+        .unwrap_err();
+        assert_eq!(store(&mut host).len(kept), 3);
+        assert_eq!(store(&mut host).total_elements(), 3);
+        assert!(host.install_sfall.is_none());
+        assert_eq!(host.promoted().unwrap().names[&me], b"own");
+
+        // A reset that is no load keeps the store for the restore, a copy.
+        host.with_rollback(|host| {
+            store(host).free(kept);
+            Err(WorldError::Arithmetic)
+        })
+        .unwrap_err();
+        assert_eq!(store(&mut host).len(kept), 3);
     }
 }

@@ -29,7 +29,7 @@ impl MapPreview {
     pub(crate) fn floating_sprites(&self) -> Vec<FloatingSprite> {
         let resolve = |ink: Ink| match ink {
             Ink::Key(key) => TextStyle {
-                foreground: ColorKey(key).resolve(&self.palette),
+                foreground: ColorKey(key).resolve(self.game_palette()),
                 ..Default::default()
             },
             Ink::Raw(word) => TextStyle::from(TextFlags::from_word(word)),
@@ -43,7 +43,7 @@ impl MapPreview {
                 let font = self.host.assets.font_number(text.font)?;
                 let image = compose(
                     &font,
-                    &self.palette,
+                    self.game_palette(),
                     FloatingBox {
                         lines: &text.lines,
                         size: text.size,

@@ -53,7 +53,8 @@ The bot checks these, not what one might assume:
 World, to an in-memory slot image, to load A in a second host, to an image, to
 load B. Assert `state_hash(A) == state_hash(B)`. Also diff world against A: entities
 by `raw.id`, variables, clock and queue, copying the RNG across after each load,
-because it is not saved. Start and MapEnter side effects are allowlisted.
+because it is not saved. A difference passes only if the load's journal names it:
+the exact word, object and value a Start or MapEnter script wrote.
 
 ## Failure bundle
 
@@ -82,16 +83,15 @@ end a combat turn. It is logged as `InputCommand::Autoplay`, and swallowed until
 its key comes up. Speeds run several virtual 16 ms frames per shown frame, each a
 logged tick, and leave `GameSpeed` alone.
 
-## Open by the owner's decision
+## Closed in Phase B
 
-Wave 1's profile and storage work departs from SPEC-020 section 2.4 and decision
-D-31, SPEC-023 sections 2.4 and 3.10, and SPEC-024b section 3.1 and decision D-28.
-The stack budget and `step budget` finding are not in SPEC-017 section 8.2.
+The spec departures this brief once listed are recorded in SPEC-017, SPEC-020,
+SPEC-023 and SPEC-024b, as owner instructions.
 
 ## Fixture
 
 `vault_fixtures::campaign::write_campaign(root, edition)` writes a corpus's
 campaign over `state::write_corpus`: doors plain, locked, jammed and scripted, a
 container, a friend, a foe, a pistol, ammunition, dynamite, plastic, a drug and
-exit grids. Fallout 1 has three maps and Fallout 2 two, ending at the world map. It
-has no ladder.
+exit grids. Fallout 1 has three maps and Fallout 2 two, ending at the world map. Its
+first map has a ladder up and a ladder down across two elevations.

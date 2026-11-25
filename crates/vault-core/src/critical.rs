@@ -1,5 +1,5 @@
 //! SPEC-007 §2.4-2.5 combat encodings and built-in critical lookup data.
-//! The matrices are compiled from the approved specification by `build.rs`.
+//! The matrices are compiled from `oracle/SPEC-007/` by `build.rs`.
 
 /// One critical-success entry. Only `flags` and `failed_flags` were written
 /// in hexadecimal in the specification; all other values are decimal.

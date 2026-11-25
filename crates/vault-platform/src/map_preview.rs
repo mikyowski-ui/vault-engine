@@ -819,7 +819,8 @@ impl MapPreview {
             }
         }
     }
-    /// The game palette (a script-loaded one replaces the map's).
+    /// The game palette (a script-loaded one replaces the map's): what the
+    /// display shows and what the lit scene's tables are made from.
     pub(crate) fn game_palette(&self) -> &Palette {
         self.host
             .library
@@ -881,7 +882,11 @@ impl MapPreview {
         let map = &self.host.world.map;
         self.art.bind(&self.host.assets, map, &objects)?;
         let ambient = self.host.world.ambient;
-        let inks = OutlineInks::new(&self.palette);
+        // SPEC-001 §3.7: every palette file load, `loadpalettetable` among
+        // them, replaces the intensity, mix and blend tables. Fades and
+        // cycling change only the display palette, which this canvas of
+        // indexes never reads (SPEC-022 §3.11 rule 2).
+        let inks = OutlineInks::new(self.game_palette());
         let extended = |pid: u32| {
             self.host
                 .assets
@@ -900,6 +905,8 @@ impl MapPreview {
             .and_then(|(art, origin)| Some((art.frame(0, 0)?, *origin)));
         // SPEC-022: each view is one refresh on the session's render path.
         let shared = self.scene_renderer.clone();
+        // One palette for all of this frame's refreshes.
+        shared.lock().renderer.begin_frame();
         let mut refreshes = scene_render::FrameRefreshes::new(&shared);
         let mut images = Vec::with_capacity(views.len());
         for &(view, [ox, oy]) in views {
@@ -908,7 +915,7 @@ impl MapPreview {
             // roofs the ambient.
             let tiles = &self.host.world.tile_light[view.elevation as usize];
             let light = MapLight {
-                palette: &self.palette,
+                palette: self.game_palette(),
                 ambient,
                 tiles,
             };
@@ -979,7 +986,7 @@ impl MapPreview {
             displacement: player.raw.displacement,
             hidden: player.raw.flags.contains(BasicFlags::HIDDEN),
             extended,
-            palette: &self.palette,
+            palette: self.game_palette(),
         })
     }
     /// Input or a world change may have changed what the map view shows.
@@ -999,6 +1006,8 @@ mod fallout2_combat_tests;
 pub(crate) use vault_fixtures::world as fixture;
 #[cfg(test)]
 mod interface_tests;
+#[cfg(test)]
+mod lit_palette_tests;
 #[cfg(test)]
 mod sfall_tests;
 #[cfg(test)]

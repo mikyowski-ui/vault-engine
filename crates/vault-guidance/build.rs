@@ -1,79 +1,72 @@
-//! Compile the approved SPEC-008 Section 3.8 holodisk and quest tables.
+//! Compile the SPEC-008 Section 3.8 holodisk and quest tables, from their
+//! committed form under `oracle/SPEC-008/`. No build reads a spec:
+//! `tests/table_sync.rs` holds these tables to the spec's text.
+#[path = "../../tools/build-support/tsv_table.rs"]
+mod tsv_table;
+
 use std::{env, fs, path::PathBuf};
+use tsv_table::build_input;
+
+const SOURCE: Option<&str> = Some("SPEC-008 section 3.8");
+/// The positions of one quest row, with trailing zero sentinels.
+const QUEST_SLOTS: usize = 9;
 
 fn main() {
-    let spec = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
-        .join("../../specs/approved/SPEC-008-dat-saves-and-worldmap.md");
-    println!("cargo:rerun-if-changed={}", spec.display());
-    let text = fs::read_to_string(spec).expect("approved SPEC-008 must be present");
-    // The section is the lines after the one heading whose number is exactly
-    // 3.8 ("### 3.8 Title"), up to the next heading of level 3 or higher;
-    // a heading such as "### 3.80" or a "3.8" mention elsewhere never matches.
-    let is_heading = |line: &str| line.starts_with("### ") || line.starts_with("## ");
-    let headings: Vec<usize> = text
-        .lines()
-        .enumerate()
-        .filter(|(_, line)| {
-            line.strip_prefix("### 3.8")
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
-        })
-        .map(|(index, _)| index)
-        .collect();
-    assert_eq!(
-        headings.len(),
-        1,
-        "exactly one SPEC-008 section 3.8 heading"
-    );
-    let section: String = text
-        .lines()
-        .skip(headings[0] + 1)
-        .take_while(|line| !is_heading(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let section = section.as_str();
-
-    let numbers = |prefix: &str| -> Vec<usize> {
-        let line = section
-            .lines()
-            .find(|line| line.starts_with(prefix))
-            .unwrap_or_else(|| panic!("{prefix} line"));
-        line[prefix.len()..]
-            .split_whitespace()
-            .map(|value| value.parse().expect("decimal value"))
-            .collect()
-    };
-    let ordinals = numbers("Ordinal:");
-    let globals = numbers("Global:");
-    assert_eq!(ordinals, (0..18).collect::<Vec<_>>(), "disk ordinals 0-17");
-    assert_eq!(globals.len(), 18, "one controlling global per disk");
-
-    let mut quests = Vec::new();
-    for line in section.lines() {
-        let cells: Vec<_> = line.split('|').map(str::trim).collect();
-        if cells.len() != 4 {
-            continue;
-        }
-        let Ok(town) = cells[1].parse::<usize>() else {
-            continue;
-        };
-        assert_eq!(town, quests.len(), "quest rows are in town order");
-        let mut row = vec![0_usize; 9];
-        if cells[2] != "None" {
-            for (slot, index) in cells[2].split(',').enumerate() {
-                row[slot] = index.parse().expect("quest campaign index");
-            }
-        }
-        quests.push(format!("{row:?}"));
+    if let Err(error) = run() {
+        eprintln!("{error}");
+        std::process::exit(1);
     }
-    assert_eq!(quests.len(), 12, "quest rows for towns 0-11");
+}
+
+fn run() -> Result<(), String> {
+    let disks = build_input(
+        "oracle/SPEC-008/holodisks.tsv",
+        SOURCE,
+        &["ordinal", "global"],
+    )?;
+    let mut globals = Vec::new();
+    for row in disks.rows() {
+        let ordinal: usize = row.parse("ordinal")?;
+        if ordinal != globals.len() {
+            return Err(row.column_error("ordinal", "disk ordinals run 0 to 17 in order"));
+        }
+        globals.push(row.parse::<usize>("global")?);
+    }
+    disks.expect_rows(18)?;
+
+    let table = build_input("oracle/SPEC-008/quests.tsv", SOURCE, &["town", "globals"])?;
+    let mut quests = Vec::new();
+    for row in table.rows() {
+        let town: usize = row.parse("town")?;
+        if town != quests.len() {
+            return Err(row.column_error("town", "quest rows are in town order"));
+        }
+        let listed = row.list("globals")?;
+        if listed.len() > QUEST_SLOTS {
+            return Err(row.column_error(
+                "globals",
+                format_args!(
+                    "{} quests, but a row has {QUEST_SLOTS} positions",
+                    listed.len()
+                ),
+            ));
+        }
+        let mut positions = vec![0_usize; QUEST_SLOTS];
+        for (slot, index) in listed.into_iter().enumerate() {
+            positions[slot] = index
+                .parse()
+                .map_err(|error| row.column_error("globals", format_args!("{index:?}: {error}")))?;
+        }
+        quests.push(format!("{positions:?}"));
+    }
+    table.expect_rows(12)?;
+
     let source = format!(
         "pub static DISK_GLOBALS: [usize; 18] = {globals:?};\n\
          pub static QUESTS: [[usize; 9]; 12] = [{}];\n",
         quests.join(",")
     );
-    fs::write(
-        PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("pipboy_tables.rs"),
-        source,
-    )
-    .unwrap();
+    let out = env::var_os("OUT_DIR").ok_or("OUT_DIR is not set")?;
+    fs::write(PathBuf::from(out).join("pipboy_tables.rs"), source)
+        .map_err(|error| format!("pipboy_tables.rs: {error}"))
 }

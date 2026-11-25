@@ -400,15 +400,18 @@ impl WorldState {
         } else {
             inventory.remove(slot);
         }
-        if let Some(item) = self.get_mut(item) {
-            item.owner = None;
-            item.raw.hex = Some(1);
-            item.raw.elevation = 0;
-            item.raw.flags.0 &= !EQUIPPED;
-            if item.money.is_some() {
-                item.money = Some(quantity);
+        if let Some(object) = self.get_mut(item) {
+            object.owner = None;
+            object.raw.hex = Some(1);
+            object.raw.elevation = 0;
+            object.raw.flags.0 &= !EQUIPPED;
+            if object.money.is_some() {
+                object.money = Some(quantity);
             }
         }
+        // SPEC-014 §3.44: the item now stands on a hex. A script's
+        // `rm_obj_from_inven` leaves it there, so this is its placement.
+        self.reinsert(item);
         Ok(())
     }
     fn clone_inventory_tree(
@@ -908,6 +911,17 @@ mod tests {
         host.world.get_mut(owner).unwrap().inventory[0].1 = count;
         host.world.set_ammo_rounds(held, rounds);
         (owner, held)
+    }
+    /// SPEC-014 §3.44: what an inventory removal leaves on hex 1 is the
+    /// latest insertion there, whatever object was on it first.
+    #[test]
+    fn spec014_a_removed_item_is_inserted_at_the_end_of_hex_1() {
+        let mut host = support::host();
+        let (owner, held) = stack(&mut host, 1, 1);
+        let resident = support::spawn(&mut host, AMMO_X);
+        host.world.move_object(resident, 1, 0, false).unwrap();
+        host.world.remove_item(owner, held, 1).unwrap();
+        assert_eq!(host.world.objects_on_hex(1, 0), [resident, held]);
     }
     /// The refused addition leaves both objects and the entry as they were.
     fn assert_refused(

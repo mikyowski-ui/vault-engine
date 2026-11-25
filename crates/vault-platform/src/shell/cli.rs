@@ -45,7 +45,9 @@ pub(crate) struct Args {
     autoplay_headless: bool,
     /// Run this settings profile (`[profiles.NAME]`): its data, mods and
     /// Enhanced settings. With `--game` it starts the game; a profile the
-    /// settings do not have opens the launcher, saying so.
+    /// settings do not have opens the launcher, saying so. With
+    /// `--autoplay-headless` it gives the run its data, linked data, mods and
+    /// sfall, under Vanilla rules; an unknown name is an error.
     #[arg(long, value_name = "NAME", conflicts_with_all = ["replay_inputs", "game_profile"])]
     profile: Option<String>,
     /// Let the autoplay bot play the visible game, with the Watch Mode banner.
@@ -361,6 +363,38 @@ fn with_mod_settings(
     Ok(Some(merged))
 }
 
+/// A run starts on a map. `--game` and the other assets satisfy the command
+/// line, but name no map for the bot to begin on.
+fn check_headless_start(args: &Args) -> AppResult<()> {
+    if args.preview.preview_map.is_none() {
+        return Err("--autoplay-headless starts on a map: name one with --preview-map".into());
+    }
+    Ok(())
+}
+
+/// Give a headless run the session `--profile` names, as a start of that
+/// profile reads it: its edition, data, linked data, mods and sfall. The
+/// command line wins as ever, and nothing writes the settings. A name the
+/// settings do not have is an error, as a run has no launcher to show it in.
+/// The rules stay Vanilla, since a bundle holds no Enhanced settings to
+/// replay them with.
+fn apply_headless_profile(args: &mut Args, settings: &config::Config) -> AppResult<()> {
+    let name = args.profile.as_deref().unwrap_or_default();
+    let mut chosen = settings.clone();
+    if !chosen.select_profile(name) {
+        return Err(format!("no profile named {name} in the settings").into());
+    }
+    let scoped = chosen.scoped_to(chosen.active_game());
+    args.preview.linked_dirs = scoped.secondary_dat_dirs.clone();
+    let modded = with_mod_settings(args, Some(&scoped))?;
+    let config = modded.as_ref().unwrap_or(&scoped);
+    let launch = resolve_launch(args, Some(config));
+    args.preview.game_profile = launch.game;
+    args.preview.mods = launch.mod_list;
+    args.preview.sfall |= config.sfall.unwrap_or(false);
+    Ok(())
+}
+
 /// Merge the settings into the command line, start the session it names
 /// (SPEC-020 §2.3: from the command line or the launcher's Play, which
 /// differ only in `origin` and the settings), and open the audio output a
@@ -653,8 +687,14 @@ pub(crate) fn run(mut args: Args) -> AppResult<()> {
         return Ok(());
     }
     if args.autoplay_headless {
+        check_headless_start(&args)?;
         args.preview.game_profile = args.game_profile.unwrap_or_default();
         args.preview.mods = args.mod_list.clone().map(config::ModList::File);
+        if args.profile.is_some() {
+            let path = config::find(&config::search_dirs())
+                .ok_or("--profile needs a settings file, and none was found")?;
+            apply_headless_profile(&mut args, &config::Config::load(&path)?)?;
+        }
         let mut options = autoplay_runner::AutoplayOptions::from_args(
             args.preview.clone(),
             args.autoplay_output.clone(),

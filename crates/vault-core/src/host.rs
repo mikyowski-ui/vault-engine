@@ -80,7 +80,8 @@ pub struct DispatchResult {
     pub result: i32,
     pub pending: bool,
 }
-struct PresentationState {
+#[derive(Clone)]
+pub(crate) struct PresentationState {
     font: i32,
     mouse_hidden: bool,
     scrolling: bool,
@@ -100,9 +101,9 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     /// complete it immediately by default).
     pub movie_policy: crate::movie::MoviePolicy,
     pub(crate) callbacks: VecDeque<(u32, u32)>,
-    program_scripts: BTreeMap<u32, u32>,
+    pub(crate) program_scripts: BTreeMap<u32, u32>,
     pub(crate) active: BTreeSet<u32>,
-    next_program: u32,
+    pub(crate) next_program: u32,
     /// NPC combat policy: the built-in SPEC-009 packet AI by default.
     pub combat_ai: Box<dyn crate::combat_state::CombatAi>,
     pub building_animation: Option<AnimationSequence>,
@@ -113,8 +114,8 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     /// combat waiting for them.
     pub playback: crate::host_choreography::Playback,
     pub floating_style: i32,
-    dialogue_waiters: Vec<u32>,
-    dialogue_callbacks: Vec<u32>,
+    pub(crate) dialogue_waiters: Vec<u32>,
+    pub(crate) dialogue_callbacks: Vec<u32>,
     /// SPEC-007 §3.11 the world's own sequences: walking, interactions,
     /// doors and containers.
     pub motions: Vec<crate::motion::MotionSequence>,
@@ -149,7 +150,7 @@ pub struct WorldHost<A: WorldAssets = Box<dyn WorldAssets>> {
     /// transition to map -1 or -2, so the request pending when it closes
     /// is discarded.
     pub(crate) transition_world_map: bool,
-    presentation: Option<PresentationState>,
+    pub(crate) presentation: Option<PresentationState>,
     /// An interaction's approach has just ended: its action runs as the
     /// sequence's proximity step (SPEC-013 §3.2), not a new approach.
     pub(crate) arriving: bool,

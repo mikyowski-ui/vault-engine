@@ -1,4 +1,4 @@
-//! The campaign tables `build.rs` compiles from the approved specs (the
+//! The campaign tables `build.rs` compiles from the `oracle/` tables of the approved specs (the
 //! SPEC-007 §2.4-2.5 critical tables, the SPEC-008 §3.6 world grids, the
 //! §3.7 town and hotspot catalogs and the §3.10 map table) as one owned,
 //! replaceable set.
@@ -197,7 +197,7 @@ fn plain_name(table: Table, line: usize, name: &str, extension: &str) -> Result<
 }
 
 impl CampaignTables {
-    /// The tables compiled from the approved specs (shared, built once).
+    /// The tables compiled from the `oracle/` tables (shared, built once).
     pub fn compiled() -> &'static Self {
         static COMPILED: OnceLock<CampaignTables> = OnceLock::new();
         COMPILED.get_or_init(|| Self {

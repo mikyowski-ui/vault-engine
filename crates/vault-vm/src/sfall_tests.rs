@@ -3,8 +3,8 @@
 use crate::extensions::{ENHANCED_RANGE, opcode_in};
 use crate::sfall::*;
 use crate::sfall_arrays::{
-    ArrayStore, Header, MAX_LIST_LENGTH, SIDECAR_TAG, SidecarError, Storage, parse_sidecar,
-    write_stream,
+    ArrayStore, Header, MAX_LIST_LENGTH, MAX_TOTAL_ELEMENTS, SIDECAR_TAG, SidecarError, Storage,
+    parse_sidecar, write_stream,
 };
 use crate::stack_check::{
     Finding, Image, MAX_STEPS, MIN_STEPS, STEPS_PER_INSTRUCTION, Table, analyse, analyse_unit,
@@ -478,6 +478,170 @@ fn decision_d60_a_resize_past_the_cap_changes_nothing() {
 
 /// A sidecar of `revision` whose one saved array is #3, next ID 4, with the
 /// next ID then replaced by `next_id`.
+/// Each of these tests holds about 100 MB: one at a time.
+static TOTAL_CAP_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    TOTAL_CAP_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+/// A store whose lists hold `4 << 20` elements, the cap exactly.
+fn store_at_the_total_cap() -> (ArrayStore, [i32; 4]) {
+    let mut store = ArrayStore::default();
+    let lists = [(); 4].map(|_| store.create(MAX_LIST_LENGTH, 0, Storage::Permanent));
+    assert!(lists.iter().all(|id| *id != 0));
+    assert_eq!(store.total_elements(), MAX_TOTAL_ELEMENTS);
+    (store, lists)
+}
+fn resized(store: &mut ArrayStore, id: i32, size: i32) -> bool {
+    store.resize(id, size, |_| Ok::<_, ()>(0)).unwrap()
+}
+
+#[test]
+fn a_list_past_the_total_cap_is_not_created() {
+    let _turn = one_at_a_time();
+    let (mut store, _) = store_at_the_total_cap();
+    let next = store.next_id();
+    for storage in [Storage::Permanent, Storage::Temporary] {
+        assert_eq!(store.create(1, 0, storage), 0, "create_array or temp_array");
+    }
+    assert_eq!(store.next_id(), next, "no ID is taken");
+    assert_eq!(store.arrays().len(), 4, "no array is made");
+    assert_eq!(store.total_elements(), MAX_TOTAL_ELEMENTS);
+
+    // What holds no element still fits, and takes its ID.
+    assert_eq!(store.create(0, 0, Storage::Permanent), next as i32);
+    let map = store.create(-1, 0, Storage::Permanent);
+    assert_eq!(map, next as i32 + 1);
+
+    // The last created array stays what it was, as with the list cap.
+    assert_eq!(store.create(1, 0, Storage::Permanent), 0);
+    store.expression(int(5), int(6));
+    assert_eq!(store.get(map, &int(5)), int(6));
+}
+
+#[test]
+fn a_resize_past_the_total_cap_changes_nothing() {
+    let _turn = one_at_a_time();
+    let (mut store, lists) = store_at_the_total_cap();
+    assert!(resized(&mut store, lists[0], 8));
+    let small = store.create(2, 0, Storage::Permanent);
+    assert_ne!(small, 0);
+    let room = MAX_LIST_LENGTH - 8 - 2;
+    assert!(resized(&mut store, small, 2 + room));
+    assert_eq!(store.total_elements(), MAX_TOTAL_ELEMENTS);
+
+    let before = store.clone();
+    assert!(!resized(&mut store, lists[0], 9));
+    assert!(!resized(&mut store, small, 2 + room + 1));
+    assert_eq!(store, before);
+
+    // The size it has, and a shrink, are no growth.
+    assert!(resized(&mut store, small, 2 + room));
+    assert!(resized(&mut store, small, 2));
+    assert_eq!(
+        store.total_elements(),
+        MAX_TOTAL_ELEMENTS - room as usize,
+        "a shrink gives its elements back"
+    );
+    assert!(resized(&mut store, lists[0], 8 + room));
+    assert_eq!(store.total_elements(), MAX_TOTAL_ELEMENTS);
+}
+
+#[test]
+fn the_total_follows_every_way_elements_leave_or_arrive() {
+    let _turn = one_at_a_time();
+    let (mut store, lists) = store_at_the_total_cap();
+    store.free(lists[0]);
+    assert_eq!(store.total_elements(), 3 * MAX_LIST_LENGTH as usize);
+    store.free(lists[0]);
+    assert_eq!(store.total_elements(), 3 * MAX_LIST_LENGTH as usize, "gone");
+    assert_ne!(store.create(MAX_LIST_LENGTH, 0, Storage::Temporary), 0);
+    assert_eq!(store.total_elements(), MAX_TOTAL_ELEMENTS);
+    store.end_of_step();
+    assert_eq!(store.total_elements(), 3 * MAX_LIST_LENGTH as usize);
+
+    // A map counts its pairs as it holds them, one each.
+    let map = store.create(-1, 0, Storage::Permanent);
+    store.set(map, int(1), int(5));
+    store.set(map, int(2), int(6));
+    store.set(map, int(3), int(7));
+    store.set(map, int(3), int(8));
+    store.set(map, int(9), int(0));
+    let pairs = 3 * MAX_LIST_LENGTH as usize + 3;
+    assert_eq!(store.total_elements(), pairs);
+    store.set(map, int(2), int(0));
+    assert_eq!(store.total_elements(), pairs - 1);
+    assert!(resized(&mut store, map, 1));
+    assert_eq!(store.total_elements(), pairs - 2);
+    assert!(resized(&mut store, map, 50));
+    assert_eq!(store.total_elements(), pairs - 2, "a map does not grow");
+
+    // Lists and maps the engine builds are counted, though only the two
+    // script words above refuse.
+    let values = store.temp_list(vec![int(1), int(2)]);
+    let kept = store.map_of(vec![(int(1), int(1))], Storage::Permanent);
+    assert_eq!(store.total_elements(), pairs + 1);
+    store.free(values);
+    store.free(kept);
+    store.free(map);
+    assert_eq!(store.total_elements(), 3 * MAX_LIST_LENGTH as usize);
+}
+
+/// A sidecar whose saved list holds `count` values, written byte by byte: no
+/// script word builds a store above the cap this cheaply.
+fn sidecar_with_list(revision: u32, count: u32) -> Vec<u8> {
+    let mut out = SIDECAR_TAG.to_vec();
+    out.extend(revision.to_le_bytes());
+    out.extend(2u32.to_le_bytes());
+    if revision == 2 {
+        out.extend(0x1000_0000u32.to_le_bytes());
+        out.extend((-1i32).to_le_bytes());
+        out.extend(0u32.to_le_bytes());
+    }
+    out.extend(0u32.to_le_bytes());
+    out.extend(1u32.to_le_bytes());
+    out.extend(1u32.to_le_bytes());
+    out.extend([0, 0, Storage::Saved as u8, 0]);
+    out.push(0);
+    out.extend(count.to_le_bytes());
+    for _ in 0..count {
+        out.push(1);
+        out.extend(7u32.to_le_bytes());
+    }
+    out
+}
+
+#[test]
+fn a_sidecar_over_the_total_cap_loads_and_only_refuses_growth() {
+    let _turn = one_at_a_time();
+    let count = MAX_TOTAL_ELEMENTS as u32 + 1;
+    for revision in [1, 2] {
+        let (mut store, ..) = parse_sidecar(&sidecar_with_list(revision, count)).unwrap();
+        assert_eq!(
+            store.total_elements(),
+            count as usize,
+            "revision {revision}"
+        );
+        assert_eq!(store.len(1), count as i32);
+        assert_eq!(store.get(1, &int(count as i32 - 1)), int(7));
+
+        let next = store.next_id();
+        assert_eq!(store.create(1, 0, Storage::Permanent), 0);
+        assert_eq!(store.next_id(), next);
+        let empty = store.create(0, 0, Storage::Permanent);
+        assert_ne!(empty, 0);
+        assert!(!resized(&mut store, empty, 1));
+
+        // Scripts can bring it back under, where growth works again.
+        assert!(resized(&mut store, 1, 1));
+        assert_eq!(store.total_elements(), 1);
+        assert!(resized(&mut store, empty, 1));
+        store.free(1);
+        assert_eq!(store.total_elements(), 1);
+    }
+}
+
 fn sidecar_with_next_id(revision: u32, next_id: Option<u32>) -> Vec<u8> {
     let mut store = ArrayStore::default();
     for _ in 0..3 {

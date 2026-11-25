@@ -1,6 +1,6 @@
 # SPEC-023: In-Memory VFS Mounting and Portable Storage
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revisions 2 and 3 (Team A, 2026-10-30) and Revisions 4 and 5 (Team A, 2026-11-01); see "Revision history".
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revisions 2 and 3 (Team A, 2026-10-30), Revisions 4 and 5 (Team A, 2026-11-01), and Revision 6 (2026-11-01, by the implementing side as an owner instruction); see "Revision history".
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-27.
 Sources:
@@ -95,8 +95,17 @@ Sources:
 No engine Rust code was read, and no decompilation, disassembly,
 re-implementation source or game asset was used.
 
+**Provenance of revision 6.** The owner ended the Team A/B split on 2026-11-01,
+and this revision is an owner instruction, on the owner's brief for Phase B of
+that date. The implementing side wrote it, after reading the engine's code, so
+this is the first revision for which engine Rust code was read. It states what the
+code does. Its sources are the owner's brief, `docs/wave-3-brief.md`, this spec,
+SPEC-018 section 2.3, SPEC-020 and the engine's own code. No decompilation,
+disassembly, re-implementation source or game asset was used.
+
 ### Revision history
 
+- **Revision 6 (2026-11-01).** The implementing side, as an owner instruction, on the owner's brief for Phase B of the same day. Waves 1 to 3 moved the settings and the saves, and this revision records it: sections 2.4, 3.10, 3.11 and 3.15. The config root is a file beside the executable, then the working directory, then the platform folder (D-45). The save root belongs to a profile, in the per-user data folder (D-46). The settings grammar gains the keys of section 3.10 rule 8 (D-47). A warm switch keeps no backend, which replaces D-42 (D-48). No format, key rule or vector changes.
 - **Revision 5 (2026-11-01).** Team A, on the owner's brief of the same day: section 3.10's `preset` commit and quiet hints with no settings file.
 - **Revision 4 (2026-11-01).** Team A, on the owner's brief of the same day: the settings keys and the warm switch of SPEC-020 Phase L1 (sections 3.10 and 3.15). No format, key rule or vector changes.
 - **Revision 1 (2026-10-27).** First approved text.
@@ -257,9 +266,29 @@ A `StorageBackend` holds three namespaces. Each key is a canonical path
 
 | Namespace | Keys | Content | Desktop root (section 3.10) |
 | --- | --- | --- | --- |
-| `config` | One component ending in `.toml`: `vault-engine.toml`, and the load order file (`load_order.toml` by default) | The settings and load-order text, as bytes | The folder the shell finds or creates `vault-engine.toml` in |
-| `savegame` | Exactly two components, `<slot>/<file>`: `SLOT01` to `SLOT10` and `QUICKSAV` are the slots the engine uses | Slot files: `SAVE.DAT`, the `.SAV` companions, `AUTOMAP.SAV`, `VAULTENG.TOML` (SPEC-008 section 2.4), `VAULTSFL.DAT` (SPEC-024b section 5.8) | The active profile's save root, `SAVEGAME/` in its writable data folder (SPEC-018 section 2.3) |
+| `config` | One component ending in `.toml`: `vault-engine.toml`, and the load order file (`load_order.toml` by default) | The settings and load-order text, as bytes | The folder the shell finds or creates `vault-engine.toml` in (section 3.10 rule 2) |
+| `savegame` | Exactly two components, `<slot>/<file>`: `SLOT01` to `SLOT10` and `QUICKSAV` are the slots the engine uses | Slot files: `SAVE.DAT`, the `.SAV` companions, `AUTOMAP.SAV`, `VAULTENG.TOML` (SPEC-008 section 2.4), `VAULTSFL.DAT` (SPEC-024b section 5.8) | The active profile's save root (below), `SAVEGAME/` in its writable data folder (SPEC-018 section 2.3) |
 | `mods` | One or more components: `<layer>/<path in the layer>` | Mod layer files, `vault-mod.toml` manifests included | The folder the shell resolves load-order layer paths against |
+
+**The desktop save root (Revision 6).** `[Must-match]` A profile's writable data
+folder, its save root, is the first of these that applies:
+
+1. `--save-dir`, which always wins.
+2. For a session of an edition's own profile, `fallout1` or `fallout2`, the working
+   directory when it already holds a save slot, or cannot be listed. No player loses
+   sight of a save, and nothing is moved or deleted. A custom profile has no such
+   earlier folder, so this step never applies to one.
+3. `saves/<profile>/` in the per-user data folder, where `<profile>` is the profile's
+   name: `XDG_DATA_HOME/vault-engine` on a Unix, when that variable names an absolute
+   path, else `$HOME/.local/share/vault-engine`; `Library/Application
+   Support/vault-engine` under `$HOME` on macOS; `vault-engine` under `%APPDATA%` on
+   Windows.
+4. The working directory, on a host with no such folder.
+
+A replay keeps its slots in memory (section 3.15 rule 3). A gallery capture or a
+headless session with no `--save-dir` uses the working directory. Each profile
+therefore has its own slots, and `SAVEGAME/` is inside whichever folder this rule
+gives.
 
 **Reserved suffixes.** In `config` and `savegame`, a key whose last component
 ends in `.tmp` or `.bak` (after case folding) is refused: those names belong
@@ -525,18 +554,27 @@ canonical keys. `[Must-match]`
 ### 3.10 The `config` Namespace
 
 1. `vault_platform::config` reads and writes `vault-engine.toml`, and the
-   load order file, through the `config` namespace. The text grammar, the
-   kept unknown keys and every value rule are unchanged. `[Must-match]`
-2. **Desktop root.** The desktop shell resolves the config root as it finds
-   the settings file today: beside the executable, then in the working
-   directory; and when it creates one, in the same order. The same file is
-   read, and Save rewrites it in place. `[Must-match]`
+   load order file, through the `config` namespace. The kept unknown keys and
+   every earlier value rule are unchanged, and rule 8 adds to the grammar.
+   `[Must-match]`
+2. **Desktop root (Revision 6).** The first `vault-engine.toml` in this order is
+   the one read, and Save rewrites it in place: beside the executable, then in the
+   working directory, then in the platform's settings folder. That folder is
+   `XDG_CONFIG_HOME/vault-engine` on a Unix, when that variable names an absolute
+   path, else `$HOME/.config/vault-engine`; `Library/Application
+   Support/vault-engine` under `$HOME` on macOS; `vault-engine` under `%APPDATA%` on
+   Windows. A file in either local folder always wins, so an existing or portable
+   file stays the one in use. With no file in any of them, a new one goes in the
+   platform's folder, which the engine makes. If that cannot be written it goes
+   beside the executable, then in the working directory. Any other settings folder
+   is found, never made. An existing file is never replaced by discovery.
+   `[Must-match]`
 3. **Load order.** A `mod_list` naming a file is a key of the `config`
    namespace on hosts without OS paths. On the desktop it keeps its current
    meaning. `[Must-match]`
 4. **Path keys on memory hosts.** On a host whose game data is a memory
-   mount, the keys `master_dat`, `critter_dat`, `data_root` and the
-   `[profiles.*]` paths are not used. They are kept unchanged when the file
+   mount, the keys `master_dat`, `critter_dat`, `data_root`, `install_dir`,
+   `secondary_dat_dirs` and the `[profiles.*]` paths are not used. They are kept unchanged when the file
    is rewritten, as unknown keys are. `[Safe rule]`
 5. A commit of the settings file is one batch with one put, so a failed
    write leaves the old file whole. `[Must-match]`
@@ -550,6 +588,39 @@ canonical keys. `[Must-match]`
    and writes no diagnostic: `hotkey_hints` stays in memory until the next commit of
    the settings. A settings file that exists and fails to commit is still a
    diagnostic. `[Safe rule]`
+8. **The wider grammar (Revision 6).** `vault-engine.toml` is the same small TOML
+   subset, with these additions. SPEC-020 section 2.7 says what a profile does.
+   `[Must-match]`
+
+   | Where | Key or table | Value |
+   | --- | --- | --- |
+   | Top level | `profile` | A string. An edition's name selects no custom profile. Any other name needs its `[profiles.<name>]` table, or the file does not parse |
+   | `[profiles.fallout1]`, `[profiles.fallout2]` | `master_dat`, `critter_dat`, `data_root` | That edition's paths, as before |
+   | Any `[profiles.*]` table | `sfall` | `true` or `false`, SPEC-024b section 3.1 |
+   | Any `[profiles.*]` table | `mod_list`, alias `load_order` | An array of paths, or the path of a load order file |
+   | Any `[profiles.*]` table | `install_dir` | A path. A folder the profile's data is found in, by name |
+   | Any `[profiles.*]` table | `secondary_dat_dirs` | An array of paths, SPEC-020 section 2.7 |
+   | Any `[profiles.*]` table, `[presets.<name>]` | `preset`, `viewport_mode`, `default_zoom`, `smooth_camera`, `roof_peek`, `ui_scale`, `game_speed` | The top-level keys' values. In a profile they win over the top level when it runs |
+   | Any `[profiles.*]` table, `[presets.<name>]` | `tactical_overlay` | `true` or `false`. It has no top-level form, so a top-level `tactical_overlay` is an unknown key |
+   | `[profiles.<name>]`, a custom profile | `edition` | Required: `fallout1` or `fallout2` |
+   | `[known_paths]` | `fallout1`, `fallout2`, `mods`, `pinned` | Arrays of paths: the folders the launcher remembers, newest first, at most 32 in each. Any other key does not parse |
+
+   - **Names.** A custom profile or preset name is letters, digits, `-` and `_`, so
+     it is a table name and a folder name on any host. Two tables of one name do
+     not parse. A name that is not an edition's needs `edition`, or the file does not
+     parse, and `master_dat`, `critter_dat` and `data_root` do not parse in its table.
+   - **Paths.** A relative path of any of these keys is relative to the file's
+     folder, as the other path keys are.
+   - **Keys from before profiles.** A top-level `mod_list`, and `sfall` under
+     `[scripting]`, still read as a table's value: `sfall` as Fallout 2's, and
+     `mod_list` as Fallout 2's when `sfall = true` stands with it, else as the `game`
+     key's edition. A value in that table wins. The next commit moves them into the
+     table.
+   - **In-place commits.** A commit edits the file in place: a line changes only when
+     its value did, its comment and spacing stay, a new key joins the end of its
+     table, and comments, key order, unknown keys and unknown tables stay. The one
+     rewrite is of a file that no longer parses, or whose edit would not read back.
+     An unknown table is kept unread.
 
 ### 3.11 The `savegame` Namespace and Slot Images
 
@@ -588,9 +659,10 @@ canonical keys. `[Must-match]`
    root, and slot folders without `SAVE.DAT`, are not slots. The save and
    load screens read headers from there as today. `[Must-match]`
 5. **Profiles.** The namespace's root belongs to the active profile: the
-   profile's save root on the desktop, the profile's scope in a key-value
-   store (section 2.5). The SPEC-018 section 2.3 header check still refuses
-   the other game's slots. `[Must-match]`
+   profile's save root on the desktop (section 2.4), the profile's scope in a
+   key-value store (section 2.5). A key-value store's scope names an edition, so
+   only the desktop keeps a custom profile's slots apart (Revision 6). The SPEC-018
+   section 2.3 header check still refuses the other game's slots. `[Must-match]`
 6. **Layering.** `vault_core` does not depend on `vault_platform`, so the
    slot code exchanges slot images, and `vault_platform::session` moves
    them to and from the `StorageBackend`. Tools that save outside a session
@@ -669,14 +741,17 @@ Team A names the type `SlotImage` (D-21); it lives beside the save-slot code.
    two for game data, settings, load order, manifests and slots. Every entry
    point of SPEC-020 section 2.3 (launcher, command line, replay) builds them
    and then runs the same steps. `[Must-match]`
-2. The desktop entry points build file mounts and `FsStorage`; their files,
-   paths and bytes stay as they are, so the gallery and the replay logs stay
-   bit-identical (SPEC-020 section 3). `[Must-match]`
+2. The desktop entry points build file mounts and `FsStorage`. Their files and
+   bytes stay as they are, so the gallery and the replay logs stay bit-identical
+   (SPEC-020 section 3). Only where the settings and a profile's slots go changed,
+   as sections 2.4 and 3.10 say (Revision 6). `[Must-match]`
 3. A replay never reads or writes the user's real storage. `[Safe rule]`
-4. **A warm switch (Revision 4).** SPEC-020 section 2.5 keeps the `StorageBackend`
-   and drops the `Vfs`, with every provider and archive handle under it. The old
-   session's pending commits finish before the mount is dropped, and the new session
-   builds its own `Vfs`, so nothing read through the old mount survives. `[Must-match]`
+4. **A warm switch (Revision 4, corrected by Revision 6).** SPEC-020 section 2.5 drops
+   the `Vfs`, with every provider and archive handle under it, and the session's
+   `StorageBackend` with it. The old session's pending commits finish before the mount
+   is dropped. The new session builds its own `Vfs`, so nothing read through the old
+   mount survives, and its own `StorageBackend`, rooted at its profile's save root.
+   `[Must-match]`
 
 ### 3.16 Module Placement and Names
 
@@ -1253,7 +1328,7 @@ Revision 3 adds these decisions.
 | --- | --- | --- | --- |
 | D-40 | The last-played edition is stored in `StorageBackend` settings | Owner instruction (brief of 2026-11-01) | The brief's requirement |
 | D-41 | Both keys live in `vault-engine.toml`, not in a new `config` file | Team A default | The file already keeps a game's choices, and unknown keys survive older builds |
-| D-42 | A warm switch keeps the backend and drops the `Vfs` | Team A default | The backend holds no game data (D-11), and the mount is what names an edition |
+| D-42 | **Superseded by D-48 (Revision 6).** A warm switch keeps the backend and drops the `Vfs` | Team A default | The backend holds no game data (D-11), and the mount is what names an edition |
 
 ### Decisions of Revision 5
 
@@ -1261,6 +1336,17 @@ Revision 3 adds these decisions.
 | --- | --- | --- | --- |
 | D-43 | With no settings file, `hotkey_hints` stays in memory until settings are saved | Owner instruction (brief of 2026-11-01) | The brief's requirement |
 | D-44 | The preset joins the same commit as `game` and `last_played` | Team A default | One choice should be one write |
+
+### Decisions of Revision 6
+
+The implementing side wrote these, on the owner's brief for Phase B of 2026-11-01. Each one records what Waves 1 to 3 built.
+
+| ID | Decision | Class | Why |
+| --- | --- | --- | --- |
+| D-45 | The config root is a file beside the executable, then the working directory, then the platform folder. A new file goes in the platform folder first | Owner instruction (brief for Phase B, 2026-11-01) | A portable or existing file must stay the one in use, and an installed engine has no writable folder beside it |
+| D-46 | A profile's save root is `saves/<profile>/` in the per-user data folder, and an edition keeps a working directory that already holds a slot | Owner instruction | Each profile needs its own slots, and no player may lose sight of a save |
+| D-47 | The grammar gains `profile`, the `[profiles.*]` keys, `install_dir`, `secondary_dat_dirs`, the Enhanced keys, `tactical_overlay`, `[presets.*]` and `[known_paths]` | Owner instruction | These are the settings SPEC-020 section 2.7 scopes |
+| D-48 | A warm switch keeps no `StorageBackend`, and the new session builds its own | Owner instruction | Each session's backend is rooted at its profile's save root, so D-42's rule would write into the other profile's slots |
 
 ## 7. Clean-Room Verification Checklist
 
@@ -1292,3 +1378,7 @@ Revision 3 adds these decisions.
   existing fixture changed.
 - [x] Revision 3 keeps the ingestion rule: no implementation-source path, no
   40-character hexadecimal string, no code listing, and no engine Rust code read.
+- [x] Revision 6 keeps the ingestion rule: `cargo xtask clean-room-check` finds no
+  implementation-source path and no 40-character hexadecimal string, and this text
+  has no code listing. Engine Rust code was read for this revision, and no fixture
+  changed. Team A did not review it, because that split has ended.

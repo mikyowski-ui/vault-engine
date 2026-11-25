@@ -1,6 +1,6 @@
 # SPEC-017: Fallout 2 Host Words and VM Deltas
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Section 8 revised (Revision 2) by the coordinator at the owner's request, 2026-10-25. Revision 3 (retail audit recorded; script gate open) by the coordinator, 2026-10-25. Revision 4 (the opt-in sfall word set, section 2) by Team A, 2026-10-30, on the owner's instruction. Revision 5 (Team A, 2026-11-01) changes `metarule` rule 49 during an explosion.
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Section 8 revised (Revision 2) by the coordinator at the owner's request, 2026-10-25. Revision 3 (retail audit recorded; script gate open) by the coordinator, 2026-10-25. Revision 4 (the opt-in sfall word set, section 2) by Team A, 2026-10-30, on the owner's instruction. Revision 5 (Team A, 2026-11-01) changes `metarule` rule 49 during an explosion. Revision 6 (2026-11-01), by the implementing side on the owner's instruction, records the stack model's step budget.
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-25.
 Sources:
@@ -78,6 +78,19 @@ and no engine Rust code was read.
 Temple of Trials doors of `arcaves.map` ask rule 49 about themselves inside
 `damage_p_proc`, and got -1. Section 5.1 and Vector Q change this. Team A read no map,
 script or engine code. No word number changes.
+
+**Revision 6 (the step budget), 2026-11-01.** The owner ended the Team A/B split on
+2026-11-01, and this revision is an owner instruction, on the owner's brief for Phase B.
+The implementing side wrote it, from the stack model it runs, so unlike the revisions
+above this one was written after reading the engine's code. No decompilation,
+disassembly, re-implementation source or game asset was used.
+
+- **What changed.** Section 8.2 gains the program's total step budget and a **step
+  budget** finding, which Waves 1 to 3 of the engine added and no revision recorded.
+  Decision 51 is new.
+- **What did not change.** No word number, no stack effect, no vector of sections 7 or
+  8.6, and no audit result. The budget is far above what a real script takes, so the
+  recorded audits are as they were.
 
 ## Clean-Room Rules for Research Agents
 - Document ONLY binary file layouts (byte offsets, endianness, data types), mathematical formulas, state transitions, and observable behavior.
@@ -1071,10 +1084,34 @@ not a finding.
   decode. This ends the path.
 - The refused-word, reserved-word, unexpected-frame and data-dependent
   findings above.
+- **Step budget:** the program's budget below ran out in this unit, or before
+  it. This ends the unit. (Revision 6)
 
 A unit reports each finding kind at most once per instruction address, however
 often re-exploration reaches it. A merge conflict is reported at the address
 of the arrival. (Revision 2)
+
+**The step budget (Revision 6).** The walk above always ends, but a hostile
+program can make it quadratic: each merge can re-explore a loop, and every unit
+can walk the same code. So a program's units share one total budget of steps:
+`[Safe rule]` (Decision 51)
+
+`budget = (16 × instructions).clamp(250_000, 1_000_000)`
+
+- `instructions` is the number of instruction boundaries of the program's linear
+  decode, the initial stream's and the code's together.
+- Taking an address from a unit's worklist spends one step, so a re-explored
+  address spends another.
+- The units run in order, and each takes what the last one left. With no step
+  left, the unit stops with one **step budget** finding, at the address it was
+  about to take, with no word. A later unit then has no step for its first
+  address, so each unit the budget does not reach has a finding of its own.
+- The budget counts steps, not time, so a program gets the same answer on every
+  run and every host.
+- A real script takes about one step per instruction, because a unit ends where
+  the next body starts and few merges re-explore anything.
+- A unit analysed on its own, as section 8.3's inference does, has the program's
+  whole budget to itself.
 
 ### 8.3 Signature inference
 
@@ -1490,6 +1527,7 @@ it touches, and SPEC-018 §10 lists them as R1-R6.
 48. **"Being resolved" runs from the event firing to the end of the explosion, and the notice case ends when `damage_p_proc` returns** (Team A default). A narrow window keeps every other call as it was.
 49. **The rule's public name stays `METARULE_WEAPON_DAMAGE_TYPE`** (Team A default). The brief's `METARULE_W_DAMAGE_TYPE` is the same rule, 49.
 50. **Rule 49 stays unknown under `fallout1`** (Team A default). This section's `fallout1` rule is `[Must-match]`, and the brief changes rule 49's result, not which profile has it. So a Fallout 1 door has to read `fixed_param`.
+51. **A program's units share a step budget of `(16 × instructions).clamp(250_000, 1_000_000)`, and running out is a `step budget` finding** (owner instruction, brief for Phase B, 2026-11-01; written by the implementing side). The engine checks each mod `.INT` with this model before it enters the VM, so the check itself must be bounded against a hostile file. Counting steps, and not time, keeps the answer the same on every host.
 
 ## 10. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included
@@ -1513,3 +1551,8 @@ A throwaway script read section 7.14 back from this file. It decoded each hex
 fragment, recomputed each sfall stack result from the oracle's rows, and
 recomputed the load table from the ranges in section 2. The ingestion grep finds
 no implementation-source path and no 40-character hexadecimal string.
+
+Verification notes for Revision 6 (2026-11-01): the implementing side read section
+8.2's budget from the engine's stack model and states what it does. `cargo xtask
+clean-room-check` finds no implementation-source path and no 40-character hexadecimal
+string. Team A did not review this revision, because the split it belonged to has ended.

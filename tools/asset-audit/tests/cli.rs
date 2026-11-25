@@ -2066,3 +2066,595 @@ fn spec018_a_leftover_map_is_listed_and_a_named_one_still_fails() {
     let text = run(&[]);
     assert!(text.contains("Fallout 2 leftover maps: 0\n"), "{text}");
 }
+
+/// `--sfall-gap-report` over `folder`, which needs no corpus.
+fn gap(folder: &std::path::Path, flags: &[&str]) -> (bool, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_asset-audit"))
+        .arg("--sfall-gap-report")
+        .arg("--fallout2-dir")
+        .arg(folder)
+        .args(flags)
+        .output()
+        .unwrap();
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+/// A script whose `start` is `body`, holding `strings`.
+fn gap_script(strings: &[&[u8]], body: &[Vec<u8>]) -> Vec<u8> {
+    state::program(
+        strings,
+        &[(b"start".as_slice(), state::returning(body.concat()))],
+    )
+}
+/// The script of one word, for mount tests.
+fn word_script(word: u16) -> Vec<u8> {
+    gap_script(&[], &[vm::op(word)])
+}
+/// The offsets `state::program` gives `strings` in its literal table.
+fn literals(strings: &[&[u8]]) -> Vec<Vec<u8>> {
+    let mut offset = 6;
+    strings
+        .iter()
+        .map(|text| {
+            let at = offset;
+            offset += 2 + (text.len() + 1).div_ceil(2) as u32 * 2;
+            state::literal(at)
+        })
+        .collect()
+}
+/// The rows printed under a table's `header` line, up to the next report line.
+fn gap_rows<'a>(text: &'a str, header: &str) -> Vec<&'a str> {
+    text.lines()
+        .skip_while(|line| *line != header)
+        .skip(1)
+        .take_while(|line| !line.starts_with("Sfall gap"))
+        .collect()
+}
+const WORD_HEADER: &str = "word\tname\tstatus\tscripts\tuses\tfirst scripts";
+const HOOK_HEADER: &str = "hook\tname\tstatus\tscripts\tuses\tfirst scripts";
+
+/// Every status and selector kind, and each tie of the ranking.
+#[test]
+fn sfall_gap_ranks_words_functions_and_hooks() {
+    let (push, op) = (state::push, vm::op);
+    // 0x8032 is `local.fetch`: a value no scan can read.
+    let computed = || [push(0), op(0x8032)].concat();
+    let strings: [&[u8]; 4] = [
+        b"add_trait",
+        b"no_such_fn",
+        b"not a name!",
+        b"car_gas_amount",
+    ];
+    let [add_trait, no_such_fn, not_a_name, car_gas] =
+        <[Vec<u8>; 4]>::try_from(literals(&strings)).unwrap();
+    let alpha = gap_script(
+        &strings,
+        &[
+            push(0),
+            op(0x8207),
+            // Hook 3, procedure 7.
+            push(3),
+            push(7),
+            op(0x8262),
+            op(0x8165),
+            op(0x8165),
+            push(0),
+            op(0x8156),
+            add_trait.clone(),
+            push(5),
+            op(0x8277),
+            car_gas.clone(),
+            op(0x8276),
+            // An immediate that looks like a word is not one.
+            push(0x8165),
+            op(0x801a),
+        ],
+    );
+    let beta = gap_script(
+        &strings,
+        &[
+            op(0x8165),
+            // Procedure 0 unregisters.
+            push(3),
+            push(0),
+            op(0x827d),
+            push(3),
+            push(9),
+            op(0x827d),
+            op(0x8252),
+            push(55),
+            op(0x8207),
+            op(0x8282),
+            add_trait.clone(),
+            push(6),
+            op(0x8277),
+        ],
+    );
+    let gamma = gap_script(
+        &strings,
+        &[
+            // The name lies under a computed argument.
+            no_such_fn,
+            push(1),
+            push(2),
+            op(0x8039),
+            op(0x8277),
+            not_a_name,
+            op(0x8276),
+            computed(),
+            op(0x8276),
+            // A local call's arguments are read past: its argument count
+            // lies under the procedure's index.
+            car_gas,
+            push(7),
+            push(1),
+            push(0),
+            op(0x8005),
+            op(0x8277),
+            // Control flow inside the arguments stops the walk.
+            add_trait,
+            push(3),
+            op(0x8004),
+            push(4),
+            op(0x8277),
+            // metarule3: sfall's, not the catalog's, SPEC-017's, and computed.
+            push(200),
+            push(0),
+            push(0),
+            push(0),
+            op(0x80e1),
+            push(999),
+            push(0),
+            push(0),
+            push(0),
+            op(0x80e1),
+            push(100),
+            push(0),
+            push(0),
+            push(0),
+            op(0x80e1),
+            computed(),
+            push(0),
+            push(0),
+            push(0),
+            op(0x80e1),
+            // Explosions: P1, P2, and outside the catalog.
+            push(6),
+            push(0),
+            push(0),
+            op(0x8261),
+            push(1),
+            push(0),
+            push(0),
+            op(0x8261),
+            push(12),
+            push(0),
+            push(0),
+            op(0x8261),
+            computed(),
+            op(0x8207),
+            op(0x8300),
+        ],
+    );
+    let plain = gap_script(&[], &[push(1), op(0x801a)]);
+    let folder = layer(&[
+        ("scripts/gl_alpha.int", alpha.as_slice()),
+        ("scripts/gl_beta.int", beta.as_slice()),
+        ("scripts/gl_gamma.int", gamma.as_slice()),
+        ("scripts/hs_tohit.int", plain.as_slice()),
+        ("scripts/HS_StdProcedure.INT", plain.as_slice()),
+        // A hook's name outside a `scripts` folder is no hook file.
+        ("text/hs_tohit.int", plain.as_slice()),
+    ]);
+    let (success, text, errors) = gap(folder.path(), &[]);
+    assert!(success, "{errors}");
+    assert_eq!(
+        gap_rows(&text, WORD_HEADER),
+        [
+            "0x8207\tregister_hook\tP1\t3\t3\tgl_alpha.int, gl_beta.int, gl_gamma.int",
+            "0x8165\tgraphics_funcs_available\tP2 stubbed\t2\t3\tgl_alpha.int, gl_beta.int",
+            "0x8277\tadd_trait\tP2 stubbed\t2\t2\tgl_alpha.int, gl_beta.int",
+            "0x827d\tregister_hook_proc_spec\tP1\t1\t2\tgl_beta.int",
+            "0x80e1\tmetarule3(999)\tunimplemented\t1\t1\tgl_gamma.int",
+            "0x80e1\tmetarule3(?)\tunresolved\t1\t1\tgl_gamma.int",
+            "0x80e1\tset_horrigan_days\tP2 stubbed\t1\t1\tgl_gamma.int",
+            "0x8156\tread_byte\ttier X\t1\t1\tgl_alpha.int",
+            "0x8252\treserved\tunimplemented\t1\t1\tgl_beta.int",
+            "0x8261\tget_explosion_damage\tP1\t1\t1\tgl_gamma.int",
+            "0x8261\tmetarule2_explosions(12)\tunimplemented\t1\t1\tgl_gamma.int",
+            "0x8261\tset_attack_explosion_pattern\tP2 stubbed\t1\t1\tgl_gamma.int",
+            "0x8262\tregister_hook_proc\tP1\t1\t1\tgl_alpha.int",
+            "0x8276\tcar_gas_amount\tP1\t1\t1\tgl_alpha.int",
+            "0x8276\tsfall_func0(?)\tunresolved\t1\t1\tgl_gamma.int",
+            "0x8276\tsfall_func0(not a name)\tunimplemented\t1\t1\tgl_gamma.int",
+            "0x8277\tcar_gas_amount\tP1\t1\t1\tgl_gamma.int",
+            "0x8277\tno_such_fn\tunimplemented\t1\t1\tgl_gamma.int",
+            "0x8277\tsfall_func1(?)\tunresolved\t1\t1\tgl_gamma.int",
+            "0x8282\tunknown\tunimplemented\t1\t1\tgl_beta.int",
+            "0x8300\tmod_api_version\tP1\t1\t1\tgl_gamma.int",
+        ]
+    );
+    assert_eq!(
+        gap_rows(&text, HOOK_HEADER),
+        [
+            "0\tHOOK_TOHIT\tP1\t2\t2\tgl_alpha.int, hs_tohit.int",
+            "3\tHOOK_DEATHANIM1\tP2 stubbed\t2\t2\tgl_alpha.int, gl_beta.int",
+            "?\t(hook not read)\tunresolved\t1\t1\tgl_gamma.int",
+            "40\tHOOK_STDPROCEDURE\tP1\t1\t1\ths_stdprocedure.int",
+            "41\tHOOK_STDPROCEDURE_END\tP2 stubbed\t1\t1\ths_stdprocedure.int",
+            "55\tunknown\tunimplemented\t1\t1\tgl_beta.int",
+        ]
+    );
+    for line in [
+        "Sfall gap mount: a mod's loose files, 0 layers, 0 refused",
+        "Sfall gap scripts: 6 decoded, 0 failed",
+        "Sfall gap words: 21 rows, 27 uses",
+        "Sfall gap hooks: 6 rows, 8 uses",
+        "Sfall gap summary: words 7 P1, 4 P2 stubbed, 1 tier X, 6 unimplemented, 3 unresolved; \
+         hooks 2 P1, 2 P2 stubbed, 1 unimplemented, 1 unresolved; 4 scripts use a row that is \
+         not P1",
+    ] {
+        assert!(text.lines().any(|found| found == line), "{line}\n{text}");
+    }
+    // A string not shaped like a function's name is the script's contents.
+    assert!(!text.contains("not a name!"), "{text}");
+    // A report, with no corpus: it counts no category, and runs the same twice.
+    assert!(!text.contains("Audit categories"), "{text}");
+    assert_eq!(gap(folder.path(), &[]).1, text);
+}
+
+/// A row lists only so many names, and says how many more there are.
+#[test]
+fn sfall_gap_shows_the_first_scripts_of_a_row_and_counts_the_rest() {
+    let script = word_script(0x8165);
+    let names: Vec<String> = (0..5)
+        .map(|index| format!("scripts/s{index}.int"))
+        .collect();
+    let files: Vec<(&str, &[u8])> = names
+        .iter()
+        .map(|name| (name.as_str(), script.as_slice()))
+        .collect();
+    let folder = layer(&files);
+    let (success, text, errors) = gap(folder.path(), &[]);
+    assert!(success, "{errors}");
+    assert_eq!(
+        gap_rows(&text, WORD_HEADER),
+        ["0x8165\tgraphics_funcs_available\tP2 stubbed\t5\t5\ts0.int, s1.int, s2.int, +2 more"]
+    );
+    assert!(
+        text.contains("5 scripts use a row that is not P1"),
+        "{text}"
+    );
+}
+
+/// A script that does not decode is counted and named, and stops nothing.
+#[test]
+fn sfall_gap_names_a_script_that_fails_to_decode_and_goes_on() {
+    let good = word_script(0x8165);
+    // A word without bit 15, which the loader refuses.
+    let refused = word_script(0x1234);
+    let folder = layer(&[
+        ("scripts/a_bad.int", b"not a script".as_slice()),
+        ("scripts/b_refused.int", refused.as_slice()),
+        ("scripts/good.int", good.as_slice()),
+        ("mods/broken.dat", b"neither archive".as_slice()),
+    ]);
+    let (success, text, errors) = gap(folder.path(), &[]);
+    assert!(success, "{errors}");
+    assert!(
+        text.contains("Sfall gap scripts: 1 decoded, 2 failed"),
+        "{text}"
+    );
+    assert!(line(&text, "Sfall gap failed script: a_bad.int: ").contains("INT at byte"));
+    assert_eq!(
+        line(&text, "Sfall gap failed script: b_refused.int: "),
+        "Sfall gap failed script: b_refused.int: INT at byte 0xN: invalid instruction 0x1234"
+    );
+    // A layer that will not mount is a named refusal, too.
+    assert!(
+        text.contains("Sfall gap layer refused: broken.dat: "),
+        "{text}"
+    );
+    assert!(text.contains("0 layers, 1 refused"), "{text}");
+    assert_eq!(
+        gap_rows(&text, WORD_HEADER),
+        ["0x8165\tgraphics_funcs_available\tP2 stubbed\t1\t1\tgood.int"]
+    );
+}
+
+#[test]
+fn sfall_gap_over_an_empty_folder_reports_nothing_and_succeeds() {
+    let folder = tempfile::tempdir().unwrap();
+    let (success, text, errors) = gap(folder.path(), &[]);
+    assert!(success, "{errors}");
+    for found in [
+        "Sfall gap mount: a mod's loose files, 0 layers, 0 refused",
+        "Sfall gap scripts: 0 decoded, 0 failed",
+        "Sfall gap words: 0 rows, 0 uses",
+        "Sfall gap hooks: 0 rows, 0 uses",
+    ] {
+        assert!(text.contains(found), "{found}\n{text}");
+    }
+    assert!(gap_rows(&text, WORD_HEADER).is_empty(), "{text}");
+    assert!(gap_rows(&text, HOOK_HEADER).is_empty(), "{text}");
+    // A folder that is not there is an error, not an empty report.
+    let (success, _, errors) = gap(&folder.path().join("absent"), &[]);
+    assert!(!success);
+    assert!(errors.starts_with("asset-audit: "), "{errors}");
+}
+
+/// A Fallout 2 install in mixed case: its databases, `Data` over them, the
+/// `.dat` files beside them and in `Mods`, and a loose folder in `Mods`. Each
+/// archive is read as what it is.
+#[test]
+fn sfall_gap_mounts_a_dat2_install_in_any_case_with_its_mods() {
+    use vault_fixtures::dat2::{Member, archive};
+    let script = |word| word_script(word);
+    let dat2 = |path: &str, word| archive(&[Member::stored(path, &script(word))]);
+    let [shadowed, patch, master_only] = [0x8165, 0x8166, 0x8167].map(script);
+    let master = archive(&[
+        Member::stored("SCRIPTS\\Master.INT", &master_only),
+        Member::stored("SCRIPTS\\Shadowed.int", &shadowed),
+        Member::stored("scripts\\patched.int", &shadowed),
+    ]);
+    let patch_dat = archive(&[Member::stored("scripts\\patched.int", &patch)]);
+    let critter = archive(&[]);
+    let sfall =
+        vault_fixtures::dat::archive(&[("SCRIPTS", &[("GL_ROOT.INT", script(0x8168).as_slice())])]);
+    let modded = dat2("Scripts\\gl_mod.int", 0x8169);
+    let loose = script(0x816b);
+    let folder = script(0x816c);
+    let install = layer(&[
+        ("master.DAT", master.as_slice()),
+        ("Critter.dat", critter.as_slice()),
+        ("PATCH000.Dat", patch_dat.as_slice()),
+        ("sfall.dat", sfall.as_slice()),
+        ("Data/Scripts/SHADOWED.INT", loose.as_slice()),
+        ("MODS/extra.DAT", modded.as_slice()),
+        ("MODS/Looser/scripts/gl_folder.int", folder.as_slice()),
+    ]);
+    let (success, text, errors) = gap(install.path(), &[]);
+    assert!(success, "{errors}");
+    for found in [
+        "Sfall gap layer: sfall.dat",
+        "Sfall gap layer: extra.DAT",
+        "Sfall gap layer: Looser",
+        "Sfall gap mount: an install's DAT2 databases, 3 layers, 0 refused",
+        "Sfall gap scripts: 6 decoded, 0 failed",
+    ] {
+        assert!(text.contains(found), "{found}\n{text}");
+    }
+    // The databases themselves are no layers.
+    assert!(!text.contains("Sfall gap layer: master.DAT"), "{text}");
+    assert_eq!(
+        gap_rows(&text, WORD_HEADER),
+        [
+            "0x8166\tload_shader\tP2 stubbed\t1\t1\tpatched.int",
+            "0x8167\tfree_shader\tP2 stubbed\t1\t1\tmaster.int",
+            "0x8168\tactivate_shader\tP2 stubbed\t1\t1\tgl_root.int",
+            "0x8169\tdeactivate_shader\tP2 stubbed\t1\t1\tgl_mod.int",
+            "0x816b\tinput_funcs_available\tP2 stubbed\t1\t1\tshadowed.int",
+            "0x816c\tkey_pressed\tP2 stubbed\t1\t1\tgl_folder.int",
+        ]
+    );
+}
+
+/// A Fallout 1 archive pair is read through `DatProvider`, and a mod's `.dat`
+/// by its format, whichever one it has.
+#[test]
+fn sfall_gap_reads_dat1_databases_and_mod_archives_of_either_format() {
+    use vault_fixtures::dat2::{Member, archive};
+    let one = word_script(0x8165);
+    let master = vault_fixtures::dat::archive(&[("SCRIPTS", &[("ONE.INT", one.as_slice())])]);
+    let install = layer(&[
+        ("MASTER.DAT", master.as_slice()),
+        (
+            "CRITTER.DAT",
+            vault_fixtures::dat::critter_archive().as_slice(),
+        ),
+    ]);
+    let (success, text, errors) = gap(install.path(), &[]);
+    assert!(success, "{errors}");
+    assert!(
+        text.contains("Sfall gap mount: an install's DAT1 databases, 0 layers, 0 refused"),
+        "{text}"
+    );
+    assert_eq!(
+        gap_rows(&text, WORD_HEADER),
+        ["0x8165\tgraphics_funcs_available\tP2 stubbed\t1\t1\tone.int"]
+    );
+    // The same mount serves the sfall stack report, by what the file is.
+    let corpus = tempfile::tempdir().unwrap();
+    let folder = install.path().to_str().unwrap();
+    let (success, _, text, errors) = audit(
+        corpus.path(),
+        &["--report-script-stack", "--sfall", "--fallout2-dir", folder],
+    );
+    assert!(success, "{errors}");
+    assert!(
+        text.contains("Script stack (sfall table): 1 scripts"),
+        "{text}"
+    );
+
+    // A mod's own folder: loose files, a DAT2 `.dat` and a DAT1 one in `mods`,
+    // and an explicit layer above them.
+    let two = word_script(0x8166);
+    let three = word_script(0x8167);
+    let four = word_script(0x8168);
+    let five = word_script(0x8169);
+    let dat2 = archive(&[Member::stored("scripts\\two.int", &two)]);
+    let dat1 = vault_fixtures::dat::archive(&[("SCRIPTS", &[("THREE.INT", three.as_slice())])]);
+    let added = archive(&[Member::stored("scripts\\five.int", &five)]);
+    let folder = layer(&[
+        ("data/scripts/loose.int", one.as_slice()),
+        ("mods/a.dat", dat2.as_slice()),
+        ("mods/b.dat", dat1.as_slice()),
+        // The folder's own mount holds this one, so it is no layer of its own.
+        ("mods/held/scripts/held.int", four.as_slice()),
+        ("extra/added.dat", added.as_slice()),
+    ]);
+    let layered = folder.path().join("extra/added.dat");
+    let flags = ["--mod-layer", layered.to_str().unwrap()];
+    let (success, text, errors) = gap(folder.path(), &flags);
+    assert!(success, "{errors}");
+    assert!(
+        text.contains("Sfall gap mount: a mod's loose files, 3 layers, 0 refused"),
+        "{text}"
+    );
+    assert_eq!(
+        gap_rows(&text, WORD_HEADER),
+        [
+            "0x8165\tgraphics_funcs_available\tP2 stubbed\t1\t1\tdata/scripts/loose.int",
+            "0x8166\tload_shader\tP2 stubbed\t1\t1\ttwo.int",
+            "0x8167\tfree_shader\tP2 stubbed\t1\t1\tthree.int",
+            "0x8168\tactivate_shader\tP2 stubbed\t1\t1\tmods/held/scripts/held.int",
+            "0x8169\tdeactivate_shader\tP2 stubbed\t1\t1\tfive.int",
+        ]
+    );
+}
+
+#[test]
+fn sfall_gap_needs_its_folder_and_excludes_the_dump_modes() {
+    let run = |flags: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_asset-audit"))
+            .args(flags)
+            .output()
+            .unwrap();
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let (code, errors) = run(&["--sfall-gap-report"]);
+    assert_ne!(code, Some(0));
+    assert!(errors.contains("--fallout2-dir"), "{errors}");
+    // SPEC-021 §3.7: a usage error naming a dump flag exits 1.
+    let (code, errors) = run(&[
+        "--sfall-gap-report",
+        "--fallout2-dir",
+        ".",
+        "--dump-vm-trace",
+        "x",
+    ]);
+    assert_eq!(code, Some(1), "{errors}");
+    assert!(errors.contains("--dump-vm-trace"), "{errors}");
+    let (code, errors) = run(&["--mod-layer", "x", "--corpus-dir", "."]);
+    assert_ne!(code, Some(0));
+    assert!(errors.contains("--report-fallout2-install"), "{errors}");
+    assert!(errors.contains("--sfall-gap-report"), "{errors}");
+}
+
+/// Each database is read as the format it is, by its contents, under a name
+/// in any case, and a flag is not needed for either.
+#[test]
+fn validate_dat_reads_each_archive_as_its_format_in_any_case() {
+    use vault_fixtures::dat2::{Member, archive};
+    let temp = tempfile::tempdir().unwrap();
+    let corpus = temp.path().join("game");
+    std::fs::create_dir_all(&corpus).unwrap();
+    std::fs::write(corpus.join("pack.txt"), b"ABCABCABC").unwrap();
+    std::fs::write(corpus.join("plain.txt"), b"XYZ").unwrap();
+    std::fs::write(corpus.join("loose.txt"), b"only loose").unwrap();
+    // SPEC-008's synthetic archive holds pack.txt and plain.txt.
+    std::fs::write(
+        temp.path().join("master.dat"),
+        fixtures::sparse(include_str!(
+            "../../../tests/fixtures/archive/synthetic.dat.hex"
+        )),
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("Critter.Dat"),
+        archive(&[
+            Member::stored("PLAIN.TXT", b"XYZ"),
+            Member::zlib(
+                "PACK.TXT",
+                &vault_fixtures::dat2::Vector {
+                    name: String::new(),
+                    plain: b"ABCABCABC".to_vec(),
+                    // Stored in one final deflate block, with its Adler-32.
+                    stream: [
+                        &[0x78, 0x01, 0x01, 0x09, 0x00, 0xf6, 0xff][..],
+                        b"ABCABCABC",
+                        &[0x0b, 0x9d, 0x02, 0x53][..],
+                    ]
+                    .concat(),
+                },
+            ),
+        ]),
+    )
+    .unwrap();
+    let (success, _, text, errors) = audit(&corpus, &["--validate-dat"]);
+    assert!(success, "{errors}\n{text}");
+    let master = line(&text, "DAT ");
+    assert!(
+        master.ends_with("master.dat: 2 members, 2 matched, 0 differ, 0 missing loose, 0 failed"),
+        "{text}"
+    );
+    let critter = line(&text, "DAT2 ");
+    assert!(
+        critter.ends_with("Critter.Dat: 2 members, 2 matched, 0 differ, 0 missing loose, 0 failed"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Loose files: 3, 1 supplied by no archive"),
+        "{text}"
+    );
+    assert!(text.contains("Audit categories: 1 run, 0 failed"), "{text}");
+
+    // A DAT2 member that differs and one with no loose file are reported as a
+    // DAT1 member's are.
+    std::fs::write(corpus.join("plain.txt"), b"XYW").unwrap();
+    std::fs::remove_file(corpus.join("pack.txt")).unwrap();
+    let (success, _, text, errors) = audit(&corpus, &["--validate-dat"]);
+    assert!(!success);
+    assert!(
+        line(&text, "DAT2 ").ends_with("2 members, 0 matched, 1 differ, 1 missing loose, 0 failed"),
+        "{text}"
+    );
+    assert!(errors.contains("DIFF "), "{errors}");
+    assert!(errors.contains("MISSING "), "{errors}");
+}
+
+/// Of two names that differ only in case, the first by name, whatever order
+/// the file system lists them in.
+#[test]
+fn validate_dat_takes_the_first_by_name_of_two_names_in_different_case() {
+    let temp = tempfile::tempdir().unwrap();
+    let corpus = temp.path().join("game");
+    std::fs::create_dir_all(&corpus).unwrap();
+    std::fs::write(corpus.join("pack.txt"), b"ABCABCABC").unwrap();
+    std::fs::write(corpus.join("plain.txt"), b"XYZ").unwrap();
+    let dat = fixtures::sparse(include_str!(
+        "../../../tests/fixtures/archive/synthetic.dat.hex"
+    ));
+    std::fs::write(temp.path().join("MASTER.DAT"), &dat).unwrap();
+    // A file system that folds case has no second name to choose between.
+    if temp.path().join("master.dat").exists() {
+        return;
+    }
+    std::fs::write(temp.path().join("master.dat"), b"not an archive").unwrap();
+    std::fs::write(temp.path().join("CRITTER.DAT"), &dat).unwrap();
+    let (success, _, text, errors) = audit(&corpus, &["--validate-dat"]);
+    assert!(success, "{errors}\n{text}");
+    assert!(text.contains("MASTER.DAT: 2 members, 2 matched"), "{text}");
+}
+
+/// SPEC-018 §1's data root in any case, here for the install report.
+#[test]
+fn the_install_report_finds_its_data_folder_in_any_case() {
+    let (_corpus, install) = sfall_install();
+    std::fs::rename(install.path().join("data"), install.path().join("DATA")).unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    let folder = install.path().to_str().unwrap();
+    let flags = ["--report-fallout2-install", "--fallout2-dir", folder];
+    let (success, _, text, errors) = audit(corpus.path(), &flags);
+    assert!(success, "{errors}");
+    assert!(
+        text.contains("Fallout 2 data root: data (1 files)"),
+        "{text}"
+    );
+}

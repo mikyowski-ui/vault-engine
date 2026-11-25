@@ -1,6 +1,6 @@
 # SPEC-024a: Engine Hooks and Mod Scripts
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-31, under AGENTS.md "Spec Authoring (Team A)". Revisions 2 and 3 (Team A, 2026-10-31); see "Revision history".
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-31, under AGENTS.md "Spec Authoring (Team A)". Revisions 2 and 3 (Team A, 2026-10-31), and Revision 4 (2026-11-01, by the implementing side as an owner instruction); see "Revision history".
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-31. Sources:
 
@@ -15,7 +15,9 @@ No decompilation, disassembly, re-implementation source, game asset, research-va
 
 **Provenance of Revision 3.** Author: the Spec-Author sub-agent (Team A), 2026-10-31, on the owner's brief of 2026-10-31. Sources: the owner's brief; this spec; SPEC-024b Revision 5; the implementer's notes in `docs/REFERENCE.md` and in the message of the commit that implements Revision 2. No engine Rust code was read, and the owner's budget figure in section 5.3 was not measured. No decompilation, disassembly, re-implementation source, game asset, research-vault material, or sfall material was used.
 
-**Fixtures:** `tests/fixtures/spec024a/`, written by Team A from this spec. They are not in `oracle/`, which is reserved for research-side vectors.
+**Provenance of Revision 4.** The owner ended the Team A/B split on 2026-11-01, and this revision is an owner instruction, on the owner's brief for Phase B of that date. The implementing side wrote it. It moves one file's path and changes no rule. No decompilation, disassembly, re-implementation source or game asset was used.
+
+**Fixtures:** `tests/fixtures/spec024a/`, written by Team A from this spec. They are not in `oracle/`, which is reserved for research-side vectors, with one exception since Revision 4: the hook list is `oracle/SPEC-024/hook-points.tsv` (Decision D-34).
 
 ## Revision history
 
@@ -33,6 +35,9 @@ No decompilation, disassembly, re-implementation source, game asset, research-va
   - **Section 5.3.** A host call's instruction budget is 1,000,000 (Decision D-32).
   - **Section 3.3.** `HOOK_CARTRAVEL`'s arg0 follows SPEC-024b Revision 5 (Decision D-31).
   - No fixture file, word, or chain rule changes.
+- **Revision 4 (2026-11-01, the implementing side).** On the owner's brief for Phase B of the same day, as an owner instruction.
+  - **Sections 2.2, 3.1, and 9.** `hook-points.tsv` moves to `oracle/SPEC-024/hook-points.tsv`, because the engine's build now reads it (Decision D-34).
+  - No row of that file, and no word, chain rule, or vector changes.
 
 ## Clean-Room Rules for Spec Authors
 
@@ -134,7 +139,7 @@ procedure = "ap_cost"
 | `file` | `[[global_scripts]]`, `[[hooks]]` | Yes | A base name under `scripts/`: `[A-Za-z0-9_-]`, 1 to 32 bytes, then `.int` in any case |
 | `repeat` | `[[global_scripts]]` | No, default 0 | Decimal integer, at least 0. As `set_global_script_repeat`: runs `start` every n steps, and 0 never |
 | `type` | `[[global_scripts]]` | No, default 0 | 0 to 3, as `set_global_script_type` |
-| `point` | `[[hooks]]` | Yes | A `hook_name` of `tests/fixtures/spec024a/hook-points.tsv`, as exact bytes |
+| `point` | `[[hooks]]` | Yes | A `hook_name` of `oracle/SPEC-024/hook-points.tsv`, as exact bytes |
 | `procedure` | `[[hooks]]` | No, default `start` | `[A-Za-z0-9_]`, 1 to 31 bytes |
 
 Each of these stops the launch, with `mod_list:` and the folder's name, as a malformed manifest does today. The launcher shows the same error on the layer. `[Safe rule]`
@@ -179,7 +184,7 @@ A replay reads neither `vault-engine.toml` nor a manifest's `[enhanced]` and `[s
 
 ### 3.1 The list
 
-This is the one list: the 30 tier P1 hooks of SPEC-024b sections 6.8 to 6.19, and each runs both blocks. `tests/fixtures/spec024a/hook-points.tsv` holds it with all 51 rows of `sfall-hooks.tsv`. IDs and names are SPEC-024b's. `[Must-match]`
+This is the one list: the 30 tier P1 hooks of SPEC-024b sections 6.8 to 6.19, and each runs both blocks. `oracle/SPEC-024/hook-points.tsv` holds it with all 51 rows of `sfall-hooks.tsv`. IDs and names are SPEC-024b's. `[Must-match]`
 
 The Boundary column says where each point's exact text is. SPEC-024b's sections stay normative for their points, and if this table and those sections ever differ, those sections win. `[Must-match]`
 
@@ -443,7 +448,7 @@ All of this section is `[Safe rule]`.
 
 ## 9. Synthetic Test Fixtures
 
-All data is synthetic, and everything is in `tests/fixtures/spec024a/`. Its `README.md` explains each file.
+All data is synthetic. Everything is in `tests/fixtures/spec024a/`, except `hook-points.tsv`, which is in `oracle/SPEC-024/` (Decision D-34). The folder's `README.md` explains each file.
 
 | File | Coverage |
 | --- | --- |
@@ -452,7 +457,7 @@ All data is synthetic, and everything is in `tests/fixtures/spec024a/`. Its `REA
 | `gl_cheapap.int.hex` | Section 9.1's program, as `OFFSET: bytes` lines |
 | `hook-order.tsv` | Section 9.2's order vectors O1 to O11 |
 | `hook-order-rev4.tsv` | Section 9.2's vectors O12 to O15, on points from SPEC-024b Revision 4 |
-| `hook-points.tsv` | Section 3's list, with every row of `sfall-hooks.tsv`. Its `fires` column is `yes` for the 30 points, else `no` |
+| `oracle/SPEC-024/hook-points.tsv` | Section 3's list, with every row of `sfall-hooks.tsv`. Its `fires` column is `yes` for the 30 points, else `no` |
 | `mod-words.tsv` | Section 7.3's table, for the stack model |
 
 ### 9.1 The program
@@ -669,6 +674,7 @@ Each decision is marked as an owner instruction or a Team A default.
 | D-31 | `HOOK_CARTRAVEL`'s arg0 is the engine's step count, 1, 2, or 4, by SPEC-019 section 3.19.3 | Owner instruction (brief of 2026-10-31); Team A default in Revision 2 | SPEC-024b declared 3 to 8, and its Revision 5 follows SPEC-019 |
 | D-32 | A host call's instruction budget is 1,000,000, and running out of it is a VM error | Owner instruction (brief of 2026-10-31) | The brief gives this as the engine's normal per-call budget. Team A did not measure it. `docs/REFERENCE.md` gives a 100,000-instruction hard limit for a critical invocation, which Revision 2 cited here, and a host call is not necessarily critical |
 | D-33 | A `[[hooks]]` row whose procedure is absent stays inert until the next setup, and `mod_register_hook` does not revive it | Owner instruction (brief of 2026-10-31), from the implementer's reading | Vector N14 says nothing runs, although the fixture's `start` registers on that point |
+| D-34 | `hook-points.tsv` moves to `oracle/SPEC-024/hook-points.tsv`. Team A wrote it and it stays synthetic, so `oracle/`'s rule that it holds research-side vectors has this one exception | Owner instruction (brief for Phase B, 2026-11-01) | The engine's build reads this table, and a build must not depend on `tests/fixtures/`. It sits beside `sfall-hooks.tsv`, whose rows it repeats |
 
 ## 12. Clean-Room Verification Checklist
 
@@ -683,4 +689,5 @@ Each decision is marked as an owner instruction or a Team A default.
 - [x] Section 9.1's program was computed from SPEC-004's layout and stepped through both procedures by a small interpreter written from SPEC-004. The built `asset-audit --dump-vm-trace` accepted a copy with its three mod words swapped for words it knows, and traced it to `ended`
 - [x] `hook-order.tsv` was computed by a small model of section 5 and checked by hand
 - [x] Revision 3: the ingestion patterns were rechecked by search, and no fixture file changed
+- [x] Revision 4: `cargo xtask clean-room-check` finds no source path and no 40-character hexadecimal string. Engine Rust code was read for this revision only to find where the table is used
 - [ ] The research linter was not run: Team A has no access to it

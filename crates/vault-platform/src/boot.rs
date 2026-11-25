@@ -108,7 +108,12 @@ pub fn find_edition(
     dirs: &PerGame<Vec<PathBuf>>,
     game: GameProfile,
 ) -> Result<GamePaths, String> {
-    let own = config.profile(game);
+    // A profile's own folder comes first, as a launch takes it.
+    let own = config
+        .scope(game)
+        .install_dir
+        .and_then(|dir| config::discover_game(std::slice::from_ref(&dir), game))
+        .unwrap_or_else(|| config.profile(game));
     let mut reason = None;
     if !own.is_empty() {
         match check_paths(&own, game) {

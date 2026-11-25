@@ -91,7 +91,7 @@ impl Shell {
 
     /// SPEC-020 §2.5 step 2: the session ends as at quit. Its log ends, and
     /// the world, its programs, its hooks, its decoded assets and its `Vfs`
-    /// go with it. Only the window, the renderer and the storage stay.
+    /// go with it. Only the window and the renderer stay.
     pub(super) fn end_session(&mut self) {
         self.boot = None;
         self.stopped = None;

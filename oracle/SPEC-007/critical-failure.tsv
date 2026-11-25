@@ -1,0 +1,11 @@
+# SPEC-007 section 2.4: the critical-failure masks, by failure table number and by columns 0 to 4.
+# table: 0 to 6. column_0 to column_4: hexadecimal masks.
+# Read by crates/vault-core/build.rs. Checked by crates/vault-core/tests/table_sync.rs.
+table	column_0	column_1	column_2	column_3	column_4
+0	0	8000	8000	80002	200000
+1	0	8000	4000	100000	10000
+2	0	20000	4000	100000	2000
+3	8000	28000	C000	100000	9000
+4	40000	4000	84000	100000	1000
+5	8000	40000	2000	100000	9002
+6	0	8000	100000	2000	9400

@@ -1,6 +1,6 @@
 # SPEC-020: Unified Session Runtime and Core UI Authority
 
-**Status:** approved by the owner, 2026-10-27. Revision 1, 2026-10-27, by the coordinator at the owner's request: module paths replace file paths, two module references in the draft are corrected, and tags and a Decisions section are added. Revision 2 (Team A, 2026-11-01), on the owner's brief of the same day, adds rule 5 of section 2.1 and the gallery note in section 3. Revision 3 (Team A, 2026-11-01), on the owner's brief of the same day, adds Phase L1: sections 2.4 to 2.6. Revision 4 (Team A, 2026-11-01) adds the preset toggle, Setup and the `Hotkey hints` launcher row.
+**Status:** approved by the owner, 2026-10-27. Revision 1, 2026-10-27, by the coordinator at the owner's request: module paths replace file paths, two module references in the draft are corrected, and tags and a Decisions section are added. Revision 2 (Team A, 2026-11-01), on the owner's brief of the same day, adds rule 5 of section 2.1 and the gallery note in section 3. Revision 3 (Team A, 2026-11-01), on the owner's brief of the same day, adds Phase L1: sections 2.4 to 2.6. Revision 4 (Team A, 2026-11-01) adds the preset toggle, Setup and the `Hotkey hints` launcher row. Revision 5 (2026-11-01), by the implementing side as an owner instruction, on the owner's brief for Phase B, adds sections 2.7 and 2.8 and records Wave 1 to Wave 3's profiles, launcher and storage rules. See "Provenance of Revision 5".
 
 **Provenance:** drafted by the project owner on 2026-10-27 as the contract for Wave 1. Revised the same day by the coordinator. Source categories:
 
@@ -9,6 +9,8 @@
 - the names of the workspace's own crates and modules (not their behavior).
 
 No decompilation, disassembly or re-implementation source was consulted, and no game asset was read (`PROVENANCE.md`). This is an architecture specification: it fixes where state and logic live, and it changes no game rule that SPEC-001 to SPEC-019 define.
+
+**Provenance of Revision 5.** The owner ended the Team A/B split on 2026-11-01, and this revision is an owner instruction, on the owner's brief for Phase B of that date. The implementing side wrote it, after reading the engine's code, so where an earlier revision says Team A read no engine code, that does not hold for this one. It states what the code does and invents no behavior. Its sources are the owner's brief, `docs/wave-2-brief.md`, `docs/wave-3-brief.md`, this spec, SPEC-014, SPEC-023 and SPEC-024b, and the engine's own code. No decompilation, disassembly or re-implementation source was used, and no game asset was read. Its changes are decisions D-37 to D-43.
 
 ## 1. Goal & Scope
 
@@ -22,7 +24,7 @@ Consolidate the split execution paths in `vault_platform::game`, `vault_platform
 - `[May-improve]`: a place where the paths disagree today. The refactor may settle it on the `vault-core` side, but only as section 3.4 allows.
 - `[Safe rule]`: how the unified code handles a state or input that one path does not expect. It refuses or clamps; it never panics or reads out of bounds.
 
-**Phase L1 (Revision 3).** Sections 2.4 to 2.6 add three pre-multiplayer conveniences: a boot selector, a warm switch between editions, and hotkey toasts. They add new behavior, so in those three sections the tags compare an implementation with **this text**, not with the engine before the refactor. A `[Must-match]` there must be reproduced exactly. SPEC-014's main menu does not change: each of the three happens outside it. `[Must-match]`
+**Phase L1 (Revision 3).** Sections 2.4 to 2.6 add three pre-multiplayer conveniences: a boot selector, a warm switch between editions, and hotkey toasts. They add new behavior, so in those three sections the tags compare an implementation with **this text**, not with the engine before the refactor. A `[Must-match]` there must be reproduced exactly. SPEC-014's main menu does not change: each of the three happens outside it. `[Must-match]` Sections 2.7 and 2.8 (Revision 5) are tagged in the same way.
 
 ## 2. Architectural Invariants
 
@@ -53,11 +55,11 @@ Consolidate the split execution paths in `vault_platform::game`, `vault_platform
 
 ### 2.4 Zero-argument start and the boot selector
 
-**Zero-argument start.** A desktop start with none of `--game-profile`, `--launcher`, `--game`, `--preview-*`, `--play-movie`, `--smoke-test`, `--replay-inputs`, `--master-dat`, `--critter-dat` or `--corpus-dir`. Display flags, such as `--scaling` or `--preset`, do not stop it from being one. There is no `--edition` flag: `--game-profile` is that flag (Decision D-11). `[Must-match]`
+**Zero-argument start.** A desktop start with none of `--game-profile`, `--profile` (Revision 5), `--launcher`, `--game`, `--preview-*`, `--play-movie`, `--smoke-test`, `--replay-inputs`, `--master-dat`, `--critter-dat` or `--corpus-dir`. Display flags, such as `--scaling` or `--preset`, do not stop it from being one. There is no `--edition` flag: `--game-profile` is that flag (Decision D-11). `[Must-match]`
 
 **Discovery.** For each of the two editions, the engine looks at its paths in `vault-engine.toml`, then at the existing default install locations, and validates what it finds as it does today: only directory tables are read, and a folder counts for an edition only when its `MASTER.DAT` opens in that edition's archive format. Writing a new `vault-engine.toml` stays as it is. `[Must-match]`
 
-**Mod layers.** The enabled layers of `mod_list` are counted, and the selector shows the count. Discovery lists layers with `find_layers` (SPEC-023 section 3.12) but never enables or mounts one. `[Safe rule]`
+**Mod layers.** The enabled layers of the `mod_list` of the profile each edition runs under (section 2.7, Revision 5) are counted, and the selector shows the count. Discovery lists layers with `find_layers` (SPEC-023 section 3.12) but never enables or mounts one. `[Safe rule]`
 
 **What happens.** `[Must-match]`, in this order; `tests/fixtures/spec020/boot-decision.tsv` holds every combination:
 
@@ -76,7 +78,7 @@ Consolidate the split execution paths in `vault_platform::game`, `vault_platform
 - `1` or `2`, or a click on a row, chooses that row at once. Up, Down, Left and Right move the highlight, and Enter chooses it. A pointer over a row highlights it. `[Must-match]`
 - The highlight starts on `last_played`, else on the `game` setting, else on Fallout 1. `[Safe rule]`
 - **Preset (Revision 4).** A row below the editions reads `P  Preset: Vanilla` or `P  Preset: Enhanced`, starting on the preset the next boot would have. `P`, or a click on the row, toggles it. A toggle is held by the selector, and takes effect only when an edition is chosen: it then wins over the settings file, manifests and `--preset` for that boot, and sets `preset` in the same commit as `game` and `last_played`. With no toggle, `preset` is not written. At a later start the usual order applies, so a manifest's `[enhanced]` key can win again. `[Must-match]`
-- **Setup (Revision 4).** A row reads `S  Setup`. `S`, `Tab`, or a click on the row opens the launcher on its Game data tab, with the highlighted edition in its Game row. The Mods tab is where a mod stack is chosen: the engine has one load order for each settings file, so there is no separate mod profile (Decision D-31). `[Must-match]`
+- **Setup (Revision 4).** A row reads `S  Setup`. `S`, `Tab`, or a click on the row opens the launcher on its `Paths & Mods` pill, with the highlighted edition in its Game row. That pill is where a mod stack is chosen. Each profile has its own load order (section 2.7, Decision D-37, which replaces D-31), and the launcher's Game row and sidebar change the profile. `[Must-match]`
 - **The launcher from Setup (Revision 4).** Its Quit button reads `Back`, and returns to the selector, which runs discovery again. Save works as it does today. Play counts as a choice, and also sets `last_played`. Over a session, the session stays stopped as section 2.5 says, Save leaves it alone, and Play goes through section 2.5's switch. `[Must-match]`
 - Esc, and a closed window, end the process when no session is running. F11, Alt+Enter and Alt+S work as in the launcher. `[Safe rule]`
 - Choosing an edition sets `game` and `last_played` in one commit (SPEC-023 section 3.10), then boots it through the same path as the launcher's Play. A failed boot opens the launcher, showing why, as Play does today. `[Must-match]`
@@ -101,9 +103,9 @@ Consolidate the split execution paths in `vault_platform::game`, `vault_platform
 
 **Switching.** Choosing the other edition, or the running edition under the other preset (Revision 4): `[Must-match]`
 
-1. **Validate first.** The chosen edition's install is validated, as discovery does. A failure shows its reason on that row, and the running session stays untouched.
+1. **Validate first.** The chosen edition's install is validated, as discovery does, and then its profile's `sfall` and mod stack (Revision 5). Nothing is changed and no mount outlives the check. A failure shows its reason on that row, and the running session stays untouched.
 2. **Tear down.** The running `SessionRuntime` ends, as at quit: audio stops, a `--record-inputs` log ends, and pending settings commit. The world, its VM programs, the hook registry, mod sessions, and every cache of decoded assets go with it, and the `Vfs` mount is dropped. Nothing is saved, so unsaved progress is lost, as the selector's title says.
-3. **Boot.** A new `SessionRuntime` is built from a zero-argument start's configuration for that edition, with `game` and `last_played` set. Only the window, the renderer's device and the `StorageBackend` carry over, and the OS process does not restart.
+3. **Boot.** A new `SessionRuntime` is built from a zero-argument start's configuration for that edition, with `game` and `last_played` set. Only the window and the renderer's device carry over, and the OS process does not restart. The new session builds its own `StorageBackend`, because a save root belongs to a profile and two profiles do not share one (Revision 5, Decision D-41, SPEC-023 section 3.15).
 
 **Flags.** Command-line flags do not carry over, except display flags. A toggled preset wins over a carried `--preset`. So a session started with `--sfall` or `--master-dat` does not pass them to the other edition: its settings file and manifests decide. `[Safe rule]`
 
@@ -139,7 +141,7 @@ The texts are exact, and are engine strings, not `.msg` entries. No key's action
 
 **With no settings file (Revision 4).** When no `vault-engine.toml` exists, finishing the list makes no commit, creates no file and writes no diagnostic. The value `off` stays in memory for the process, across a warm switch, and the next commit of the settings writes it. `[Safe rule]`
 
-**Launcher row (Revision 4).** The Display & audio tab's left column gains a `Hotkey hints` row, under both presets, which steps through `Once`, `Always` and `Off`. Save writes it like any row. Setting `Once` after `Off` shows the list again at the next map. `[Must-match]`
+**Launcher row (Revision 4).** The `Audio & Input` pill (Revision 5, Decision D-40) holds a `Hotkey hints` row, under both presets, which steps through `Once`, `Always` and `Off`. Save writes it like any row. Setting `Once` after `Off` shows the list again at the next map. `[Must-match]`
 
 **Determinism.** `[Must-match]`
 
@@ -147,6 +149,54 @@ The texts are exact, and are engine strings, not `.msg` entries. No key's action
 - It is drawn by the shell after the frame is composed, so it is not in the frame that an F12 screenshot or a digest reads.
 - It writes no input record.
 - It never shows in a replay, a smoke test or a gallery capture, so every replay digest and gallery image stays as it is.
+
+### 2.7 Profiles and the launcher (Revision 5)
+
+**What a profile is.** A profile is a named set of settings that one edition runs under. Each edition has its own, named `fallout1` and `fallout2`. A custom profile is any other table `[profiles.<name>]`, with `edition` naming the edition it belongs to. The `profile` key names the custom profile its edition runs under, and the other edition keeps its own. SPEC-023 section 3.10 gives the keys. `[Must-match]`
+
+**What it scopes.** `[Must-match]`
+
+- `sfall` (SPEC-024b section 3.1);
+- `mod_list`, its own load order, so one edition's mod stack never reaches the other's;
+- `install_dir`: the folder its data is found in, by name. When that folder holds the edition's data, it wins over the edition's paths at a launch;
+- `secondary_dat_dirs`: linked data, below;
+- its Enhanced settings, which win over the top-level keys when it runs;
+- its save root (SPEC-023 section 2.4).
+
+A custom profile inherits nothing from its edition but the path keys, which it shares until it has an `install_dir`. Discovery (section 2.4) reads the edition's path keys only, and not `install_dir`.
+
+**`--profile NAME`.** It runs that profile for this one start, in a copy, and writes nothing to the settings. It conflicts with `--replay-inputs` and `--game-profile`, and a start that has it is not a zero-argument start. With `--game` the game starts. A name the settings do not have opens the launcher, saying so. `[Must-match]`
+
+**The built-in `ettu` profile.** `[Must-match]`
+
+- It is a custom profile named `ettu`, with `edition = "fallout2"`. Nothing else about it is built in.
+- The launcher adds it when it opens, unless the settings already hold it, so its card is always there, titled `Fallout: Et Tu`. Saving from the launcher writes its table. Until then the settings do not have it, so `--profile ettu` opens the launcher with the message above.
+- The installed desktop entry's `Launch Et Tu` action is `--profile ettu --game`.
+
+**Auto-Detect.** It looks at names only, in any case: `master.dat`, `critter.dat`, `data`, `mods`, `ddraw.ini`, and `fallout1in2` or `fallout1in2.dat` in the folder or in its `mods`. It opens no mod, no `ddraw.ini`, and no `sfall.dat`, `ddraw.dll` or `f2_res.*`. The two databases' directory tables say which edition the folder holds. `[Must-match]`
+
+- `fallout1in2` makes the folder Et Tu's: the `ettu` card becomes active, and the newest remembered Fallout 1 folder holding both databases, other than the folder itself, goes in `secondary_dat_dirs`. If there is none the notes say so, and nothing is linked.
+- Under Fallout 2, `sfall` follows `ddraw.ini` standing there.
+- A `mods` folder joins the load order as one layer.
+
+**Linked data.** Each folder of `secondary_dat_dirs` has its Fallout 1 databases mounted beneath the running game's own data and beneath its mod layers, in the order listed. A read that the game's own data answers never reaches them, so nothing linked overrides the running game: a member of the linked data serves only a path the game's own data lacks. A bounded read of a file that is there but too large is an answer, and does not fall through. A listing shows each path once. The linked mount counts no mod layer. A linked folder that holds no Fallout 1 data stops the start with an error naming the folder, because the game would otherwise run with data missing. `[Must-match]`
+
+**The launcher's pills.** Its window is the Studio, titled `Vault Engine Studio`. The sidebar shows one card per profile, the two editions first, each with its own `Play`, `Autoplay Test` and `Resume Last Save`. The pane has four pills, in this order: `[Must-match]`
+
+| Pill | Shows |
+| --- | --- |
+| `Paths & Mods` | The Game data and Mods tabs of earlier revisions, together |
+| `Enhanced & Visuals` | The presets, and the display and Enhanced rows |
+| `Audio & Input` | Audio, Touch UI and `Hotkey hints` |
+| `Debug & Replays` | The debug overlay row |
+
+Where earlier text names the Game data, Mods or Display & audio tab, it means these. The bottom bar holds Save, Play, `Launch with Debug` and Quit, which reads `Back` from Setup.
+
+### 2.8 In-game Enhanced options (Revision 5)
+
+Under the `enhanced` preset with its presentation on, the options menu page gains one button below its plate, and `H` presses it. Both open the Enhanced window. `E` stays Exit Game: SPEC-014 section 3.17's keys keep their meaning, so this window takes the next letter of the word. Under Vanilla the button is not drawn and neither it nor `H` takes input, so SPEC-014's windows are as they were. `[Must-match]`
+
+A click in the window applies at once to the session, and its clicks are logged input, as a preferences change is. The Vanilla or Enhanced rules cannot change there: that row only names what the next launch runs. Save writes the active profile's table of `vault-engine.toml` and nothing else. A headless or replay session writes nothing, and a file whose active profile is another game's is refused. `[Safe rule]`
 
 ## 3. Verification Criteria
 
@@ -212,12 +262,26 @@ Every point that the draft left open, or that it named wrongly, is resolved here
 | ID | Decision | Class | Why |
 | --- | --- | --- | --- |
 | D-30 | The selector toggles the preset and opens Setup with `S` or `Tab` | Owner instruction (brief of 2026-11-01) | Players can switch between Vanilla and Enhanced without editing the settings file |
-| D-31 | "Mod profile" means the launcher's Mods tab, reached through Setup | Team A default | The brief allows Setup in its place, and no spec defines a named profile: there is one load order per settings file |
+| D-31 | **Superseded by D-37 (Revision 5).** "Mod profile" means the launcher's Mods tab, reached through Setup | Team A default | The brief allows Setup in its place, and no spec defines a named profile: there is one load order per settings file |
 | D-32 | `P` toggles the preset, and a toggle commits only with a choice | Team A default | A toggle that wrote at once could not be cancelled with Esc |
-| D-33 | `Hotkey hints` is a launcher row on the Display & audio tab | Owner instruction | The brief's requirement. It steps all three values, because a plain on and off could not reach `always` |
+| D-33 | `Hotkey hints` is a launcher row on the Display & audio tab, now the `Audio & Input` pill (D-40) | Owner instruction | The brief's requirement. It steps all three values, because a plain on and off could not reach `always` |
 | D-34 | With no settings file, finishing the hints is silent and stays in memory | Owner instruction | The brief's requirement. Creating a file would be a side effect nobody asked for |
 | D-35 | The launcher from Setup reads `Back`, not `Quit` | Team A default | Quit over a stopped session would throw the session away with one click |
 | D-36 | Launcher Play from Setup sets `last_played` | Team A default | It is the same choice as the selector's |
+
+### Phase B decisions (Revision 5)
+
+The implementing side wrote these, on the owner's brief for Phase B of 2026-11-01. Each one records what Waves 1 to 3 built.
+
+| ID | Decision | Class | Why |
+| --- | --- | --- | --- |
+| D-37 | Each profile has its own load order, `sfall`, data and Enhanced settings. This replaces "one load order for each settings file" and D-31 | Owner instruction (brief for Phase B, 2026-11-01) | A mod stack for one edition must never reach the other, and Et Tu needs a stack of its own beside plain Fallout 2 |
+| D-38 | The built-in `ettu` profile, with its card and `--profile` | Owner instruction | One start, or one desktop action, can name a profile without changing the settings |
+| D-39 | Linked Fallout 1 data is read beneath a game's own data, through `secondary_dat_dirs` | Owner instruction | Et Tu plays Fallout 1's data on Fallout 2's engine, and nothing linked may override the running game |
+| D-40 | The Studio's four pills replace the launcher's tabs, and `Hotkey hints` moves to `Audio & Input` | Owner instruction | The `[Must-match]` lines of sections 2.4 and 2.6 named tabs that no longer exist. The rows and what they do are unchanged |
+| D-41 | A warm switch carries no `StorageBackend`. Revision 3's step 3 said it did | Owner instruction | Each session's backend is rooted at its profile's save root, so keeping the old one would write into the other profile's slots |
+| D-42 | `H` opens the in-game Enhanced window, and `E` stays Exit Game | Owner instruction | SPEC-014 section 3.17's `E` is `[Must-match]`, so the window takes another letter |
+| D-43 | A warm switch's first step also validates the chosen profile | Owner instruction | The code does this, so that a bad mod stack cannot cost the running session |
 
 ## 5. Verification Checklist
 
@@ -225,3 +289,4 @@ Every point that the draft left open, or that it named wrongly, is resolved here
 - [x] Every rule tagged `[Must-match]`, `[May-improve]` or `[Safe rule]`.
 - [x] Every module named here exists in the workspace as of 2026-10-27, except `SessionRuntime`, which this refactor introduces.
 - [x] Decisions record each correction to the draft and whether it is an owner instruction or a coordinator default.
+- [x] Revision 5: `cargo xtask clean-room-check` finds no source path and no 40-character hash. Every rule it adds was read from the code as it stood on 2026-11-01. Team A did not review it, because that split has ended.

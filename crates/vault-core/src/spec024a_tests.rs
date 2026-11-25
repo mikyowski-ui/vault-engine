@@ -31,7 +31,7 @@ use vault_vm::{IntProgram, RunOutcome, VmError, WordSet, stack_check};
 
 const ORDER: &str = include_str!("../../../tests/fixtures/spec024a/hook-order.tsv");
 const ORDER_REV4: &str = include_str!("../../../tests/fixtures/spec024a/hook-order-rev4.tsv");
-const POINTS: &str = include_str!("../../../tests/fixtures/spec024a/hook-points.tsv");
+const POINTS: &str = include_str!("../../../oracle/SPEC-024/hook-points.tsv");
 const WORDS: &str = include_str!("../../../tests/fixtures/spec024a/mod-words.tsv");
 const N1: &str = include_str!("../../../tests/fixtures/spec024a/vault-mod.toml");
 const N2: &str = include_str!("../../../tests/fixtures/spec024a/vault-mod-row.toml");

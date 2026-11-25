@@ -2115,3 +2115,72 @@ fn scene_objects_at(fixture: &Fixture, hex: i32) -> MapObjects {
     item.flags.0 |= 0x20000;
     scene(vec![item])
 }
+
+/// SPEC-001 §3.7 and SPEC-022 §3.11 rule 2 over a whole lit scene with
+/// every layer: a palette load relights the canvas on both paths, the CPU
+/// and GPU executors alike; a repeated frame builds nothing; and going back
+/// to the first palette draws the first canvas again.
+#[test]
+fn t10_t11_a_palette_load_relights_both_paths() {
+    let _gpu = gpu::test_lock();
+    let mut fixture = Fixture::new();
+    let view = view_at(20100, [640, 380]);
+    let first = fixture.palette.clone();
+    let frame = |fixture: &Fixture, renderers: &mut [SceneRenderer]| {
+        let cut = fixture.cutout();
+        let scene = scene_of(fixture, &cut, view, Options::FULL);
+        let reference =
+            render_map_scene(&fixture.map, &fixture.objects, view, &fixture.art, scene).unwrap();
+        for renderer in renderers.iter_mut() {
+            renderer.begin_frame();
+            let image = renderer
+                .render(&fixture.map, &fixture.objects, view, &fixture.art, scene)
+                .unwrap();
+            assert_canvas("the frame", &image, &reference);
+            assert_no_refusal("the frame", renderer);
+        }
+        reference
+    };
+    let mut renderers = vec![SceneRenderer::cpu()];
+    renderers.extend(gpu::test_device().map(SceneRenderer::with_device));
+    let builds = |renderers: &[SceneRenderer]| {
+        renderers
+            .iter()
+            .map(SceneRenderer::table_builds)
+            .collect::<Vec<_>>()
+    };
+
+    let before = frame(&fixture, &mut renderers);
+    assert!(builds(&renderers).iter().all(|built| *built == 1));
+    assert_eq!(
+        frame(&fixture, &mut renderers).pixels(),
+        before.pixels(),
+        "a repeat"
+    );
+    assert!(builds(&renderers).iter().all(|built| *built == 1));
+
+    let mut bytes = Vec::with_capacity(0x8300);
+    for index in 0..=255 {
+        bytes.extend(first.rgb6(255 - index));
+    }
+    for packed in 0..32768_u32 {
+        let rgb = [
+            (packed >> 10) as u8,
+            (packed >> 5) as u8 & 31,
+            packed as u8 & 31,
+        ];
+        bytes.push(255 - first.lookup_rgb5(rgb).unwrap());
+    }
+    fixture.palette = Palette::parse(&bytes).unwrap();
+    fixture.inks = OutlineInks::new(&fixture.palette);
+    let after = frame(&fixture, &mut renderers);
+    assert_ne!(after.pixels(), before.pixels(), "the lit canvas changed");
+    assert!(builds(&renderers).iter().all(|built| *built == 2));
+    frame(&fixture, &mut renderers);
+    assert!(builds(&renderers).iter().all(|built| *built == 2));
+
+    fixture.palette = first;
+    fixture.inks = OutlineInks::new(&fixture.palette);
+    assert_eq!(frame(&fixture, &mut renderers).pixels(), before.pixels());
+    assert!(builds(&renderers).iter().all(|built| *built == 3));
+}

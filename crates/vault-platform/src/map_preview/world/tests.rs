@@ -628,6 +628,9 @@ fn the_campaign_fixture_loads_and_its_exits_join_up() {
         campaign::write_campaign(dir.path(), edition);
         let mut preview = crate::map_preview::test_support::load(dir.path(), "maps/synthetic.map");
         if edition == Edition::Fallout2 {
+            preview
+                .host
+                .set_game_profile(vault_core::GameProfile::Fallout2);
             let tables = preview.host.load_fallout2_tables().unwrap();
             let start = tables.maps.match_name(b"artemple.map");
             preview.host.world.fallout2 = Some(Box::new(Fallout2World::new_game(tables, start)));

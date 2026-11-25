@@ -14,13 +14,20 @@
 //! file and procedure names, PIDs, word numbers, line numbers and lengths
 //! are printed. Diagnostic text is grouped by kind: anything quoted becomes
 //! `"…"`, and numbers become `N` (a four-digit `0x` word is kept).
+//!
+//! `--sfall-gap-report` is the second report here: every `.INT` a folder's
+//! mount can reach, read linearly under sfall mode's meanings (SPEC-024b §3.2),
+//! and ranked by how many scripts use each word, function and hook, with what
+//! the engine does with it. Its tiers come from `vault_vm::sfall`'s catalog and
+//! nowhere else.
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
+use crate::archives::{data_root, entry_any_case, mod_layer, mount_install};
 use vault_core::{
     CharacterSheet, GameProfile, StatContext, VmObserver, WorldEffect, WorldHost, WorldState,
     assets::{VfsWorldAssets, WorldAssets},
@@ -29,14 +36,22 @@ use vault_core::{
     movie::MoviePolicy,
     sfall_startup::{self, StartupOptions},
 };
+use vault_debug::decode::{DecodeMode, Instruction, disassemble_with};
 use vault_formats::{
-    LayeredVfs, LocalDirProvider, LocalPrototypeCatalog, MAX_ASSET_BYTES, MapFile, ModLayer,
-    ModManifest, MsgCatalog, Prototype, Vfs, VfsError,
+    LayeredVfs, LocalDirProvider, LocalPrototypeCatalog, MAX_ASSET_BYTES, MapFile, ModManifest,
+    MsgCatalog, Prototype, Vfs, VfsError,
     fallout2::{Fallout2Install, REQUIRED_MEMBERS, missing_members},
     mod_manifest::MANIFEST,
     validate_asset,
 };
-use vault_vm::{IntProgram, RunOutcome, Vm, VmError, WordSet};
+use vault_vm::{
+    IntProgram, RunOutcome, Value, Vm, VmError, WordSet,
+    extensions::base_tag,
+    sfall::{
+        self, SFALL_EXPLOSIONS, SFALL_FUNCTIONS, SFALL_HOOKS, SFALL_METARULE3, SfallRow, Tier,
+    },
+    stack_check::Table,
+};
 
 /// The extensions parsed, in report order.
 const PARSED: [&str; 13] = [
@@ -147,12 +162,7 @@ fn mod_session(layers: &[PathBuf]) -> Option<Arc<ModSession>> {
 
 /// The file `name` directly in `folder`, the name compared without case.
 fn loose_file(folder: &Path, name: &str) -> Option<Vec<u8>> {
-    let entries = std::fs::read_dir(folder).ok()?;
-    let found = entries.flatten().find(|entry| {
-        let file = entry.file_name();
-        file.to_string_lossy().eq_ignore_ascii_case(name)
-    })?;
-    std::fs::read(found.path()).ok()
+    std::fs::read(entry_any_case(folder, name, Path::is_file)?).ok()
 }
 
 /// SPEC-024c §3.1: `ddraw.ini`, through the layers, then the install folder.
@@ -188,12 +198,7 @@ fn mount(folder: &Path, layers: &[PathBuf]) -> Result<Mounted, Box<dyn Error>> {
             ""
         }
     );
-    let data = folder.join("data");
-    let loose = if data.is_dir() {
-        Some(Arc::new(LocalDirProvider::mount(&data)?))
-    } else {
-        None
-    };
+    let loose = data_root(folder)?;
     let loose_files = loose.as_ref().map(|loose| loose.files().count());
     let provider = opened.provider(loose);
     let missing = missing_members(&provider);
@@ -216,15 +221,10 @@ fn mount(folder: &Path, layers: &[PathBuf]) -> Result<Mounted, Box<dyn Error>> {
     if layers.is_empty() {
         return Ok((base.clone(), base));
     }
-    let mut mounted = Vec::new();
-    for layer in layers {
-        let name = layer.file_name().map_or_else(
-            || layer.display().to_string(),
-            |name| name.to_string_lossy().into_owned(),
-        );
-        let loose: Arc<dyn Vfs> = Arc::new(LocalDirProvider::mount(layer)?);
-        mounted.push(ModLayer::from_parts(name, Some(loose), None, None));
-    }
+    let mounted = layers
+        .iter()
+        .map(|layer| mod_layer(layer))
+        .collect::<Result<Vec<_>, _>>()?;
     println!("Fallout 2 mod layers: {}", mounted.len());
     Ok((Arc::new(LayeredVfs::new(base.clone(), mounted)), base))
 }
@@ -727,6 +727,480 @@ pub fn report(folder: &Path, layers: &[PathBuf], sfall: bool) -> Result<(), Box<
         } else {
             "failed"
         }
+    );
+    Ok(())
+}
+
+/// How many script names a ranked row shows.
+const SCRIPTS_SHOWN: usize = 3;
+/// A row's status. [`UNIMPLEMENTED`] covers a reserved word, a number or name
+/// outside the catalog, and a hook ID without a row.
+const IMPLEMENTED: &str = "P1";
+const STUBBED: &str = "P2 stubbed";
+const TIER_X: &str = "tier X";
+const UNIMPLEMENTED: &str = "unimplemented";
+/// The selector is not a constant this scan can read, so the row is unknown.
+const UNRESOLVED: &str = "unresolved";
+const REGISTER_HOOK: u16 = 0x8207;
+const REGISTER_HOOK_PROC: u16 = 0x8262;
+const REGISTER_HOOK_PROC_SPEC: u16 = 0x827d;
+/// SPEC-004's local call, which pops its index and argument count, then the
+/// arguments, and leaves one result.
+const CALL: u16 = 0x8005;
+/// SPEC-017 §5.2's own `metarule3` rules, which are not sfall's.
+const ENGINE_METARULES: std::ops::RangeInclusive<i32> = 100..=111;
+
+fn tier_status(tier: Tier) -> &'static str {
+    match tier {
+        Tier::P1 => IMPLEMENTED,
+        Tier::P2 => STUBBED,
+        Tier::X => TIER_X,
+        Tier::R => UNIMPLEMENTED,
+    }
+}
+
+/// A row of a ranked table: its number, name and status.
+type RowKey = (i32, String, &'static str);
+
+/// What uses one row.
+#[derive(Default)]
+struct Usage {
+    scripts: BTreeSet<String>,
+    uses: u64,
+}
+
+/// The scan's tallies.
+#[derive(Default)]
+struct Gap {
+    scanned: u64,
+    /// Scripts that could not be read or decoded, with why.
+    failed: Vec<(String, String)>,
+    words: BTreeMap<RowKey, Usage>,
+    hooks: BTreeMap<RowKey, Usage>,
+}
+
+fn count(rows: &mut BTreeMap<RowKey, Usage>, row: RowKey, script: &str) {
+    let usage = rows.entry(row).or_default();
+    usage.uses += 1;
+    if !usage.scripts.contains(script) {
+        usage.scripts.insert(script.to_owned());
+    }
+}
+
+/// The values `instruction` pops and pushes, when it can sit inside an operand
+/// expression and they are fixed. `None` stops the walk of [`operand`]: control
+/// flow and a variable or reserved word have no such effect.
+fn effect(instruction: &Instruction, table: &Table) -> Option<(usize, usize)> {
+    if instruction.immediate.is_some() {
+        return Some((0, 1));
+    }
+    let (pops, pushes) = match instruction.word {
+        0x8000 | 0x8002 | 0x8003 | 0x804a | 0x804b => (0, 0),
+        0x800c => (0, 1),
+        0x8012 | 0x8014 | 0x8028 | 0x802d | 0x8032 | 0x8043..=0x8046 => (1, 1),
+        0x8033..=0x8042 => (2, 1),
+        word @ 0x804c..=0xffff => table.signature(word)?,
+        _ => return None,
+    };
+    Some((usize::from(pops), usize::from(pushes)))
+}
+
+/// The constant push that left the operand `depth` values below the top of the
+/// stack when `listing[at]` runs, walking back through straight-line code. `None`
+/// when a walk meets anything [`effect`] stops at, or the value is computed.
+/// Every jump into an expression needs a jump over it first, so stopping at
+/// control flow also keeps the walk from crossing a merge.
+fn operand<'a>(
+    listing: &'a [Instruction],
+    at: usize,
+    mut depth: usize,
+    table: &Table,
+) -> Option<&'a Instruction> {
+    for index in (0..at).rev() {
+        let instruction = &listing[index];
+        let (pops, pushes) = if instruction.word == CALL {
+            let arguments = operand(listing, index, 1, table).and_then(constant_int)?;
+            (2 + usize::try_from(arguments).ok()?, 1)
+        } else {
+            effect(instruction, table)?
+        };
+        if depth < pushes {
+            return instruction.immediate.is_some().then_some(instruction);
+        }
+        depth = depth - pushes + pops;
+    }
+    None
+}
+
+/// The value of an integer push.
+fn constant_int(instruction: &Instruction) -> Option<i32> {
+    let value = Value {
+        payload: instruction.immediate?,
+        tag: instruction.word,
+    };
+    (base_tag(value) == Value::INTEGER).then_some(value.payload as i32)
+}
+
+/// The text of a static string push.
+fn constant_text<'a>(program: &'a IntProgram, instruction: &Instruction) -> Option<&'a [u8]> {
+    let value = Value {
+        payload: instruction.immediate?,
+        tag: instruction.word,
+    };
+    (base_tag(value) == Value::STATIC_STRING)
+        .then(|| program.literal(value.payload))
+        .flatten()
+}
+
+/// Whether `text` has a function name's shape. A script's other strings are
+/// its contents, and those are never printed.
+fn name_shaped(text: &[u8]) -> bool {
+    (1..=64).contains(&text.len())
+        && text
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+}
+
+/// A sub-function's row of `rows`: `family`'s unknown-number rule otherwise.
+fn sub_function(rows: &[SfallRow], family: &str, sub: Option<i32>) -> (String, &'static str) {
+    let Some(sub) = sub else {
+        return (format!("{family}(?)"), UNRESOLVED);
+    };
+    rows.iter()
+        .find(|row| i32::from(row.id) == sub)
+        .map_or_else(
+            || (format!("{family}({sub})"), UNIMPLEMENTED),
+            |row| (row.name.to_owned(), tier_status(row.tier)),
+        )
+}
+
+/// A `sfall_funcN` call: its function by name, as §4.2 matches it.
+fn named_function(family: &str, name: Option<&[u8]>) -> (String, &'static str) {
+    let Some(name) = name else {
+        return (format!("{family}(?)"), UNRESOLVED);
+    };
+    let shown = String::from_utf8_lossy(name).into_owned();
+    match sfall::function_tier(name) {
+        Some(tier) => (shown, tier_status(tier)),
+        None if name_shaped(name) => (shown, UNIMPLEMENTED),
+        None => (format!("{family}(not a name)"), UNIMPLEMENTED),
+    }
+}
+
+/// What the instruction `listing[at]` counts as in the word table, under
+/// SPEC-024b's meanings, if it is an sfall word at all. A dispatcher call counts
+/// as the row it selects: the deepest operand, in every dispatcher's public call
+/// order the first argument.
+fn word_use(
+    program: &IntProgram,
+    listing: &[Instruction],
+    at: usize,
+    table: &Table,
+) -> Option<(String, &'static str)> {
+    let word = listing[at].word;
+    let selector = |row: &SfallRow| {
+        let depth = usize::from(row.pops.unwrap_or(1)).saturating_sub(1);
+        operand(listing, at, depth, table)
+    };
+    let metarule3 = &SFALL_METARULE3[0];
+    if word == metarule3.dispatch {
+        let sub = selector(metarule3).and_then(constant_int);
+        if sub.is_some_and(|sub| ENGINE_METARULES.contains(&sub)) {
+            return None;
+        }
+        return Some(sub_function(&SFALL_METARULE3, "metarule3", sub));
+    }
+    if word > sfall::LAST_WORD {
+        return Some(sfall::mod_row(word).map_or_else(
+            || ("unknown".to_owned(), UNIMPLEMENTED),
+            |row| (row.name.to_owned(), tier_status(row.tier)),
+        ));
+    }
+    let row = sfall::word_row(word)?;
+    if word == SFALL_EXPLOSIONS[0].dispatch {
+        let sub = selector(row).and_then(constant_int);
+        return Some(sub_function(&SFALL_EXPLOSIONS, row.name, sub));
+    }
+    if SFALL_FUNCTIONS.iter().any(|row| row.dispatch == word) {
+        let name = selector(row).and_then(|name| constant_text(program, name));
+        return Some(named_function(row.name, name));
+    }
+    let name = if row.tier == Tier::R {
+        "reserved"
+    } else {
+        row.name
+    };
+    Some((name.to_owned(), tier_status(row.tier)))
+}
+
+/// A hook by ID, whatever registered it. §6.2 ignores an ID without a row.
+fn hook_key(id: i32) -> RowKey {
+    match sfall::hook_row(id) {
+        Some(row) => (
+            id,
+            row.name.to_owned(),
+            if row.fires { IMPLEMENTED } else { STUBBED },
+        ),
+        None => (id, "unknown".to_owned(), UNIMPLEMENTED),
+    }
+}
+
+/// The hook `listing[at]` registers, when it is §6.2's registration word: the
+/// hook ID is its first argument, and procedure 0 unregisters instead.
+fn registered_hook(listing: &[Instruction], at: usize, table: &Table) -> Option<RowKey> {
+    let word = listing[at].word;
+    let pops = match word {
+        REGISTER_HOOK => 1,
+        REGISTER_HOOK_PROC | REGISTER_HOOK_PROC_SPEC => 2,
+        _ => return None,
+    };
+    let int = |depth| operand(listing, at, depth, table).and_then(constant_int);
+    if pops == 2 && int(0) == Some(0) {
+        return None;
+    }
+    Some(int(pops - 1).map_or((-1, "(hook not read)".to_owned(), UNRESOLVED), hook_key))
+}
+
+/// §6.1: the hooks a `.INT` serves by its name alone, under a `scripts` folder.
+fn hook_file_rows(path: &str) -> Vec<RowKey> {
+    let mut parts = path.rsplit('/');
+    let (Some(file), Some("scripts")) = (parts.next(), parts.next()) else {
+        return Vec::new();
+    };
+    SFALL_HOOKS
+        .iter()
+        .filter(|row| row.file.eq_ignore_ascii_case(file))
+        .map(|row| hook_key(row.id))
+        .collect()
+}
+
+/// Every `.INT` in `vfs`, by path, whatever folder holds it. A script that
+/// cannot be read or decoded is counted and named, and the next one is read.
+fn scan(vfs: &dyn Vfs) -> Gap {
+    // SPEC-024b §3.2: the loader must not refuse what this report exists to
+    // show, so every bit-15 word decodes, and the tables below say what it is.
+    let every = WordSet {
+        words: 0x8000..=0xffff,
+        mods: false,
+    };
+    let mode = DecodeMode::new(&every, false);
+    let table = Table::new(WordSet::FALLOUT2_SFALL.with_mods(true));
+    let mut gap = Gap::default();
+    for path in vfs.files().filter(|path| path.extension() == Some("int")) {
+        let path = path.as_str();
+        let script = path.strip_prefix("scripts/").unwrap_or(path);
+        let parsed = vfs
+            .read_bounded(path, MAX_ASSET_BYTES)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| {
+                IntProgram::parse_in(&bytes, &every, false).map_err(|error| error.to_string())
+            });
+        let program = match parsed {
+            Ok(program) => program,
+            Err(error) => {
+                gap.failed.push((script.to_owned(), kind(&error)));
+                continue;
+            }
+        };
+        gap.scanned += 1;
+        for row in hook_file_rows(path) {
+            count(&mut gap.hooks, row, script);
+        }
+        let start = program.code_start as u32;
+        let listing = disassemble_with(program.image(), start, usize::MAX, mode);
+        for at in 0..listing.len() {
+            if listing[at].immediate.is_some() {
+                continue;
+            }
+            if let Some((name, status)) = word_use(&program, &listing, at, &table) {
+                let row = (i32::from(listing[at].word), name, status);
+                count(&mut gap.words, row, script);
+            }
+            if let Some(row) = registered_hook(&listing, at, &table) {
+                count(&mut gap.hooks, row, script);
+            }
+        }
+    }
+    gap
+}
+
+/// Rows ranked by scripts affected, then uses, then number and name, so the
+/// output is deterministic.
+fn ranked(rows: &BTreeMap<RowKey, Usage>) -> Vec<(&RowKey, &Usage)> {
+    let mut ranked: Vec<_> = rows.iter().collect();
+    ranked.sort_by(|a, b| {
+        let rank = |row: &(&RowKey, &Usage)| (row.1.scripts.len(), row.1.uses);
+        rank(b).cmp(&rank(a)).then_with(|| a.0.cmp(b.0))
+    });
+    ranked
+}
+
+/// The table `rows`, each row's number written by `number`.
+fn print_table(
+    title: &str,
+    column: &str,
+    rows: &BTreeMap<RowKey, Usage>,
+    number: impl Fn(&RowKey) -> String,
+) {
+    let uses: u64 = rows.values().map(|usage| usage.uses).sum();
+    println!("Sfall gap {title}: {} rows, {uses} uses", rows.len());
+    println!("{column}\tname\tstatus\tscripts\tuses\tfirst scripts");
+    for (key, usage) in ranked(rows) {
+        let shown: Vec<&str> = usage
+            .scripts
+            .iter()
+            .take(SCRIPTS_SHOWN)
+            .map(String::as_str)
+            .collect();
+        let more = usage.scripts.len() - shown.len();
+        let more = if more == 0 {
+            String::new()
+        } else {
+            format!(", +{more} more")
+        };
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}{more}",
+            number(key),
+            key.1,
+            key.2,
+            usage.scripts.len(),
+            usage.uses,
+            shown.join(", ")
+        );
+    }
+}
+
+/// The files directly in `dir`, by name.
+fn entries(dir: &Path) -> Vec<PathBuf> {
+    let found = std::fs::read_dir(dir).into_iter().flatten().flatten();
+    let mut paths: Vec<PathBuf> = found.map(|entry| entry.path()).collect();
+    paths.sort();
+    paths
+}
+
+fn is_dat(path: &Path) -> bool {
+    let extension = path.extension().and_then(|extension| extension.to_str());
+    path.is_file() && extension.is_some_and(|extension| extension.eq_ignore_ascii_case("dat"))
+}
+
+/// `folder` as the report reads it. A folder with both databases is an install,
+/// over its `data` root; any other is a mod's, its files loose. Above that, by
+/// name, come the `.dat` files beside the databases and those in `mods`, then
+/// (for an install, whose `data` root does not reach them) the folders in `mods`,
+/// then `layers`. A layer that will not mount is named, and the rest are read.
+fn gap_mount(folder: &Path, layers: &[PathBuf]) -> Result<Arc<dyn Vfs>, Box<dyn Error>> {
+    let databases = ["MASTER.DAT", "CRITTER.DAT"];
+    let install = databases
+        .iter()
+        .all(|name| entry_any_case(folder, name, Path::is_file).is_some());
+    let (base, mounted): (Arc<dyn Vfs>, String) = if install {
+        let (vfs, format) = mount_install(folder, data_root(folder)?)?;
+        (vfs, format!("an install's {format} databases"))
+    } else {
+        let loose = LocalDirProvider::mount(folder)?;
+        (Arc::new(loose), "a mod's loose files".to_owned())
+    };
+    let database = |path: &Path| {
+        let name = path.file_name().and_then(|name| name.to_str());
+        install
+            && name.is_some_and(|name| {
+                databases
+                    .iter()
+                    .chain(&["patch000.dat"])
+                    .any(|database| database.eq_ignore_ascii_case(name))
+            })
+    };
+    let mut sources: Vec<PathBuf> = entries(folder)
+        .into_iter()
+        .filter(|path| is_dat(path) && !database(path))
+        .collect();
+    if let Some(mods) = entry_any_case(folder, "mods", Path::is_dir) {
+        let held = entries(&mods).into_iter();
+        sources.extend(held.filter(|path| is_dat(path) || (install && path.is_dir())));
+    }
+    sources.extend_from_slice(layers);
+    let mut mounted_layers = Vec::new();
+    let mut refused = 0_u64;
+    for source in &sources {
+        let name = source.file_name().map_or_else(
+            || source.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        match mod_layer(source) {
+            Ok(layer) => {
+                println!("Sfall gap layer: {name}");
+                mounted_layers.push(layer);
+            }
+            Err(error) => {
+                refused += 1;
+                println!(
+                    "Sfall gap layer refused: {name}: {}",
+                    kind(&error.to_string())
+                );
+            }
+        }
+    }
+    println!(
+        "Sfall gap mount: {mounted}, {} layers, {refused} refused",
+        mounted_layers.len()
+    );
+    if mounted_layers.is_empty() {
+        return Ok(base);
+    }
+    Ok(Arc::new(LayeredVfs::new(base, mounted_layers)))
+}
+
+/// The gap report: never a failed run. Only counts, word numbers, script and
+/// function names and hook IDs are printed. A string that is not shaped like a
+/// function name is never printed.
+pub fn gap_report(folder: &Path, layers: &[PathBuf]) -> Result<(), Box<dyn Error>> {
+    let vfs = gap_mount(folder, layers)?;
+    let gap = scan(&*vfs);
+    println!(
+        "Sfall gap scripts: {} decoded, {} failed",
+        gap.scanned,
+        gap.failed.len()
+    );
+    for (script, error) in &gap.failed {
+        println!("Sfall gap failed script: {script}: {error}");
+    }
+    print_table("words", "word", &gap.words, |key| format!("{:#06x}", key.0));
+    print_table("hooks", "hook", &gap.hooks, |key| {
+        if key.2 == UNRESOLVED {
+            "?".to_owned()
+        } else {
+            key.0.to_string()
+        }
+    });
+    let statuses = |rows: &BTreeMap<RowKey, Usage>, status: &str| {
+        rows.keys().filter(|key| key.2 == status).count()
+    };
+    let lacking: BTreeSet<&String> = gap
+        .words
+        .iter()
+        .chain(&gap.hooks)
+        .filter(|(key, _)| key.2 != IMPLEMENTED)
+        .flat_map(|(_, usage)| &usage.scripts)
+        .collect();
+    println!(
+        "Sfall gap summary: words {} P1, {} P2 stubbed, {} tier X, {} unimplemented, {} \
+         unresolved; hooks {} P1, {} P2 stubbed, {} unimplemented, {} unresolved; {} scripts \
+         use a row that is not P1",
+        statuses(&gap.words, IMPLEMENTED),
+        statuses(&gap.words, STUBBED),
+        statuses(&gap.words, TIER_X),
+        statuses(&gap.words, UNIMPLEMENTED),
+        statuses(&gap.words, UNRESOLVED),
+        statuses(&gap.hooks, IMPLEMENTED),
+        statuses(&gap.hooks, STUBBED),
+        statuses(&gap.hooks, UNIMPLEMENTED),
+        statuses(&gap.hooks, UNRESOLVED),
+        lacking.len()
+    );
+    println!(
+        "Sfall gap scope: a linear scan of what the files hold, not what a run reaches. Selectors \
+         are read only from constants in straight-line code; code a script guards or never \
+         calls still counts, and a word's meaning is sfall mode's."
     );
     Ok(())
 }

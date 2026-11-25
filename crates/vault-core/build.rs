@@ -1,168 +1,160 @@
-//! Compile the approved SPEC-007 critical tables and the SPEC-008 fixed
-//! world catalogs into exhaustive, checked data, plus the same data as
-//! canonical `campaign_<table>.txt` text (the format `tables.rs` parses and
-//! a mod may override through the VFS).
+//! Compile the critical tables of SPEC-007 and the fixed world catalogs of
+//! SPEC-008 into exhaustive, checked data, plus the same data as canonical
+//! `campaign_<table>.txt` text (the format `tables.rs` parses and a mod may
+//! override through the VFS). The input is their committed form under
+//! `oracle/`. No build reads a spec: `tests/table_sync.rs` holds these tables
+//! to the specs' text.
+#[path = "../../tools/build-support/tsv_table.rs"]
+mod tsv_table;
+
 use std::{env, fs, path::PathBuf};
+use tsv_table::{Row, Table, build_input};
+
+const SUCCESS_TIERS: usize = 6;
+const SUCCESS_LOCATIONS: usize = 9;
+const SUCCESS_VICTIMS: usize = 16;
+const HOTSPOT_ROWS: usize = 15;
+const HOTSPOT_SLOTS: usize = 7;
+const GRID_DIGITS: usize = 28;
+
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), String> {
+    critical_tables()?;
+    world_tables()
+}
+
+/// A file of OUT_DIR.
+fn output(name: &str, contents: String) -> Result<(), String> {
+    let out = env::var_os("OUT_DIR").ok_or("OUT_DIR is not set")?;
+    fs::write(PathBuf::from(out).join(name), contents).map_err(|error| format!("{name}: {error}"))
+}
 
 /// Write one canonical table text into OUT_DIR: a comment header naming
 /// its fields, then one `|`-separated record per line.
-fn canonical(name: &str, fields: &str, lines: &[String]) {
+fn canonical(name: &str, fields: &str, lines: &[String]) -> Result<(), String> {
     let mut text = format!("# vault-engine campaign table: {name}\n# {fields}\n");
     for line in lines {
         text.push_str(line);
         text.push('\n');
     }
-    fs::write(
-        PathBuf::from(env::var_os("OUT_DIR").unwrap()).join(format!("campaign_{name}.txt")),
-        text,
-    )
-    .unwrap();
+    output(&format!("campaign_{name}.txt"), text)
 }
 
-/// One slash-separated matrix entry: only the second and fifth values are hex.
-fn entry(cell: &str) -> [i64; 7] {
-    let fields: Vec<_> = cell.split('/').collect();
-    assert_eq!(
-        fields.len(),
-        7,
-        "critical entry {cell:?} needs seven values"
-    );
-    std::array::from_fn(|index| {
-        let field = fields[index];
-        if matches!(index, 1 | 4) {
-            i64::from_str_radix(field, 16).expect("hexadecimal effect mask")
-        } else {
-            field.parse().expect("decimal critical value")
-        }
-    })
-}
-
-fn section<'a>(text: &'a str, heading: &str) -> &'a str {
-    let start = text.find(heading).expect("SPEC-007 section");
-    let rest = &text[start + heading.len()..];
-    &rest[..rest.find("\n### ").unwrap_or(rest.len())]
-}
-
-fn cells(line: &str) -> Vec<&str> {
-    line.split('|').map(str::trim).collect()
-}
-
-fn main() {
-    let spec = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
-        .join("../../specs/approved/SPEC-007-critter-fid-pathfinding-combat.md");
-    println!("cargo:rerun-if-changed={}", spec.display());
-    let text = fs::read_to_string(spec).expect("approved SPEC-007 must be present");
-
-    // Section 2.5: victim tables 0-14 and the player matrix P (index 15),
-    // locations 0-8, tiers 0-5. `=` repeats the entire entry to its left.
-    let mut matrices = vec![vec![None; 9]; 16];
-    for line in section(&text, "### 2.5").lines() {
-        let row = cells(line);
-        if row.len() != 10 {
-            continue;
-        }
-        let victim = match row[1] {
-            "P" => 15,
-            value => match value.parse::<usize>() {
-                Ok(victim) if victim <= 14 => victim,
-                _ => continue,
-            },
-        };
-        let location: usize = row[2].parse().expect("location number");
-        assert!(location <= 8, "location 0-8");
-        let mut tiers: Vec<[i64; 7]> = Vec::with_capacity(6);
-        for cell in &row[3..9] {
-            let value = if *cell == "=" {
-                *tiers.last().expect("`=` needs an entry to its left")
-            } else {
-                entry(cell)
-            };
-            tiers.push(value);
-        }
-        assert!(
-            matrices[victim][location].replace(tiers).is_none(),
-            "duplicate critical row {victim}/{location}"
-        );
+/// The victim, location and tier of `row`, the entry numbered `index`: these
+/// columns must count up through every entry of the matrices.
+fn critical_entry(row: &Row, index: usize) -> Result<[usize; 3], String> {
+    let place = [
+        row.parse("victim")?,
+        row.parse("location")?,
+        row.parse("tier")?,
+    ];
+    let wanted = [
+        index / (SUCCESS_LOCATIONS * SUCCESS_TIERS),
+        index / SUCCESS_TIERS % SUCCESS_LOCATIONS,
+        index % SUCCESS_TIERS,
+    ];
+    if place != wanted {
+        return Err(row.error(format_args!(
+            "victim, location and tier must be {wanted:?} here, found {place:?}"
+        )));
     }
+    Ok(place)
+}
+
+/// SPEC-007 sections 2.4 and 2.5.
+fn critical_tables() -> Result<(), String> {
+    let table = build_input(
+        "oracle/SPEC-007/critical-success.tsv",
+        Some("SPEC-007 section 2.5"),
+        &[
+            "victim",
+            "location",
+            "tier",
+            "multiplier",
+            "flags",
+            "save_stat",
+            "save_adjustment",
+            "failed_flags",
+            "message",
+            "failed_message",
+        ],
+    )?;
     let mut source =
         String::from("pub static CRITICAL_SUCCESS: [[[CriticalEffect; 6]; 9]; 16] = [\n");
-    let mut count = 0;
     let mut critical_text = Vec::new();
-    for (victim, locations) in matrices.iter().enumerate() {
-        source.push_str("[\n");
-        for (location, tiers) in locations.iter().enumerate() {
-            let tiers = tiers
-                .as_ref()
-                .unwrap_or_else(|| panic!("missing critical row {victim}/{location}"));
-            source.push('[');
-            for (
-                tier,
-                [
-                    multiplier,
-                    flags,
-                    stat,
-                    adjustment,
-                    failed,
-                    message,
-                    alternate,
-                ],
-            ) in tiers.iter().enumerate()
-            {
-                count += 1;
-                critical_text.push(format!(
-                    "{victim}|{location}|{tier}|{multiplier}|{flags:x}|{stat}|{adjustment}|\
-                     {failed:x}|{message}|{alternate}"
-                ));
-                source.push_str(&format!(
-                    "CriticalEffect{{multiplier:{multiplier},flags:{flags:#x},save_stat:{stat},\
-                     save_adjustment:{adjustment},failed_flags:{failed:#x},message:{message},\
-                     failed_message:{alternate}}},"
-                ));
-            }
-            source.push_str("],\n");
+    for (index, row) in table.rows().enumerate() {
+        let [victim, location, tier] = critical_entry(&row, index)?;
+        let multiplier: i64 = row.parse("multiplier")?;
+        let flags = row.hex("flags")?;
+        let stat: i64 = row.parse("save_stat")?;
+        let adjustment: i64 = row.parse("save_adjustment")?;
+        let failed = row.hex("failed_flags")?;
+        let message: i64 = row.parse("message")?;
+        let alternate: i64 = row.parse("failed_message")?;
+        if location == 0 && tier == 0 {
+            source.push_str("[\n");
         }
-        source.push_str("],\n");
+        if tier == 0 {
+            source.push('[');
+        }
+        critical_text.push(format!(
+            "{victim}|{location}|{tier}|{multiplier}|{flags:x}|{stat}|{adjustment}|\
+             {failed:x}|{message}|{alternate}"
+        ));
+        source.push_str(&format!(
+            "CriticalEffect{{multiplier:{multiplier},flags:{flags:#x},save_stat:{stat},\
+             save_adjustment:{adjustment},failed_flags:{failed:#x},message:{message},\
+             failed_message:{alternate}}},"
+        ));
+        if tier + 1 == SUCCESS_TIERS {
+            source.push_str("],\n");
+            if location + 1 == SUCCESS_LOCATIONS {
+                source.push_str("],\n");
+            }
+        }
     }
     source.push_str("];\n");
-    assert_eq!(count, 864, "all 864 critical entries must be present");
+    table.expect_rows(SUCCESS_VICTIMS * SUCCESS_LOCATIONS * SUCCESS_TIERS)?;
     canonical(
         "critical",
         "victim|location|tier|multiplier|flags (hex)|save stat|save adjustment|failed flags (hex)|message|failed message",
         &critical_text,
-    );
+    )?;
 
-    // Section 2.4: critical-failure masks, tables 0-6 by columns 0-4.
+    const MASKS: [&str; 5] = ["column_0", "column_1", "column_2", "column_3", "column_4"];
+    let table = build_input(
+        "oracle/SPEC-007/critical-failure.tsv",
+        Some("SPEC-007 section 2.4"),
+        &["table", MASKS[0], MASKS[1], MASKS[2], MASKS[3], MASKS[4]],
+    )?;
     let mut failures = Vec::new();
     let mut failure_text = Vec::new();
-    let failure = section(&text, "### 2.4");
-    let table = &failure[failure
-        .find("| Failure table number")
-        .expect("failure table")..];
-    for line in table.lines().skip(2) {
-        let row = cells(line);
-        if row.len() != 8 {
-            break;
+    for row in table.rows() {
+        let number: usize = row.parse("table")?;
+        if number != failures.len() {
+            return Err(row.column_error("table", "failure tables run 0 to 6 in order"));
         }
-        assert_eq!(row[1].parse::<usize>().ok(), Some(failures.len()));
-        let masks: Vec<_> = row[2..7]
+        let masks = MASKS
             .iter()
-            .map(|mask| format!("{:x}", u32::from_str_radix(mask, 16).expect("hex mask")))
-            .collect();
-        failure_text.push(format!("{}|{}", failures.len(), masks.join("|")));
-        failures.push(
-            row[2..7]
-                .iter()
-                .map(|mask| format!("{:#x}", u32::from_str_radix(mask, 16).expect("hex mask")))
-                .collect::<Vec<_>>()
-                .join(","),
-        );
+            .map(|column| row.hex(column))
+            .collect::<Result<Vec<_>, _>>()?;
+        let text: Vec<_> = masks.iter().map(|mask| format!("{mask:x}")).collect();
+        failure_text.push(format!("{number}|{}", text.join("|")));
+        let hex: Vec<_> = masks.iter().map(|mask| format!("{mask:#x}")).collect();
+        failures.push(hex.join(","));
     }
-    assert_eq!(failures.len(), 7, "failure tables 0-6");
+    table.expect_rows(7)?;
     canonical(
         "critical_failure",
         "table|column 0|column 1|column 2|column 3|column 4 (hex masks)",
         &failure_text,
-    );
+    )?;
     source.push_str(&format!(
         "pub const CRITICAL_FAILURE: [[u32; 5]; 7] = [{}];\n",
         failures
@@ -171,202 +163,232 @@ fn main() {
             .collect::<Vec<_>>()
             .join(",")
     ));
-    fs::write(
-        PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("critical_tables.rs"),
-        source,
-    )
-    .unwrap();
-    world_tables();
+    output("critical_tables.rs", source)
+}
+
+/// One row's digits of a grid, as array elements.
+fn grid_cells(row: &Row, column: &str) -> Result<(String, String), String> {
+    let digits = row.text(column)?;
+    if digits.len() != GRID_DIGITS {
+        return Err(row.column_error(
+            column,
+            format_args!("{} digits, but a row has {GRID_DIGITS}", digits.len()),
+        ));
+    }
+    let cells = digits
+        .chars()
+        .map(|digit| match digit.to_digit(16) {
+            Some(value) if !digit.is_ascii_lowercase() => Ok(value.to_string()),
+            _ => Err(row.column_error(column, format_args!("{digit:?} is no grid digit"))),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((format!("[{}]", cells.join(",")), digits.to_owned()))
 }
 
 /// SPEC-008 Section 3.6 grids and the Section 3.7 town and hotspot catalogs.
-fn world_tables() {
-    let spec = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
-        .join("../../specs/approved/SPEC-008-dat-saves-and-worldmap.md");
-    println!("cargo:rerun-if-changed={}", spec.display());
-    let text = fs::read_to_string(spec).expect("approved SPEC-008 must be present");
-
+fn world_tables() -> Result<(), String> {
+    const GRIDS: [(&str, &str, &str); 3] = [
+        ("terrain", "terrain", "TERRAIN"),
+        ("frequency", "frequency", "FREQUENCY"),
+        ("region", "region", "REGION"),
+    ];
+    let table = build_input(
+        "oracle/SPEC-008/world-grids.tsv",
+        Some("SPEC-008 section 3.6"),
+        &["row", GRIDS[0].1, GRIDS[1].1, GRIDS[2].1],
+    )?;
     let mut grids: [Vec<String>; 3] = Default::default();
     let mut grid_text: [Vec<String>; 3] = Default::default();
-    for line in section(&text, "### 3.6").lines() {
-        let fields: Vec<_> = line.split_whitespace().collect();
-        let Some(row) = fields.first().and_then(|row| row.parse::<usize>().ok()) else {
-            continue;
-        };
-        assert_eq!(fields.len(), 4, "grid row {row} needs three column groups");
-        assert_eq!(row, grids[0].len(), "grid rows are in order");
-        for ((grid, lines), digits) in grids.iter_mut().zip(&mut grid_text).zip(&fields[1..]) {
-            assert_eq!(digits.len(), 28, "grid row {row} has 28 columns");
-            lines.push(format!("{row}|{}", digits.to_ascii_uppercase()));
-            let cells: Vec<_> = digits
-                .chars()
-                .map(|digit| digit.to_digit(16).expect("grid digit").to_string())
-                .collect();
-            grid.push(format!("[{}]", cells.join(",")));
+    for (index, row) in table.rows().enumerate() {
+        let number: usize = row.parse("row")?;
+        if number != index {
+            return Err(row.column_error("row", "grid rows are in order"));
+        }
+        for ((grid, lines), (_, column, _)) in grids.iter_mut().zip(&mut grid_text).zip(GRIDS) {
+            let (cells, digits) = grid_cells(&row, column)?;
+            lines.push(format!("{number}|{digits}"));
+            grid.push(cells);
         }
     }
+    table.expect_rows(30)?;
     let mut source = String::new();
-    for (name, lines) in ["terrain", "frequency", "region"].iter().zip(&grid_text) {
+    for ((name, _, _), lines) in GRIDS.iter().zip(&grid_text) {
         canonical(
             name,
             "row|28 hexadecimal cell digits, column 0 first",
             lines,
-        );
+        )?;
     }
-    for (name, grid) in ["TERRAIN", "FREQUENCY", "REGION"].iter().zip(&grids) {
-        assert_eq!(grid.len(), 30, "grid {name} has 30 rows");
+    for ((_, _, name), grid) in GRIDS.iter().zip(&grids) {
         source.push_str(&format!(
             "pub static {name}: [[u8; 28]; 30] = [{}];\n",
             grid.join(",")
         ));
     }
 
-    let towns = section(&text, "### 3.7");
+    let table = build_input(
+        "oracle/SPEC-008/towns.tsv",
+        Some("SPEC-008 section 3.7"),
+        &[
+            "id",
+            "name",
+            "column",
+            "row",
+            "known_global",
+            "entrance_globals",
+        ],
+    )?;
+    source.push_str(&towns(&table)?);
+    source.push_str(&hotspots()?);
+    source.push_str(&map_table(table.rows().count())?);
+    output("world_tables.rs", source)
+}
+
+/// The `TOWNS` static, and the canonical `towns` text.
+fn towns(table: &Table) -> Result<String, String> {
     let mut rows = Vec::new();
-    let mut town_names = Vec::new();
     let mut town_text = Vec::new();
-    for line in towns.lines() {
-        let row = cells(line);
-        if row.len() != 7 {
-            continue;
+    for row in table.rows() {
+        let id: usize = row.parse("id")?;
+        if id != rows.len() {
+            return Err(row.column_error("id", "towns are in id order"));
         }
-        let Ok(id) = row[1].parse::<usize>() else {
-            continue;
-        };
-        assert_eq!(id, rows.len(), "towns are in id order");
-        town_names.push(row[2].to_owned());
-        let (column, cell_row) = row[3].split_once(',').expect("cell column,row");
-        let entrances: Vec<usize> = row[5]
-            .split(',')
-            .map(|index| index.parse().expect("entrance campaign index"))
-            .collect();
+        let name = row.text("name")?;
+        let column: usize = row.parse("column")?;
+        let cell_row: usize = row.parse("row")?;
+        let known: usize = row.parse("known_global")?;
+        let entrances = row
+            .list("entrance_globals")?
+            .into_iter()
+            .map(|index| {
+                index.parse::<usize>().map_err(|error| {
+                    row.column_error("entrance_globals", format_args!("{index:?}: {error}"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let listed: Vec<_> = entrances.iter().map(usize::to_string).collect();
         town_text.push(format!(
-            "{id}|{}|{}|{}|{}|{}",
-            row[2],
-            column.parse::<usize>().expect("cell column"),
-            cell_row.parse::<usize>().expect("cell row"),
-            row[4].parse::<usize>().expect("known-town index"),
-            entrances
-                .iter()
-                .map(usize::to_string)
-                .collect::<Vec<_>>()
-                .join(","),
+            "{id}|{name}|{column}|{cell_row}|{known}|{}",
+            listed.join(",")
         ));
         rows.push(format!(
-            "Town{{name:{:?},cell:[{},{}],known_global:{},entrance_globals:&{:?}}}",
-            row[2],
-            column.parse::<usize>().expect("cell column"),
-            cell_row.parse::<usize>().expect("cell row"),
-            row[4].parse::<usize>().expect("known-town index"),
-            entrances,
+            "Town{{name:{name:?},cell:[{column},{cell_row}],known_global:{known},\
+             entrance_globals:&{entrances:?}}}"
         ));
     }
-    assert_eq!(rows.len(), 12, "towns 0-11");
+    table.expect_rows(12)?;
     canonical(
         "towns",
         "id|name|cell column|cell row|known-town global|entrance globals (comma-separated)",
         &town_text,
-    );
-    source.push_str(&format!(
+    )?;
+    Ok(format!(
         "pub static TOWNS: [Town; 12] = [{}];\n",
         rows.join(",")
-    ));
+    ))
+}
 
-    let catalog = &towns[towns.find("```text").expect("hotspot catalog") + 7..];
-    let catalog = &catalog[..catalog.find("```").expect("catalog end")];
-    let mut hotspots = Vec::new();
+/// The `HOTSPOTS` static, and the canonical `hotspots` text.
+fn hotspots() -> Result<String, String> {
+    let table = build_input(
+        "oracle/SPEC-008/hotspots.tsv",
+        Some("SPEC-008 section 3.7"),
+        &["knowledge_row", "slot", "x", "y", "entry", "map"],
+    )?;
+    let mut hotspots = vec![vec![String::from("Hotspot::EMPTY"); HOTSPOT_SLOTS]; HOTSPOT_ROWS];
     let mut hotspot_text = Vec::new();
-    for line in catalog.lines().filter(|line| !line.trim().is_empty()) {
-        let (row, slots) = line.split_once(": ").expect("hotspot row");
-        assert_eq!(row.parse::<usize>().ok(), Some(hotspots.len()));
-        let mut entries = vec![String::from("Hotspot::EMPTY"); 7];
-        for slot in slots.split("; ") {
-            let (index, fields) = slot.split_once(':').expect("slot index");
-            let index: usize = index.parse().expect("slot number");
-            let fields: Vec<_> = fields.split('/').collect();
-            assert_eq!(fields.len(), 4, "x/y/entry/filename");
-            hotspot_text.push(format!(
-                "{}|{index}|{}|{}|{}|{}",
-                hotspots.len(),
-                fields[0].parse::<i32>().expect("anchor x"),
-                fields[1].parse::<i32>().expect("anchor y"),
-                fields[2].parse::<i32>().expect("entry selector"),
-                fields[3],
-            ));
-            entries[index] = format!(
-                "Hotspot{{x:{},y:{},entry:{},map:{:?}}}",
-                fields[0].parse::<i32>().expect("anchor x"),
-                fields[1].parse::<i32>().expect("anchor y"),
-                fields[2].parse::<i32>().expect("entry selector"),
-                fields[3],
-            );
+    let mut previous = None;
+    for row in table.rows() {
+        let place: (usize, usize) = (row.parse("knowledge_row")?, row.parse("slot")?);
+        let (knowledge, slot) = place;
+        if knowledge >= HOTSPOT_ROWS || slot >= HOTSPOT_SLOTS {
+            return Err(row.error(format_args!(
+                "knowledge rows run to {} and slots to {}",
+                HOTSPOT_ROWS - 1,
+                HOTSPOT_SLOTS - 1
+            )));
         }
-        hotspots.push(format!("[{}]", entries.join(",")));
+        if previous.is_some_and(|before| before >= place) {
+            return Err(row.error("hotspots are in row and slot order"));
+        }
+        previous = Some(place);
+        let x: i32 = row.parse("x")?;
+        let y: i32 = row.parse("y")?;
+        let entry: i32 = row.parse("entry")?;
+        let map = row.text("map")?;
+        hotspot_text.push(format!("{knowledge}|{slot}|{x}|{y}|{entry}|{map}"));
+        hotspots[knowledge][slot] = format!("Hotspot{{x:{x},y:{y},entry:{entry},map:{map:?}}}");
     }
-    assert_eq!(hotspots.len(), 15, "hotspot rows 0-14");
+    if let Some(empty) = hotspots
+        .iter()
+        .position(|row| row.iter().all(|slot| slot == "Hotspot::EMPTY"))
+    {
+        return Err(format!(
+            "{}: knowledge row {empty} has no hotspot",
+            table.file()
+        ));
+    }
     canonical(
         "hotspots",
         "knowledge row|slot|x|y|entry selector|map file (listed slots only)",
         &hotspot_text,
-    );
-    source.push_str(&format!(
+    )?;
+    let rows: Vec<_> = hotspots
+        .iter()
+        .map(|row| format!("[{}]", row.join(",")))
+        .collect();
+    Ok(format!(
         "pub static HOTSPOTS: [[Hotspot; 7]; 15] = [{}];\n",
-        hotspots.join(",")
-    ));
-    source.push_str(&map_table(&text, &town_names));
-    fs::write(
-        PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("world_tables.rs"),
-        source,
-    )
-    .unwrap();
+        rows.join(",")
+    ))
 }
 
 /// SPEC-008 Section 3.10: the 66 map numbers with their `map.msg` text,
-/// fixed town and city music track. The table is exact data, so any change
-/// of its shape fails the build.
-fn map_table(text: &str, town_names: &[String]) -> String {
+/// fixed town and city music track. `towns` counts the towns of Section 3.7.
+fn map_table(towns: usize) -> Result<String, String> {
+    let table = build_input(
+        "oracle/SPEC-008/maps.tsv",
+        Some("SPEC-008 section 3.10"),
+        &["number", "name", "town", "music"],
+    )?;
     let mut rows = Vec::new();
     let mut map_text = Vec::new();
-    for line in section(text, "### 3.10").lines() {
-        let row = cells(line);
-        if row.len() != 6 {
-            continue;
+    for row in table.rows() {
+        let number: usize = row.parse("number")?;
+        if number != rows.len() {
+            return Err(row.column_error("number", "map numbers are in order"));
         }
-        let Ok(number) = row[1].parse::<usize>() else {
-            continue;
-        };
-        assert_eq!(number, rows.len(), "map numbers are in order");
-        let name = row[2].trim_matches('`');
-        assert!(
-            name.ends_with(".MAP") && name == name.to_ascii_uppercase() && name.len() <= 12,
-            "map {number} needs an uppercase 8.3 `.MAP` name, not {name:?}"
-        );
-        let (town, label) = row[3].split_once(' ').expect("town id and name");
-        let town: usize = town.parse().expect("town id");
-        assert!(
-            town_names
-                .get(town)
-                .is_some_and(|known| known.starts_with(label)),
-            "map {number} names town {town} {label:?}, which Section 3.7 does not"
-        );
-        let music = row[4].trim_matches('`');
-        assert!(
-            !music.is_empty() && music.is_ascii() && !music.contains(['/', '\\', '.']),
-            "map {number} needs a bare track name, not {music:?}"
-        );
+        let name = row.text("name")?;
+        if !(name.ends_with(".MAP") && name == name.to_ascii_uppercase() && name.len() <= 12) {
+            return Err(row.column_error(
+                "name",
+                format_args!("map {number} needs an uppercase 8.3 `.MAP` name, not {name:?}"),
+            ));
+        }
+        let town: usize = row.parse("town")?;
+        if town >= towns {
+            return Err(row.column_error("town", format_args!("no town {town}")));
+        }
+        let music = row.text("music")?;
+        if !music.is_ascii() || music.contains(['/', '\\', '.']) {
+            return Err(row.column_error(
+                "music",
+                format_args!("map {number} needs a bare track name, not {music:?}"),
+            ));
+        }
         map_text.push(format!("{number}|{name}|{town}|{music}"));
         rows.push(format!(
             "MapEntry{{name:{name:?},town:{town},music:{music:?}}}"
         ));
     }
-    assert_eq!(rows.len(), 66, "maps 0-65");
+    table.expect_rows(66)?;
     canonical(
         "maps",
         "number|map.msg name|town|city music track",
         &map_text,
-    );
-    format!(
+    )?;
+    Ok(format!(
         "pub static MAP_TABLE: [MapEntry; 66] = [{}];\n",
         rows.join(",")
-    )
+    ))
 }
