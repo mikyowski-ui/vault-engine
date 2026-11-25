@@ -333,6 +333,16 @@ pub fn apply(config: &mut Config, manifest: &ModManifest) {
     {
         config.roof_peek = Some(mode);
     }
+    if let Some(mode) = enhanced
+        .camera_follow
+        .as_deref()
+        .and_then(crate::enhanced::CameraFollow::parse)
+    {
+        config.camera_follow = Some(mode);
+    }
+    if let Some(margin) = enhanced.camera_recenter_margin {
+        config.camera_recenter_margin = Some(margin);
+    }
 }
 
 /// `config` with the `[enhanced]` settings of every enabled layer's
@@ -370,8 +380,9 @@ pub fn export_root(mod_list: Option<&ModList>) -> PathBuf {
 }
 
 /// The manifest of an exported setup named `name`: the `enhanced` preset
-/// with `settings`' viewport, smoothing and roof peek, and `zoom` (to two
-/// places, in range) as the zoom a map starts at.
+/// with `settings`' viewport, smoothing, roof peek and camera follow (mode
+/// and margin), and `zoom` (to two places, in range) as the zoom a map
+/// starts at.
 pub fn setup_manifest(
     name: &str,
     description: &str,
@@ -391,6 +402,8 @@ pub fn setup_manifest(
             default_zoom: Some(zoom),
             smooth_camera: Some(settings.smooth_camera),
             roof_peek: Some(config::roof_peek_name(settings.roof_peek).into()),
+            camera_follow: Some(settings.camera_follow.as_str().into()),
+            camera_recenter_margin: Some(settings.camera_recenter_margin),
         }),
         ..ModManifest::default()
     }
@@ -571,6 +584,68 @@ mod tests {
         );
         let error = with_mods(&config).unwrap_err();
         assert!(error.contains("maps") && error.contains("zoom"), "{error}");
+    }
+
+    /// A layer's `camera_follow` and `camera_recenter_margin` apply as its
+    /// other `[enhanced]` keys do; a bad value stops the launch; an
+    /// exported setup carries the session's mode and margin.
+    #[test]
+    fn layers_apply_and_exports_carry_the_camera_follow() {
+        use crate::enhanced::CameraFollow;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        manifest(
+            &root.join("mods/still"),
+            "name = \"Still\"\n[enhanced]\ncamera_follow = \"off\"\ncamera_recenter_margin = 0",
+        );
+        manifest(
+            &root.join("mods/smooth"),
+            "name = \"Smooth\"\n[enhanced]\ncamera_follow = \"smooth\"",
+        );
+        std::fs::write(
+            root.join("load_order.toml"),
+            "[[layer]]\npath = \"mods/still\"\n[[layer]]\npath = \"mods/smooth\"\n",
+        )
+        .unwrap();
+        let config = Config {
+            camera_follow: Some(CameraFollow::Step),
+            camera_recenter_margin: Some(200),
+            mod_list: Some(ModList::File(root.join("load_order.toml"))),
+            ..Config::default()
+        };
+        let (merged, applied) = with_mods(&config).unwrap();
+        assert_eq!(applied, ["Still", "Smooth"]);
+        assert_eq!(
+            merged.camera_follow,
+            Some(CameraFollow::Smooth),
+            "the higher wins"
+        );
+        assert_eq!(merged.camera_recenter_margin, Some(0));
+        manifest(
+            &root.join("mods/smooth"),
+            "name = \"Smooth\"\n[enhanced]\ncamera_follow = \"follow\"",
+        );
+        let error = with_mods(&config).unwrap_err();
+        assert!(
+            error.contains("smooth") && error.contains("follow"),
+            "{error}"
+        );
+        manifest(
+            &root.join("mods/smooth"),
+            "name = \"Smooth\"\n[enhanced]\ncamera_recenter_margin = 2000",
+        );
+        let error = with_mods(&config).unwrap_err();
+        assert!(error.contains("0 to 1024"), "{error}");
+        let settings = EnhancedSettings {
+            camera_follow: CameraFollow::Off,
+            camera_recenter_margin: 64,
+            ..EnhancedSettings::default()
+        };
+        let enhanced = setup_manifest("cam", "A camera", &settings, 1.0)
+            .enhanced
+            .unwrap();
+        assert_eq!(enhanced.camera_follow.as_deref(), Some("off"));
+        assert_eq!(enhanced.camera_recenter_margin, Some(64));
     }
 
     #[test]

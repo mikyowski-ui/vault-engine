@@ -222,9 +222,11 @@ impl Shell {
             .session
             .as_ref()
             .is_some_and(|session| session.hints_ready());
+        let center_view = center_view_hint(self.enhanced);
         let Some(toasts) = &mut self.toasts else {
             return;
         };
+        toasts.set_center_view(center_view);
         let changed = toasts.tick(now, ready);
         if toasts.take_finished() {
             self.finish_hints();
@@ -500,6 +502,41 @@ impl Shell {
         }
         self.refresh_preview(event_loop, window);
     }
+    /// Alt+C: the camera follow toggled, applied, logged and drawn.
+    fn toggle_camera_follow(&mut self, event_loop: &ActiveEventLoop, window: &Window) {
+        if self.apply_camera_follow_toggle().is_some() {
+            self.refresh_preview(event_loop, window);
+        }
+    }
+    /// Alt+C without the window: `off` becomes `smooth`, anything else
+    /// `off`. Logged as an `enhanced` record, as Alt+V's change is, then
+    /// given to the session, whose HUD names the new mode. `None` outside
+    /// an enhanced session.
+    pub(super) fn apply_camera_follow_toggle(&mut self) -> Option<enhanced::CameraFollow> {
+        let shell = self.enhanced?;
+        let current = self
+            .session
+            .as_mut()
+            .and_then(|session| session.enhanced_settings())
+            .unwrap_or(shell);
+        let mode = toggled_camera_follow(current.camera_follow);
+        let settings = enhanced::EnhancedSettings {
+            camera_follow: mode,
+            ..current
+        };
+        tracing::info!(camera_follow = mode.as_str(), "camera follow changed");
+        self.enhanced = Some(settings);
+        self.record(InputCommand::Enhanced {
+            settings: settings.into(),
+        });
+        if let Some(preview) = &mut self.session {
+            preview.set_enhanced(Some(settings));
+            if let Some(world) = replay::interactive_world(preview) {
+                world.announce_camera_follow(mode);
+            }
+        }
+        Some(mode)
+    }
     /// The drawn cursor moved: the next redraw presents it.
     pub(super) fn refresh_pointer(&mut self, window: &Window) {
         if self
@@ -589,7 +626,8 @@ impl Shell {
         }
     }
     /// F11 and Alt+Enter toggle borderless fullscreen, Alt+S the scaling
-    /// mode, and in an enhanced session Alt+V the viewport. The shell
+    /// mode, and in an enhanced session Alt+V the viewport, Alt+F the game
+    /// speed and Alt+C the camera follow. The shell
     /// keeps these keys: neither their presses (with the
     /// repeats) nor their releases reach the game or the input log.
     /// Returns whether the shell took the key.
@@ -624,7 +662,10 @@ impl Shell {
         }
         // The session under the selector takes no key of its own.
         if self.stopped.is_some()
-            && matches!(hotkey, ShellHotkey::Viewport | ShellHotkey::GameSpeed)
+            && matches!(
+                hotkey,
+                ShellHotkey::Viewport | ShellHotkey::GameSpeed | ShellHotkey::CameraFollow
+            )
         {
             return true;
         }
@@ -650,6 +691,7 @@ impl Shell {
                 self.log_scaling();
             }
             ShellHotkey::Viewport => self.toggle_viewport(event_loop, window),
+            ShellHotkey::CameraFollow => self.toggle_camera_follow(event_loop, window),
             ShellHotkey::GameSpeed => {
                 let speed = self.game_speed.unwrap_or_default().next();
                 tracing::info!(speed = speed.label(), "game speed changed");

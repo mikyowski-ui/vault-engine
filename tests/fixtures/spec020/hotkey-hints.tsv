@@ -5,4 +5,5 @@ order	key	text	condition
 4	P	P: Pip-Boy	Always
 5	Z	Z: Wait (Pip-Boy clock)	Always
 6	F9	F9: Debugger	Always
-7	Alt+L	Alt+L: Switch game	Both editions found
+7	Home	Home: Center view	camera_follow is off
+8	Alt+L	Alt+L: Switch game	Both editions found

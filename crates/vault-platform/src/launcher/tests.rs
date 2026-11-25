@@ -991,6 +991,8 @@ fn the_enhanced_display_rows_show_step_and_save_with_the_enhanced_preset() {
         Widget::Viewport,
         Widget::Zoom,
         Widget::SmoothCamera,
+        Widget::CameraFollow,
+        Widget::RecenterMargin,
         Widget::RoofPeek,
         Widget::UiScale,
         Widget::GameSpeed,
@@ -1013,8 +1015,8 @@ fn the_enhanced_display_rows_show_step_and_save_with_the_enhanced_preset() {
         .position(|widget| *widget == Widget::Fullscreen)
         .unwrap();
     assert_eq!(order[last - 1], Widget::Scaling);
-    assert_eq!(&order[last + 1..last + 8], &enhanced);
-    assert_eq!(order[last + 8], Widget::Save);
+    assert_eq!(&order[last + 1..last + 10], &enhanced);
+    assert_eq!(order[last + 10], Widget::Save);
     launcher.focus = Widget::Fullscreen;
     for widget in enhanced {
         key(&mut launcher, KeyCode::Tab);
@@ -1028,10 +1030,13 @@ fn the_enhanced_display_rows_show_step_and_save_with_the_enhanced_preset() {
             .iter()
             .all(|p| *p <= view::color::FIELD)
     );
-    // The defaults, then each choice.
+    // The defaults (a configured follow is `off`), then each choice.
     assert_eq!(
         launcher.active_enhanced().settings,
-        crate::enhanced::EnhancedSettings::default()
+        crate::enhanced::EnhancedSettings {
+            camera_follow: crate::enhanced::CameraFollow::CONFIGURED,
+            ..Default::default()
+        }
     );
     // Each goes in the active profile's table.
     launcher.focus = Widget::Viewport;
@@ -1150,6 +1155,8 @@ fn the_enhanced_display_rows_show_step_and_save_with_the_enhanced_preset() {
             ui_scale: Some(3.0),
             navigation_only: false,
             tactical_overlay: None,
+            camera_follow: crate::enhanced::CameraFollow::CONFIGURED,
+            camera_recenter_margin: crate::enhanced::CameraFollow::MARGIN,
         }
     );
     // Back to Vanilla, the rows hide again (their keys stay saved).
@@ -1168,6 +1175,101 @@ fn the_enhanced_display_rows_show_step_and_save_with_the_enhanced_preset() {
     );
     launcher.config.enhanced.viewport_mode = None;
     assert_eq!(launcher.image().pixels(), vanilla.pixels());
+}
+
+/// The camera follow row steps Off, Step, Smooth both ways, and the margin
+/// row through its stops, by key and by a click on its track; both save
+/// to the active profile and read back. Under Vanilla they hide.
+#[test]
+fn the_camera_follow_rows_step_and_save_with_the_enhanced_preset() {
+    use crate::enhanced::CameraFollow;
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let mut launcher = Launcher::new(setup(dir, Config::default()));
+    launcher.tab = Tab::Display;
+    let rows = [Widget::CameraFollow, Widget::RecenterMargin];
+    assert!(rows.iter().all(|widget| !launcher.order().contains(widget)));
+    launcher.focus = Widget::Preset;
+    key(&mut launcher, KeyCode::Space);
+    assert!(rows.iter().all(|widget| launcher.order().contains(widget)));
+    let settings = |launcher: &Launcher| launcher.active_enhanced().settings;
+    assert_eq!(settings(&launcher).camera_follow, CameraFollow::Off);
+    assert_eq!(settings(&launcher).camera_recenter_margin, 96);
+
+    launcher.focus = Widget::CameraFollow;
+    let mut modes = Vec::new();
+    for _ in 0..3 {
+        key(&mut launcher, KeyCode::ArrowRight);
+        modes.push(launcher.config.enhanced.camera_follow.unwrap());
+    }
+    assert_eq!(
+        modes,
+        [CameraFollow::Step, CameraFollow::Smooth, CameraFollow::Off]
+    );
+    key(&mut launcher, KeyCode::ArrowLeft);
+    assert_eq!(
+        launcher.config.enhanced.camera_follow,
+        Some(CameraFollow::Smooth)
+    );
+    let shown = |launcher: &Launcher, widget| view::setting(launcher, widget).unwrap().1;
+    assert_eq!(
+        shown(&launcher, Widget::CameraFollow),
+        view::Control::Choice("Smooth")
+    );
+    // A click on the row steps it.
+    let rect = launcher.rect(Widget::CameraFollow).unwrap();
+    launcher.handle(LauncherInput::Press([rect.x + 4, rect.y + 4]));
+    assert_eq!(settings(&launcher).camera_follow, CameraFollow::Off);
+
+    launcher.focus = Widget::RecenterMargin;
+    let mut margins = Vec::new();
+    for _ in 0..5 {
+        key(&mut launcher, KeyCode::ArrowRight);
+        margins.push(launcher.config.enhanced.camera_recenter_margin.unwrap());
+    }
+    assert_eq!(margins, [144, 192, 0, 48, 96]);
+    key(&mut launcher, KeyCode::ArrowLeft);
+    assert_eq!(launcher.config.enhanced.camera_recenter_margin, Some(48));
+    assert!(matches!(
+        shown(&launcher, Widget::RecenterMargin),
+        view::Control::Slider { stop: 1, stops: 5, value } if value == "48px"
+    ));
+    // A margin from the file between stops moves from the nearest one.
+    launcher.config.enhanced.camera_recenter_margin = Some(100);
+    key(&mut launcher, KeyCode::ArrowRight);
+    assert_eq!(launcher.config.enhanced.camera_recenter_margin, Some(144));
+    // A click on the track takes the stop under it: the first is off.
+    let rect = launcher.rect(Widget::RecenterMargin).unwrap();
+    let track = view::slider_track(rect);
+    launcher.handle(LauncherInput::Press([track.x, rect.y + 4]));
+    assert_eq!(launcher.config.enhanced.camera_recenter_margin, Some(0));
+    assert!(matches!(
+        shown(&launcher, Widget::RecenterMargin),
+        view::Control::Slider { value, .. } if value == "Off"
+    ));
+    launcher.handle(LauncherInput::Press([track.right() - 1, rect.y + 4]));
+    assert_eq!(launcher.config.enhanced.camera_recenter_margin, Some(192));
+
+    // Save writes them, and they read back.
+    launcher.focus = Widget::CameraFollow;
+    key(&mut launcher, KeyCode::Enter);
+    assert_eq!(settings(&launcher).camera_follow, CameraFollow::Step);
+    assert_eq!(launcher.save(), Ok(dir.join(config::FILE_NAME)));
+    let text = fs::read_to_string(dir.join(config::FILE_NAME)).unwrap();
+    for line in [
+        "camera_follow = \"step\"\n",
+        "camera_recenter_margin = 192\n",
+    ] {
+        assert!(text.contains(line), "{line}: {text}");
+    }
+    let saved = Config::parse(&text).unwrap();
+    let reloaded = Launcher::new(setup(dir, saved));
+    assert_eq!(settings(&reloaded).camera_follow, CameraFollow::Step);
+    assert_eq!(settings(&reloaded).camera_recenter_margin, 192);
+    // Back to Vanilla, the rows hide again.
+    launcher.focus = Widget::Preset;
+    key(&mut launcher, KeyCode::Space);
+    assert!(rows.iter().all(|widget| !launcher.order().contains(widget)));
 }
 
 #[test]

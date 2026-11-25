@@ -10,9 +10,13 @@ use super::browse::{Browser, Target};
 use super::font::{self, ADVANCE, CHECK, CROSS};
 use super::validate::{Check, State};
 use super::widgets::{self, BADGE_HEIGHT, Look, Rect, Row};
-use super::{Field, Launcher, ProfileCard, Tab, UI_SCALES, Widget, ZOOM_STEPS, title};
+use super::{
+    Field, Launcher, MARGIN_STEPS, ProfileCard, Tab, UI_SCALES, Widget, ZOOM_STEPS, title,
+};
 use crate::config::{HotkeyHints, Preset};
-use crate::enhanced::{BuiltinPreset, GameSpeed, PresetMatch, RoofPeek, ViewportMode};
+use crate::enhanced::{
+    BuiltinPreset, CameraFollow, GameSpeed, PresetMatch, RoofPeek, ViewportMode,
+};
 use vault_core::GameProfile;
 use vault_formats::{LayerEntry, ModManifest};
 use vault_render::{IndexedImage, ScalingMode};
@@ -302,10 +306,12 @@ fn preset_cell(at: usize, top: i32) -> Rect {
 
 const DISPLAY: [Widget; 3] = [Widget::Preset, Widget::Scaling, Widget::Fullscreen];
 /// The enhanced preset's rows, shown with it only.
-const ENHANCED: [Widget; 7] = [
+const ENHANCED: [Widget; 9] = [
     Widget::Viewport,
     Widget::Zoom,
     Widget::SmoothCamera,
+    Widget::CameraFollow,
+    Widget::RecenterMargin,
     Widget::RoofPeek,
     Widget::UiScale,
     Widget::GameSpeed,
@@ -438,7 +444,7 @@ const HELP_LINE_TOP: i32 = 471;
 
 /// How a settings row shows its value.
 #[derive(Debug, Clone, PartialEq)]
-enum Control {
+pub(super) enum Control {
     Switch(bool),
     Choice(&'static str),
     Slider {
@@ -457,7 +463,7 @@ fn nearest(stops: impl Iterator<Item = f32>, value: f32) -> usize {
 }
 
 /// A setting's row: its label and its value as the launcher holds it.
-fn setting(launcher: &Launcher, widget: Widget) -> Option<(&'static str, Control)> {
+pub(super) fn setting(launcher: &Launcher, widget: Widget) -> Option<(&'static str, Control)> {
     let config = &launcher.config;
     let active = launcher.active_enhanced();
     let settings = active.settings;
@@ -493,6 +499,26 @@ fn setting(launcher: &Launcher, widget: Widget) -> Option<(&'static str, Control
             },
         ),
         Widget::SmoothCamera => ("Smooth camera", Control::Switch(settings.smooth_camera)),
+        Widget::CameraFollow => (
+            "Camera follow",
+            Control::Choice(settings.camera_follow.label()),
+        ),
+        Widget::RecenterMargin => {
+            let margin = settings.camera_recenter_margin;
+            let margins = MARGIN_STEPS.iter().map(|margin| f32::from(*margin));
+            (
+                "Recentre margin",
+                Control::Slider {
+                    stop: nearest(margins, f32::from(margin)),
+                    stops: MARGIN_STEPS.len(),
+                    value: if margin == 0 {
+                        "Off".to_owned()
+                    } else {
+                        format!("{margin}px")
+                    },
+                },
+            )
+        }
         Widget::RoofPeek => (
             "Roof peek",
             Control::Choice(match settings.roof_peek {
@@ -634,6 +660,18 @@ fn describe(launcher: &Launcher, widget: Widget) -> Option<(&'static str, &'stat
         },
         Widget::Zoom => "Sets how close maps start. The - and = keys zoom in play.",
         Widget::SmoothCamera => "Glides the camera to where it is going. Off, it snaps there.",
+        Widget::CameraFollow => match settings.camera_follow {
+            CameraFollow::Off => {
+                "Leaves the view still while you walk. Home centers it; Alt+C switches in play."
+            }
+            CameraFollow::Step => "Recentres the view at every step, as the original does.",
+            CameraFollow::Smooth => {
+                "Tracks the player all the time. Alt+C switches back to Off in play."
+            }
+        },
+        Widget::RecenterMargin => {
+            "With follow Off, recentres when the player comes this close to an edge. 0 never does."
+        }
         Widget::RoofPeek => match settings.roof_peek {
             RoofPeek::Vanilla => "Draws roofs as the original does. Hold Alt to peek under them.",
             RoofPeek::CursorXray => "Cuts roofs away around the pointer.",
@@ -1358,19 +1396,21 @@ fn draw_display(image: &mut IndexedImage, launcher: &Launcher, look: &LookFn, re
         paragraph(
             image,
             area,
-            "Widescreen, zoom, roof peek, game speed and the tactical overlay open with the \
-             Enhanced preset.",
+            "Widescreen, zoom, camera follow, roof peek, game speed and the tactical overlay \
+             open with the Enhanced preset.",
             color::DIM,
         );
     }
 }
 
 /// The keys in play, as their rows and the command line describe them.
-const KEYS: [(&str, &str); 8] = [
+const KEYS: [(&str, &str); 10] = [
     ("F11, Alt+Enter", "Fullscreen"),
     ("Alt+S", "Scaling"),
     ("Alt+V", "Widescreen (Enhanced)"),
     ("Alt+F", "Game speed (Enhanced)"),
+    ("Alt+C", "Camera follow (Enhanced)"),
+    ("Home", "Center view"),
     ("Alt+R", "Roof peek (Enhanced)"),
     ("- and =", "Zoom (Enhanced)"),
     ("Alt", "Peek under roofs"),

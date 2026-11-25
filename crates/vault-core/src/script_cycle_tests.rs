@@ -303,3 +303,116 @@ fn spec013_exit_grids_at_the_entrance_request_a_transition() {
     host.world_map_closed();
     assert_eq!(host.world.pending_transition, Some(grid));
 }
+
+/// `docs/elevation-change-audit.md` §3: map 7 joins its two elevations by
+/// exit grids to its own number: hex 20110 on elevation 0 leads to hex
+/// 20300 on elevation 1, and hex 20310 on elevation 1 back to hex 20108 on
+/// elevation 0.
+fn two_floors() -> MapFile {
+    let mut map = empty_map();
+    let mut down = exit_grid(7, 20300, 1, 2);
+    down.hex = Some(20110);
+    map.objects.elevations[0].push(down);
+    let mut up = exit_grid(7, 20108, 0, 2);
+    (up.id, up.hex, up.elevation) = (10, Some(20310), 1);
+    map.objects.elevations[1].push(up);
+    map
+}
+/// A host on [`two_floors`], the player at its entrance (hex 20100,
+/// elevation 0).
+fn two_floor_host() -> WorldHost<Scripts> {
+    let mut host = host(two_floors());
+    host.load_map("maps/synth.map").unwrap();
+    host
+}
+/// A new misc item, or with `container` a bag, on `hex` of elevation 0.
+fn ground_item(host: &mut WorldHost<Scripts>, hex: i32, container: bool) -> ObjectRef {
+    let prototype = if container {
+        crate::fixture_items::prototype(crate::fixture_items::CONTAINER)
+    } else {
+        crate::fixture_items::misc(0x0400_0101, 1, 1, 1)
+    };
+    host.world.spawn(prototype, hex, 0).unwrap()
+}
+/// The player walks onto `grid`, and the transition it requests runs.
+fn cross(host: &mut WorldHost<Scripts>, grid: i32) {
+    let player = host.world.player;
+    let elevation = host.world.get(player).unwrap().raw.elevation;
+    host.world
+        .move_object(player, grid, elevation, true)
+        .unwrap();
+    assert!(host.world.pending_transition.is_some());
+    assert!(host.process_transition().unwrap());
+}
+fn elevation_of(host: &WorldHost<Scripts>, object: ObjectRef) -> u8 {
+    host.world.get(object).unwrap().raw.elevation
+}
+fn player_place(host: &WorldHost<Scripts>) -> (Option<i32>, u8) {
+    let player = host.world.get(host.world.player).unwrap();
+    (player.raw.hex, player.raw.elevation)
+}
+
+#[test]
+fn spec003_a_carried_item_takes_the_elevation_an_exit_grid_to_the_same_map_gives() {
+    // Vector 1: an item picked up on elevation 0, then the grid to the map's
+    // own number and elevation 1.
+    let mut host = two_floor_host();
+    let player = host.world.player;
+    let item = ground_item(&mut host, 20102, false);
+    host.world.add_item(player, item, 1, false).unwrap();
+    assert_eq!(elevation_of(&host, item), 0);
+    cross(&mut host, 20110);
+    assert_eq!(player_place(&host), (Some(20300), 1));
+    let held = host.world.get(item).unwrap();
+    assert_eq!((held.owner, held.raw.hex), (Some(player), None));
+    assert_eq!(held.raw.elevation, 1);
+}
+
+#[test]
+fn spec003_a_carried_bag_and_its_contents_follow_the_holder_both_ways() {
+    // Vector 2: a carried container holding an item: both take elevation 1.
+    let mut host = two_floor_host();
+    let player = host.world.player;
+    let bag = ground_item(&mut host, 20102, true);
+    let item = ground_item(&mut host, 20104, false);
+    host.world.add_item(bag, item, 1, true).unwrap();
+    host.world.add_item(player, bag, 1, true).unwrap();
+    cross(&mut host, 20110);
+    assert_eq!(player_place(&host), (Some(20300), 1));
+    assert_eq!(
+        (elevation_of(&host, bag), elevation_of(&host, item)),
+        (1, 1)
+    );
+    assert_eq!(host.world.get(item).unwrap().owner, Some(bag));
+    // Vector 3: back down, both are on elevation 0 again.
+    cross(&mut host, 20310);
+    assert_eq!(player_place(&host), (Some(20108), 0));
+    assert_eq!(
+        (elevation_of(&host, bag), elevation_of(&host, item)),
+        (0, 0)
+    );
+}
+
+#[test]
+fn spec003_held_elevations_never_reach_the_state_hash() {
+    // Vector 4: nothing carried: two identical crossings hash alike, so the
+    // seating has nothing to change.
+    let crossed = || {
+        let mut host = two_floor_host();
+        cross(&mut host, 20110);
+        host.world.state_hash()
+    };
+    assert_eq!(crossed(), crossed());
+    // A carried object has no position in the hash, so its elevation, the
+    // one field the seating writes, cannot change it.
+    let mut host = two_floor_host();
+    let player = host.world.player;
+    let item = ground_item(&mut host, 20102, false);
+    host.world.add_item(player, item, 1, false).unwrap();
+    cross(&mut host, 20110);
+    let hash = host.world.state_hash();
+    for elevation in [0, 2, 1] {
+        host.world.get_mut(item).unwrap().raw.elevation = elevation;
+        assert_eq!(host.world.state_hash(), hash, "{elevation}");
+    }
+}

@@ -15,7 +15,7 @@ use crate::{
 #[derive(Parser, Clone)]
 #[command(
     about = "Vault Engine desktop shell: sprite preview and the interactive world, from loose files or DAT archives",
-    long_about = "Vault Engine desktop shell: sprite preview and the interactive world, from loose files or DAT archives.\n\nWithout arguments the game starts from the data named in vault-engine.toml (beside the executable, else in the working directory). Without that file, each game's MASTER.DAT and CRITTER.DAT are looked for in the working directory and beside the executable, then Fallout 1's in ../local-corpus, ~/games/fallout1 and its Steam and GOG folders, and Fallout 2's in ~/games/fallout2 and its Steam and GOG folders; what is found is saved to vault-engine.toml. With nothing valid, the launcher opens. Command-line flags always win over the file.\n\nF11 or Alt+Enter toggles borderless fullscreen; Alt+S toggles aspect-fit and integer scaling; with the enhanced preset, Alt+V toggles the fixed and unlocked viewports and Alt+F cycles the game speed (1.0x, 1.5x, 2.0x)."
+    long_about = "Vault Engine desktop shell: sprite preview and the interactive world, from loose files or DAT archives.\n\nWithout arguments the game starts from the data named in vault-engine.toml (beside the executable, else in the working directory). Without that file, each game's MASTER.DAT and CRITTER.DAT are looked for in the working directory and beside the executable, then Fallout 1's in ../local-corpus, ~/games/fallout1 and its Steam and GOG folders, and Fallout 2's in ~/games/fallout2 and its Steam and GOG folders; what is found is saved to vault-engine.toml. With nothing valid, the launcher opens. Command-line flags always win over the file.\n\nF11 or Alt+Enter toggles borderless fullscreen; Alt+S toggles aspect-fit and integer scaling; with the enhanced preset, Alt+V toggles the fixed and unlocked viewports, Alt+F cycles the game speed (1.0x, 1.5x, 2.0x) and Alt+C toggles the camera follow (off, smooth). Home centers the view on the player."
 )]
 pub(crate) struct Args {
     /// Present one frame and exit successfully (requires a desktop and GPU backend).
@@ -157,6 +157,15 @@ pub(crate) struct Args {
     /// Default: the settings file's `default_zoom`, else 1.0.
     #[arg(long, value_name = "ZOOM", value_parser = zoom_arg)]
     zoom: Option<f32>,
+    /// With the enhanced preset, how the view follows the player: `off`
+    /// (it stays put until you scroll, press Home, or the player nears its
+    /// edge), `step` (it recentres at every hex step, as Vanilla does) or
+    /// `smooth` (it tracks the player every frame). Default: the settings
+    /// file's `camera_follow`, else off. Alt+C toggles off and smooth in
+    /// play. The Vanilla preset always uses step: another value is refused
+    /// there, with a warning, and ignored.
+    #[arg(long, value_name = "MODE", value_parser = camera_follow_arg)]
+    camera_follow: Option<enhanced::CameraFollow>,
     /// How the world canvas is drawn (SPEC-022): `reference`, the CPU
     /// compositor, or `instanced`, GPU-instanced sprite batches that draw
     /// the same pixels and fall back to the reference for any refresh they
@@ -193,6 +202,25 @@ fn render_path_arg(text: &str) -> Result<vault_render::RenderPath, String> {
 }
 fn zoom_arg(text: &str) -> Result<f32, String> {
     config::parse_zoom(text).ok_or_else(|| "expected a number from 0.5 to 3.0".into())
+}
+fn camera_follow_arg(text: &str) -> Result<enhanced::CameraFollow, String> {
+    enhanced::CameraFollow::parse(text).ok_or_else(|| "expected off, step or smooth".into())
+}
+
+/// The diagnostic for a `--camera-follow` the Vanilla preset refuses: any
+/// value but `step`, which is what Vanilla always does. `None` when there
+/// is nothing to refuse.
+fn refused_camera_follow(
+    preset: config::Preset,
+    mode: Option<enhanced::CameraFollow>,
+) -> Option<String> {
+    let mode = mode.filter(|mode| {
+        preset == config::Preset::Vanilla && *mode != enhanced::CameraFollow::Step
+    })?;
+    Some(format!(
+        "--camera-follow {}: the Vanilla preset recentres the view at every step; ignored",
+        mode.as_str()
+    ))
 }
 
 impl Args {
@@ -282,10 +310,14 @@ fn resolve_launch(args: &mut Args, config: Option<&config::Config>) -> Launch {
     let preset = args.preset.or(config.preset).unwrap_or_default();
     let touch_ui = args.touch_ui || config.touch_ui.unwrap_or(false);
     let settings = config.enhanced_settings();
+    if let Some(diagnostic) = refused_camera_follow(preset, args.camera_follow) {
+        tracing::warn!("{diagnostic}");
+    }
     let enhanced = match preset {
         config::Preset::Enhanced => Some(enhanced::EnhancedSettings {
             viewport: args.viewport.unwrap_or(settings.viewport),
             default_zoom: args.zoom.unwrap_or(settings.default_zoom),
+            camera_follow: args.camera_follow.unwrap_or(settings.camera_follow),
             ..settings
         }),
         // The touch UI pans and zooms under Vanilla too: the unlocked view
@@ -295,6 +327,9 @@ fn resolve_launch(args: &mut Args, config: Option<&config::Config>) -> Launch {
             default_zoom: args.zoom.unwrap_or(settings.default_zoom),
             roof_peek: enhanced::RoofPeek::Vanilla,
             navigation_only: true,
+            // Vanilla has no follow setting: the touch camera tracks the
+            // player as it always has.
+            camera_follow: enhanced::CameraFollow::Smooth,
             ..settings
         }),
         config::Preset::Vanilla => None,
@@ -482,6 +517,7 @@ fn switch_args(shown: &Args) -> Args {
     args.preset = shown.preset;
     args.viewport = shown.viewport;
     args.zoom = shown.zoom;
+    args.camera_follow = shown.camera_follow;
     args.render_path = shown.render_path;
     args.no_audio = shown.no_audio;
     args
@@ -523,6 +559,7 @@ pub(super) fn play_args(shown: &Args, debug: bool) -> Args {
     args.game_profile = None;
     args.viewport = None;
     args.zoom = None;
+    args.camera_follow = None;
     args.no_audio = false;
     args.preview.debug |= debug;
     args
@@ -597,6 +634,9 @@ pub(super) fn launcher_on(
     }
     if let Some(zoom) = args.zoom {
         config.default_zoom = Some(zoom);
+    }
+    if let Some(mode) = args.camera_follow {
+        config.camera_follow = Some(mode);
     }
     if args.no_audio {
         config.audio = Some(false);

@@ -27,7 +27,7 @@ use crate::{
     AppResult,
     audio::Volumes,
     config::{self, Config, EnhancedProfile, Preset, UiScale},
-    enhanced::{BuiltinPreset, EnhancedSettings, GameSpeed, RoofPeek, ViewportMode},
+    enhanced::{BuiltinPreset, CameraFollow, EnhancedSettings, GameSpeed, RoofPeek, ViewportMode},
     input::key_text,
     interface::Painter,
 };
@@ -758,12 +758,12 @@ const PANEL: Rect = Rect::new(54, 6, 532, 368);
 const PRESET_Y: i32 = 34;
 const PRESET_SIZE: [i32; 2] = [164, 22];
 const PRESET_GAP: i32 = 8;
-const ROW_Y: i32 = 68;
-const ROW_HEIGHT: i32 = 31;
+const ROW_Y: i32 = 62;
+const ROW_HEIGHT: i32 = 25;
 const ROW_X: i32 = 66;
-const VALUE: Rect = Rect::new(260, 0, 130, 22);
+const VALUE: Rect = Rect::new(260, 0, 130, 21);
 const TAG_X: i32 = 398;
-const BADGE: Rect = Rect::new(482, 0, 92, 26);
+const BADGE: Rect = Rect::new(482, 0, 92, 22);
 const NOTE_Y: i32 = 318;
 const BUTTON_Y: i32 = 340;
 const SAVE_AT: [i32; 2] = [66, BUTTON_Y];
@@ -773,6 +773,8 @@ const CAPTION_DX: i32 = 20;
 /// The stops a click on the zoom and interface scale rows steps through.
 const ZOOM_STOPS: [f32; 6] = [0.5, 0.75, 1.0, 1.5, 2.0, 3.0];
 const UI_SCALE_STOPS: [f32; 4] = [1.0, 1.5, 2.0, 3.0];
+/// The recentre margins a click steps through, as the launcher's row.
+const MARGIN_STOPS: [u16; 5] = crate::launcher::MARGIN_STEPS;
 
 /// A row of the Enhanced window, top to bottom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -780,6 +782,10 @@ enum EnhancedRow {
     Viewport,
     Zoom,
     Smooth,
+    /// `camera_follow`.
+    Follow,
+    /// `camera_recenter_margin`.
+    Margin,
     Roof,
     UiScale,
     Speed,
@@ -788,10 +794,12 @@ enum EnhancedRow {
 }
 
 impl EnhancedRow {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 10] = [
         Self::Viewport,
         Self::Zoom,
         Self::Smooth,
+        Self::Follow,
+        Self::Margin,
         Self::Roof,
         Self::UiScale,
         Self::Speed,
@@ -803,6 +811,8 @@ impl EnhancedRow {
             Self::Viewport => "Viewport",
             Self::Zoom => "Default zoom",
             Self::Smooth => "Smooth camera",
+            Self::Follow => "Camera follow",
+            Self::Margin => "Recentre margin",
             Self::Roof => "Roof peek",
             Self::UiScale => "Interface scale",
             Self::Speed => "Game speed",
@@ -815,6 +825,8 @@ impl EnhancedRow {
             Self::Viewport => "The world across the window",
             Self::Zoom => "The zoom a map starts at",
             Self::Smooth => "Camera moves ease in and out",
+            Self::Follow => "How the view follows you",
+            Self::Margin => "Edge room before it recentres",
             Self::Roof => "Roofs open at the cursor",
             Self::UiScale => "How large the interface draws",
             Self::Speed => "World time against the clock",
@@ -829,7 +841,7 @@ impl EnhancedRow {
     /// The screen rectangle of the row's value, which a click steps.
     fn value_rect(self) -> Rect {
         let index = Self::ALL.iter().position(|row| *row == self).unwrap_or(0);
-        VALUE.offset([0, ROW_Y + ROW_HEIGHT * index as i32 + 3])
+        VALUE.offset([0, ROW_Y + ROW_HEIGHT * index as i32 + 2])
     }
     /// The screen rectangle of the row's preview badge.
     fn badge_rect(self) -> Rect {
@@ -860,6 +872,10 @@ impl EnhancedValues {
                 smooth_camera: profile.smooth_camera.unwrap_or(settings.smooth_camera),
                 roof_peek: profile.roof_peek.unwrap_or(settings.roof_peek),
                 ui_scale: profile.ui_scale.map_or(settings.ui_scale, UiScale::factor),
+                camera_follow: profile.camera_follow.unwrap_or(settings.camera_follow),
+                camera_recenter_margin: profile
+                    .camera_recenter_margin
+                    .unwrap_or(settings.camera_recenter_margin),
                 ..settings
             },
             speed: profile.game_speed.unwrap_or(self.speed),
@@ -877,6 +893,14 @@ impl EnhancedValues {
                     next_stop(&ZOOM_STOPS, settings.default_zoom).unwrap_or(ZOOM_STOPS[0]);
             }
             EnhancedRow::Smooth => settings.smooth_camera = !settings.smooth_camera,
+            EnhancedRow::Follow => settings.camera_follow = settings.camera_follow.next(),
+            EnhancedRow::Margin => {
+                let margin = settings.camera_recenter_margin;
+                settings.camera_recenter_margin = MARGIN_STOPS
+                    .into_iter()
+                    .find(|stop| *stop > margin)
+                    .unwrap_or(MARGIN_STOPS[0]);
+            }
             EnhancedRow::Roof => settings.roof_peek = settings.roof_peek.next(),
             EnhancedRow::UiScale => {
                 settings.ui_scale = match settings.ui_scale {
@@ -906,6 +930,11 @@ impl EnhancedValues {
             },
             EnhancedRow::Zoom => format!("{:.2}x", settings.default_zoom),
             EnhancedRow::Smooth => on(settings.smooth_camera).into(),
+            EnhancedRow::Follow => settings.camera_follow.label().into(),
+            EnhancedRow::Margin => match settings.camera_recenter_margin {
+                0 => "Off".into(),
+                margin => format!("{margin} px"),
+            },
             EnhancedRow::Roof => match settings.roof_peek {
                 RoofPeek::Vanilla => "Vanilla".into(),
                 RoofPeek::CursorXray => "Cursor X-ray".into(),
@@ -928,6 +957,8 @@ impl EnhancedValues {
             ("NEXT START", ColorKey::AMBER)
         } else if row.unlocked_only() && self.settings.viewport == ViewportMode::Fixed {
             ("NOT IN FIXED", ColorKey::GREY)
+        } else if row == EnhancedRow::Margin && self.settings.camera_follow != CameraFollow::Off {
+            ("FOLLOW OFF", ColorKey::GREY)
         } else {
             ("LIVE", ColorKey::GREEN)
         }
@@ -945,6 +976,8 @@ impl EnhancedValues {
             ui_scale: Some(UiScale::from_factor(settings.ui_scale)),
             game_speed: Some(self.speed),
             tactical_overlay: Some(self.overlay),
+            camera_follow: Some(settings.camera_follow),
+            camera_recenter_margin: Some(settings.camera_recenter_margin),
         }
     }
 }
@@ -1120,16 +1153,48 @@ fn draw_badge(
         // A house: the walls, a critter inside, and the roof over them, cut
         // around the cursor or gone.
         EnhancedRow::Roof => {
-            outline(image, [cx - 24, y + 9, 48, h - 12], grey);
-            image.fill_rect([cx - 2, y + 13, 5, 9], green);
+            outline(image, [cx - 24, y + 8, 48, h - 11], grey);
+            image.fill_rect([cx - 2, y + 11, 5, 7], green);
             if settings.roof_peek != RoofPeek::Hidden {
-                image.fill_rect([cx - 28, y + 3, 56, 13], amber);
+                image.fill_rect([cx - 28, y + 3, 56, 11], amber);
             }
             if settings.roof_peek == RoofPeek::CursorXray {
-                image.fill_rect([cx - 9, y + 3, 19, 13], black);
-                image.fill_rect([cx - 12, y + 6, 25, 7], black);
-                image.fill_rect([cx - 2, y + 13, 5, 3], green);
+                image.fill_rect([cx - 9, y + 3, 19, 11], black);
+                image.fill_rect([cx - 12, y + 5, 25, 7], black);
+                image.fill_rect([cx - 2, y + 11, 5, 3], green);
             }
+        }
+        // The view's frame over a walk: left behind (off), centred on the
+        // player's hex (step), or on the player and its trail (smooth).
+        EnhancedRow::Follow => {
+            let player = [cx + 18, cy - 2];
+            for along in 0..4 {
+                image.fill_rect([cx - 30 + along * 12, cy + 4 - along * 2, 4, 2], grey);
+            }
+            let frame = match settings.camera_follow {
+                CameraFollow::Off => [x + 6, y + 3, 40, h - 6],
+                CameraFollow::Step | CameraFollow::Smooth => [player[0] - 20, y + 3, 40, h - 6],
+            };
+            outline(image, frame, amber);
+            if settings.camera_follow == CameraFollow::Smooth {
+                image.fill_rect([player[0] - 16, cy, 14, 1], amber);
+            }
+            image.fill_rect([player[0], player[1], 4, 5], green);
+        }
+        // The view, and inside it the box the player may walk in before it
+        // recentres; at 0 there is none.
+        EnhancedRow::Margin => {
+            outline(image, [x + 6, y + 3, w - 12, h - 6], amber);
+            let margin = i32::from(settings.camera_recenter_margin);
+            if margin > 0 {
+                let [dx, dy] = [margin / 8, margin / 32];
+                outline(
+                    image,
+                    [x + 6 + dx, y + 3 + dy, w - 12 - 2 * dx, h - 6 - 2 * dy],
+                    grey,
+                );
+            }
+            image.fill_rect([cx - 2, cy - 2, 4, 5], green);
         }
         // The interface bar at its scale.
         EnhancedRow::UiScale => {
@@ -1160,7 +1225,7 @@ fn draw_badge(
         // chance beside it. Off, the bare critter.
         EnhancedRow::Overlay => {
             let critter = if values.overlay { green } else { grey };
-            image.fill_rect([x + 22, y + 11, 7, 12], critter);
+            image.fill_rect([x + 22, y + 10, 7, 10], critter);
             if values.overlay {
                 image.fill_rect([x + 12, y + 4, 28, 5], grey);
                 image.fill_rect([x + 13, y + 5, 26, 3], black);
@@ -1414,16 +1479,16 @@ impl MapPreview {
         for (index, row) in EnhancedRow::ALL.into_iter().enumerate() {
             let top = ROW_Y + ROW_HEIGHT * index as i32;
             let label = row.label().as_bytes();
-            painter.text(image, 101, ColorKey::LABEL, label, [ROW_X, top + 4], 190);
+            painter.text(image, 101, ColorKey::LABEL, label, [ROW_X, top + 2], 190);
             let hint = row.hint().as_bytes();
-            painter.text(image, 101, ColorKey::GREY, hint, [ROW_X, top + 16], 190);
+            painter.text(image, 101, ColorKey::GREY, hint, [ROW_X, top + 12], 190);
             let rect = row.value_rect();
             outline(image, [rect.x, rect.y, rect.w, rect.h], grey);
             let text = values.text(row);
-            let origin = [rect.x, rect.y + 7];
+            let origin = [rect.x, rect.y + 6];
             painter.centered(image, 101, ColorKey::AMBER, text.as_bytes(), origin, rect.w);
             let (tag, key) = values.tag(row);
-            painter.text(image, 101, key, tag.as_bytes(), [TAG_X, top + 10], 82);
+            painter.text(image, 101, key, tag.as_bytes(), [TAG_X, top + 8], 82);
             draw_badge(painter, image, row, &values, row.badge_rect());
         }
         let (note, failed) = match &panel.note {

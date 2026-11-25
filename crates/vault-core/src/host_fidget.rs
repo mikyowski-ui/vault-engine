@@ -78,7 +78,7 @@ impl<A: WorldAssets> WorldHost<A> {
         let Some(elevation) = self.world.get(self.world.player).map(|p| p.raw.elevation) else {
             return Vec::new();
         };
-        let Ok(grid) = HexGrid::centered(self.world.camera_hex, VIEW[0], VIEW[1]) else {
+        let Ok(grid) = HexGrid::centered(self.world.script_view_hex(), VIEW[0], VIEW[1]) else {
             return Vec::new();
         };
         self.world

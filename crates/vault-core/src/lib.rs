@@ -168,6 +168,8 @@ mod items_tests;
 #[cfg(test)]
 mod lighting_tests;
 #[cfg(test)]
+mod locals_reload_tests;
+#[cfg(test)]
 mod mod_script_tests;
 #[cfg(test)]
 mod motion_tests;

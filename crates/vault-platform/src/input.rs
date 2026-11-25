@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use vault_core::{CommandId, SequenceIds};
 
 use crate::AppResult;
-use crate::enhanced::{EnhancedSettings, RoofPeek, ViewportMode};
+use crate::enhanced::{CameraFollow, EnhancedSettings, RoofPeek, ViewportMode};
 
 /// SPEC-024b §6.19 a recorded button's number: 0 left, 1 right, up to 7.
 pub fn button_number(name: &str) -> Option<i32> {
@@ -184,6 +184,15 @@ pub struct EnhancedRecord {
     /// it, so other logs are unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tactical_overlay: Option<bool>,
+    /// `camera_follow` (`off`, `step` or `smooth`): written only when it is
+    /// not the legacy `smooth`, so older logs read as `smooth`
+    /// (`docs/camera-follow-toggle.md` §3.5 item 6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_follow: Option<CameraFollow>,
+    /// `camera_recenter_margin`: written only when it is not
+    /// [`CameraFollow::MARGIN`], which a log without it reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_recenter_margin: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,6 +228,10 @@ impl From<EnhancedSettings> for EnhancedRecord {
             ui_scale: settings.ui_scale,
             tactical_overlay: settings.tactical_overlay,
             navigation_only: settings.navigation_only,
+            camera_follow: (settings.camera_follow != CameraFollow::Smooth)
+                .then_some(settings.camera_follow),
+            camera_recenter_margin: (settings.camera_recenter_margin != CameraFollow::MARGIN)
+                .then_some(settings.camera_recenter_margin),
         }
     }
 }
@@ -240,6 +253,10 @@ impl From<EnhancedRecord> for EnhancedSettings {
             ui_scale: record.ui_scale,
             tactical_overlay: record.tactical_overlay,
             navigation_only: record.navigation_only,
+            camera_follow: record.camera_follow.unwrap_or(CameraFollow::Smooth),
+            camera_recenter_margin: record
+                .camera_recenter_margin
+                .unwrap_or(CameraFollow::MARGIN),
         }
     }
 }
@@ -932,6 +949,7 @@ mod tests {
             ui_scale: Some(2.0),
             navigation_only: false,
             tactical_overlay: None,
+            ..EnhancedSettings::default()
         };
         let command = InputCommand::Enhanced {
             settings: settings.into(),
@@ -980,6 +998,59 @@ mod tests {
             unreachable!()
         };
         assert_eq!(EnhancedSettings::from(record), navigation);
+    }
+
+    /// `camera_follow` and `camera_recenter_margin` are logged only when
+    /// they differ from the legacy `smooth` and the default margin, so a
+    /// record without them (every log before them) reads as those.
+    #[test]
+    fn enhanced_records_carry_the_camera_follow_only_when_not_legacy() {
+        let legacy = EnhancedSettings::default();
+        assert_eq!(legacy.camera_follow, CameraFollow::Smooth);
+        let record = EnhancedRecord::from(legacy);
+        assert_eq!(
+            (record.camera_follow, record.camera_recenter_margin),
+            (None, None)
+        );
+        let text = serde_json::to_string(&record).unwrap();
+        assert!(!text.contains("camera_"), "{text}");
+        for (follow, margin, fields) in [
+            (CameraFollow::Off, 96, r#","camera_follow":"off"}"#),
+            (CameraFollow::Step, 96, r#","camera_follow":"step"}"#),
+            (
+                CameraFollow::Off,
+                0,
+                r#","camera_follow":"off","camera_recenter_margin":0}"#,
+            ),
+            (
+                CameraFollow::Smooth,
+                1024,
+                r#","camera_recenter_margin":1024}"#,
+            ),
+        ] {
+            let settings = EnhancedSettings {
+                camera_follow: follow,
+                camera_recenter_margin: margin,
+                ..legacy
+            };
+            let text = serde_json::to_string(&EnhancedRecord::from(settings)).unwrap();
+            assert!(text.ends_with(fields), "{text}");
+            let read: EnhancedRecord = serde_json::from_str(&text).unwrap();
+            assert_eq!(EnhancedSettings::from(read), settings);
+        }
+        // An older record reads as the legacy camera.
+        let old: EnhancedRecord = serde_json::from_str(
+            r#"{"viewport_mode":"unlocked_widescreen","default_zoom":1.0,"smooth_camera":true,"roof_peek":"vanilla","ui_scale":null}"#,
+        )
+        .unwrap();
+        assert_eq!(EnhancedSettings::from(old), legacy);
+        // An unknown mode is a malformed record.
+        assert!(
+            serde_json::from_str::<EnhancedRecord>(
+                r#"{"viewport_mode":"unlocked_widescreen","default_zoom":1.0,"smooth_camera":true,"roof_peek":"vanilla","ui_scale":null,"camera_follow":"follow"}"#,
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -18,6 +18,8 @@
 //! default_zoom = 1.25
 //! smooth_camera = true
 //! roof_peek = "cursor_xray"
+//! camera_follow = "off"
+//! camera_recenter_margin = 96
 //! ```
 //!
 //! It may also register additions without replacing whole files
@@ -80,6 +82,10 @@ pub const PRESETS: [&str; 2] = ["vanilla", "enhanced"];
 pub const VIEWPORT_MODES: [&str; 2] = ["fixed_640x480", "unlocked_widescreen"];
 /// `roof_peek`'s values.
 pub const ROOF_PEEKS: [&str; 3] = ["vanilla", "cursor_xray", "hidden"];
+/// `camera_follow`'s values (`docs/camera-follow-toggle.md`).
+pub const CAMERA_FOLLOWS: [&str; 3] = ["off", "step", "smooth"];
+/// `camera_recenter_margin`'s range: view pixels at zoom 1.
+pub const RECENTER_MARGINS: std::ops::RangeInclusive<u32> = 0..=1024;
 /// `default_zoom`'s range.
 pub const ZOOM_RANGE: std::ops::RangeInclusive<f32> = 0.5..=3.0;
 /// A registered script's `index` range (a script list row number).
@@ -281,6 +287,10 @@ pub struct EnhancedOverrides {
     pub smooth_camera: Option<bool>,
     /// One of [`ROOF_PEEKS`].
     pub roof_peek: Option<String>,
+    /// One of [`CAMERA_FOLLOWS`].
+    pub camera_follow: Option<String>,
+    /// In [`RECENTER_MARGINS`].
+    pub camera_recenter_margin: Option<u16>,
 }
 
 /// A malformed manifest: the line (one-based; 0 for the whole file) and
@@ -573,6 +583,14 @@ impl ModManifest {
                             enhanced.smooth_camera = Some(flag);
                         }
                         "roof_peek" => enhanced.roof_peek = Some(one_of(value, &ROOF_PEEKS)?),
+                        "camera_follow" => {
+                            enhanced.camera_follow = Some(one_of(value, &CAMERA_FOLLOWS)?);
+                        }
+                        "camera_recenter_margin" => {
+                            let margin = decimal(value, RECENTER_MARGINS)?;
+                            enhanced.camera_recenter_margin =
+                                Some(u16::try_from(margin).expect("the range fits"));
+                        }
                         _ => return Err(error(format!("unknown key `{key}` in `[enhanced]`"))),
                     }
                 }
@@ -828,6 +846,7 @@ impl ModManifest {
                 ("preset", &enhanced.preset, &PRESETS[..]),
                 ("viewport_mode", &enhanced.viewport_mode, &VIEWPORT_MODES),
                 ("roof_peek", &enhanced.roof_peek, &ROOF_PEEKS),
+                ("camera_follow", &enhanced.camera_follow, &CAMERA_FOLLOWS),
             ] {
                 if let Some(value) = value {
                     if !allowed.contains(&value.as_str()) {
@@ -844,6 +863,12 @@ impl ModManifest {
             }
             if let Some(smooth) = enhanced.smooth_camera {
                 text += &format!("smooth_camera = {smooth}\n");
+            }
+            if let Some(margin) = enhanced.camera_recenter_margin {
+                if !RECENTER_MARGINS.contains(&u32::from(margin)) {
+                    return Err(bad(format!("`camera_recenter_margin` cannot be {margin}")));
+                }
+                text += &format!("camera_recenter_margin = {margin}\n");
             }
         }
         if let Some(sfall) = self.sfall {
@@ -920,6 +945,13 @@ impl ModManifest {
                     enhanced.smooth_camera.map(|flag| flag.to_string()),
                 ),
                 ("roof_peek", enhanced.roof_peek.clone()),
+                ("camera_follow", enhanced.camera_follow.clone()),
+                (
+                    "camera_recenter_margin",
+                    enhanced
+                        .camera_recenter_margin
+                        .map(|margin| margin.to_string()),
+                ),
             ] {
                 if let Some(value) = value {
                     text += &format!("  {key} = {value}\n");
@@ -1174,6 +1206,8 @@ mod tests {
                 default_zoom: Some(1.25),
                 smooth_camera: Some(true),
                 roof_peek: Some("cursor_xray".into()),
+                camera_follow: None,
+                camera_recenter_margin: None,
             })
         );
         assert!(manifest.scripts.is_empty() && manifest.maps.is_empty());
@@ -1192,6 +1226,8 @@ mod tests {
                 default_zoom: Some(1.25),
                 smooth_camera: Some(true),
                 roof_peek: Some("cursor_xray".into()),
+                camera_follow: Some("off".into()),
+                camera_recenter_margin: Some(48),
             }),
             ..ModManifest::default()
         }
@@ -1223,6 +1259,35 @@ mod tests {
         // A manifest without `[enhanced]` carries no settings.
         let plain = ModManifest::parse("name = \"Maps only\"").unwrap();
         assert_eq!(plain.enhanced, None);
+        // The camera follow keys, each value and both margin limits.
+        for (follow, margin) in [("off", 0), ("step", 96), ("smooth", 1024)] {
+            let text = format!(
+                "name = \"c\"\n[enhanced]\ncamera_follow = \"{follow}\"\n\
+                 camera_recenter_margin = {margin}\n"
+            );
+            let manifest = ModManifest::parse(&text).unwrap();
+            let enhanced = manifest.enhanced.clone().unwrap();
+            assert_eq!(enhanced.camera_follow.as_deref(), Some(follow));
+            assert_eq!(enhanced.camera_recenter_margin, Some(margin));
+            let written = manifest.to_toml().unwrap();
+            assert!(written.contains(&format!("camera_follow = \"{follow}\"\n")));
+            assert!(written.contains(&format!("camera_recenter_margin = {margin}\n")));
+            assert_eq!(ModManifest::parse(&written).unwrap(), manifest);
+        }
+        // The writer refuses what the reader would.
+        let mut bad = full();
+        bad.enhanced.as_mut().unwrap().camera_follow = Some("follow".into());
+        assert!(bad.to_toml().is_err());
+        let mut bad = full();
+        bad.enhanced.as_mut().unwrap().camera_recenter_margin = Some(1025);
+        assert!(bad.to_toml().is_err());
+        // The README lists them with the other settings.
+        let readme = full().readme(&[]);
+        assert!(readme.contains("  camera_follow = off\n"), "{readme}");
+        assert!(
+            readme.contains("  camera_recenter_margin = 48\n"),
+            "{readme}"
+        );
     }
 
     #[test]
@@ -1251,6 +1316,31 @@ mod tests {
                 "name = \"a\"\n[enhanced]\nsmooth_camera = \"yes\"",
                 3,
                 "true or false",
+            ),
+            (
+                "name = \"a\"\n[enhanced]\ncamera_follow = \"follow\"",
+                3,
+                "`camera_follow` is one of \"off\", \"step\", \"smooth\", not \"follow\"",
+            ),
+            (
+                "name = \"a\"\n[enhanced]\ncamera_follow = true",
+                3,
+                "`camera_follow` expects a string",
+            ),
+            (
+                "name = \"a\"\n[enhanced]\ncamera_recenter_margin = 1025",
+                3,
+                "`camera_recenter_margin` is a whole number from 0 to 1024, not 1025",
+            ),
+            (
+                "name = \"a\"\n[enhanced]\ncamera_recenter_margin = -1",
+                3,
+                "from 0 to 1024",
+            ),
+            (
+                "name = \"a\"\n[enhanced]\ncamera_recenter_margin = 9.5",
+                3,
+                "decimal integer",
             ),
             (
                 "name = \"a\"\n[enhanced]\npreset = \"modern\"",

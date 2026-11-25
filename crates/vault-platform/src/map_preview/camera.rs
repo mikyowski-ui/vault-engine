@@ -128,6 +128,10 @@ pub(crate) struct Camera {
     pub zoom: f64,
     /// The center tracks the player's drawn position.
     pub follow: bool,
+    /// Following may be on: `camera_follow = "smooth"` (the legacy camera).
+    /// Under `off` and `step` it is false, and nothing turns `follow` on:
+    /// the reset centres once instead of resuming it.
+    pub tracking: bool,
     /// Interpolate moves (else they snap).
     pub smooth: bool,
     pub default_zoom: f64,
@@ -164,6 +168,7 @@ impl Camera {
             target: center,
             zoom,
             follow: true,
+            tracking: true,
             smooth,
             default_zoom: zoom,
             floor: MIN_ZOOM,
@@ -191,6 +196,20 @@ impl Camera {
         self.zoom_anim = None;
         self.center = [self.center[0] + delta[0], self.center[1] + delta[1]];
         self.target = self.center;
+    }
+    /// Move to `center` once, without following: eased when smooth (the
+    /// center heads there and settles), else at once. A scripted pan or an
+    /// anchored zoom under way gives way to it.
+    pub fn recenter(&mut self, center: [f64; 2]) {
+        if !self.smooth {
+            self.snap(center);
+            return;
+        }
+        self.target = center;
+        self.pan = None;
+        if let Some(zoom) = &mut self.zoom_anim {
+            zoom.anchor = None;
+        }
     }
     /// Follow the player again (Home).
     pub fn resume_follow(&mut self) {
@@ -275,7 +294,8 @@ impl Camera {
         });
     }
     /// Back to following the player at the default zoom with no shake,
-    /// over `duration` milliseconds.
+    /// over `duration` milliseconds. Without [`Self::tracking`] it ends
+    /// centred on the player, not following.
     pub fn reset(&mut self, now: u64, duration: u64) {
         self.shake = None;
         self.follow = false;
@@ -284,7 +304,7 @@ impl Camera {
             goal: PanGoal::Player,
             start: now,
             duration,
-            then_follow: true,
+            then_follow: self.tracking,
         });
         self.zoom_anim = Some(Zoom {
             from: self.zoom,

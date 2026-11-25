@@ -18,7 +18,8 @@ fn texts(toasts: &mut HotkeyToasts, start: u64, end: u64) -> Vec<&'static str> {
     out
 }
 
-/// Every row of `hotkey-hints.tsv`, with the seventh's condition.
+/// Every row of `hotkey-hints.tsv`, with the conditions of the seventh
+/// (`camera_follow` is `off`) and the eighth (both editions found).
 #[test]
 fn spec020_the_hints_are_the_fixtures_in_order() {
     let table = include_str!("../../../tests/fixtures/spec020/hotkey-hints.tsv");
@@ -27,12 +28,20 @@ fn spec020_the_hints_are_the_fixtures_in_order() {
         .skip(1)
         .map(|row| row.split('\t').collect())
         .collect();
-    assert_eq!(rows.len(), HINTS.len());
-    for (row, (key, alt, text)) in rows.iter().zip(HINTS) {
-        assert_eq!(row[2], text);
-        assert_eq!(row[1].starts_with("Alt+"), alt);
+    let mut hints = HINTS[..6].to_vec();
+    hints.push(crate::toast::CENTER_VIEW);
+    hints.push(HINTS[6]);
+    assert_eq!(rows.len(), hints.len());
+    for (row, (key, alt, text)) in rows.iter().zip(&hints) {
+        assert_eq!(row[2], *text);
+        assert_eq!(row[1].starts_with("Alt+"), *alt);
         assert!(format!("{key:?}").ends_with(row[1].rsplit('+').next().unwrap()));
     }
+    let every: Vec<&str> = hints.iter().map(|(_, _, text)| *text).collect();
+    let mut toasts = HotkeyToasts::new(true);
+    toasts.set_center_view(true);
+    assert_eq!(texts(&mut toasts, 0, 60_000), every);
+    // Without `camera_follow = "off"` the list is the seven it was.
     let list = texts(&mut HotkeyToasts::new(true), 0, 60_000);
     assert_eq!(list, HINTS.map(|(_, _, text)| text));
     let list = texts(&mut HotkeyToasts::new(false), 0, 60_000);

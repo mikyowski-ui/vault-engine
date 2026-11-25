@@ -1390,8 +1390,11 @@ impl<A: WorldAssets> WorldHost<A> {
                     .and_then(|sid| self.world.scripts.get(&sid))
                     .map_or(0, |s| s.fixed),
             ),
+            // The view center as the follow setting cannot change it
+            // (`WorldState::script_view_hex`).
             0x80f8 => {
-                let difference = (i64::from(self.world.camera_hex) - i64::from(call.int(0))).abs();
+                let difference =
+                    (i64::from(self.world.script_view_hex()) - i64::from(call.int(0))).abs();
                 integer(i32::from(difference % 200 < 5 || difference / 200 < 5))
             }
             // SPEC-005 §3.3: the dialogue game state is requested with self
@@ -2268,7 +2271,7 @@ impl<A: WorldAssets> WorldHost<A> {
                             art.frame(object.raw.orientation as usize, object.raw.frame)
                     {
                         let origin = if let Some(hex) = object.raw.hex {
-                            let center = HexGrid::centered(self.world.camera_hex, 640, 380)
+                            let center = HexGrid::centered(self.world.script_view_hex(), 640, 380)
                                 .and_then(|grid| grid.hex_center(hex))
                                 .map_err(|e| VmError::Host(e.to_string()))?;
                             let rect = frame.world_rect(

@@ -926,8 +926,9 @@ fn elevation(host: &Host) -> u8 {
 }
 
 /// A second host holding what `host` saves, loaded: `host` and it must agree
-/// on where the player stands, and a load of that load on the hash.
-fn reloaded(host: &mut Host, corpus: &std::path::Path, edition: Edition) {
+/// on where the player stands, and a load of that load on the hash. Returns
+/// the second host.
+fn reloaded(host: &mut Host, corpus: &std::path::Path, edition: Edition) -> Host {
     let mut second = WorldHost::new(
         WorldState::new(CharacterSheet::default(), 1).unwrap(),
         dir_assets(corpus),
@@ -953,6 +954,7 @@ fn reloaded(host: &mut Host, corpus: &std::path::Path, edition: Edition) {
     second.load_slot(&mut again).unwrap();
     assert_eq!(second.world.state_hash(), first, "{edition:?}");
     assert_eq!(place(&second), place(host), "{edition:?}");
+    second
 }
 
 /// The bot takes the ladder up and comes back by the one down, the script of
@@ -982,6 +984,49 @@ fn the_bot_climbs_to_the_second_elevation_and_back() {
         let status = run.status();
         assert_eq!(status.violation, None, "{edition:?}");
         assert_eq!(status.abandoned, 0, "{edition:?}: {status:#?}");
+    }
+}
+
+/// The elevation of every object the player holds, through its bags.
+fn held_elevations(host: &Host) -> Vec<u8> {
+    let player = host.world.player;
+    host.world
+        .iter()
+        .filter(|(reference, object)| {
+            object.owner.is_some() && host.world.outermost_owner(*reference) == player
+        })
+        .map(|(_, object)| object.raw.elevation)
+        .collect()
+}
+
+/// SPEC-003 §2.10 (`docs/elevation-change-audit.md`): the ladders' scripts
+/// move the player to another elevation while it carries what it picked up;
+/// everything it holds is on its elevation, in the live world and in a load
+/// of its save alike.
+#[test]
+fn what_the_bot_carries_climbs_with_it() {
+    for edition in [Edition::Fallout1, Edition::Fallout2] {
+        let mut run = Run::new(edition, 7, true);
+        let corpus = run._dir.path().to_path_buf();
+        let player = run.host.world.player;
+        let pistol = object(&run.host, campaign::PISTOL);
+        run.host.world.add_item(player, pistol, 1, false).unwrap();
+        for target in [1, 0] {
+            run.until(20_000, |run| elevation(&run.host) == target);
+            let live = held_elevations(&run.host);
+            assert!(!live.is_empty(), "{edition:?}: it carries something");
+            assert!(
+                live.iter().all(|held| *held == target),
+                "{edition:?}: {live:?}"
+            );
+            let second = reloaded(&mut run.host, &corpus, edition);
+            let loaded = held_elevations(&second);
+            assert_eq!(loaded.len(), live.len(), "{edition:?}");
+            assert!(
+                loaded.iter().all(|held| *held == target),
+                "{edition:?}: {loaded:?}"
+            );
+        }
     }
 }
 

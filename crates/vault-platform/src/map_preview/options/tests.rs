@@ -673,3 +673,95 @@ fn the_window_closes_to_the_menu_and_keeps_what_it_applied() {
         }))
     ));
 }
+
+/// `camera_follow` steps Off, Step, Smooth and `camera_recenter_margin`
+/// through its stops, each at once in the running session; the margin says
+/// it acts with the follow off only, and Save writes both.
+#[test]
+fn the_camera_follow_rows_apply_to_the_session_and_save() {
+    use crate::enhanced::CameraFollow;
+    let dir = synthetic_corpus();
+    let path = settings_file(dir.path(), SETTINGS);
+    let mut preview = enhanced(dir.path());
+    preview.set_enhanced(Some(EnhancedSettings {
+        viewport: ViewportMode::Fixed,
+        camera_follow: CameraFollow::Off,
+        ..Default::default()
+    }));
+    open_panel(&mut preview);
+    let world = preview.host.world.state_hash();
+    let values = preview.enhanced_values();
+    assert_eq!(values.text(EnhancedRow::Follow), "Off");
+    assert_eq!(values.text(EnhancedRow::Margin), "96 px");
+    // Both act in the fixed view too.
+    assert_eq!(values.tag(EnhancedRow::Follow).0, "LIVE");
+    assert_eq!(values.tag(EnhancedRow::Margin).0, "LIVE");
+
+    let mut modes = Vec::new();
+    for _ in 0..3 {
+        click_row(&mut preview, EnhancedRow::Follow);
+        let follow = preview.enhanced().unwrap().camera_follow;
+        modes.push((follow, preview.enhanced_values().text(EnhancedRow::Follow)));
+        if follow != CameraFollow::Off {
+            let tag = preview.enhanced_values().tag(EnhancedRow::Margin).0;
+            assert_eq!(tag, "FOLLOW OFF");
+        }
+    }
+    assert_eq!(
+        modes,
+        [
+            (CameraFollow::Step, "Step".to_owned()),
+            (CameraFollow::Smooth, "Smooth".to_owned()),
+            (CameraFollow::Off, "Off".to_owned()),
+        ]
+    );
+    let mut margins = Vec::new();
+    for _ in 0..5 {
+        click_row(&mut preview, EnhancedRow::Margin);
+        margins.push(preview.enhanced().unwrap().camera_recenter_margin);
+    }
+    assert_eq!(margins, [144, 192, 0, 48, 96]);
+    // A margin between stops goes to the next one up.
+    let settings = preview.enhanced().unwrap();
+    preview.set_enhanced(Some(EnhancedSettings {
+        camera_recenter_margin: 100,
+        ..settings
+    }));
+    click_row(&mut preview, EnhancedRow::Margin);
+    assert_eq!(preview.enhanced().unwrap().camera_recenter_margin, 144);
+    click_row(&mut preview, EnhancedRow::Margin);
+    click_row(&mut preview, EnhancedRow::Margin);
+    assert_eq!(preview.enhanced_values().text(EnhancedRow::Margin), "Off");
+    click_row(&mut preview, EnhancedRow::Follow);
+    assert_eq!(
+        preview.host.world.state_hash(),
+        world,
+        "presentation settings leave the world's state alone"
+    );
+
+    assert!(matches!(
+        preview.save_enhanced_to(Some(&path)),
+        SaveOutcome::Saved { .. }
+    ));
+    let read = Config::load(&path).unwrap();
+    assert_eq!(read.enhanced.camera_follow, Some(CameraFollow::Step));
+    assert_eq!(read.enhanced.camera_recenter_margin, Some(0));
+}
+
+/// Ten rows fit between the presets and the save note, each badge clear of
+/// the next.
+#[test]
+fn the_enhanced_rows_fit_the_window() {
+    let rows = EnhancedRow::ALL;
+    assert_eq!(rows.len(), 10);
+    let preset_bottom = preset_rect(0).y + preset_rect(0).h;
+    for pair in rows.windows(2) {
+        let [above, below] = [pair[0], pair[1]];
+        assert!(above.badge_rect().y + above.badge_rect().h < below.badge_rect().y);
+        assert!(above.value_rect().y + above.value_rect().h < below.value_rect().y);
+    }
+    assert!(rows[0].value_rect().y > preset_bottom);
+    let last = rows[rows.len() - 1];
+    assert!(last.badge_rect().y + last.badge_rect().h < super::NOTE_Y);
+    assert!(last.value_rect().y + last.value_rect().h < super::NOTE_Y);
+}

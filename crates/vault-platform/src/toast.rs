@@ -18,8 +18,12 @@ const FIRST_MS: u64 = 2000;
 /// How long a hint shows whole, and the gap after it.
 const SHOW_MS: u64 = 4000;
 const GAP_MS: u64 = 1000;
-/// §2.6's hints in order: the key, whether it needs Alt, and the exact text.
-pub const HINTS: [(KeyCode, bool, &str); 7] = [
+/// A hint: the key, whether it needs Alt, and the exact text.
+pub type Hint = (KeyCode, bool, &'static str);
+
+/// §2.6's hints in order, with neither conditional row's condition: the
+/// last, `Alt+L`, shows only with both editions found.
+pub const HINTS: [Hint; 7] = [
     (KeyCode::F1, false, "F1: Help"),
     (KeyCode::KeyI, false, "I: Inventory"),
     (KeyCode::KeyS, false, "S: Skilldex"),
@@ -28,6 +32,13 @@ pub const HINTS: [(KeyCode, bool, &str); 7] = [
     (KeyCode::F9, false, "F9: Debugger"),
     (KeyCode::KeyL, true, "Alt+L: Switch game"),
 ];
+
+/// §2.6's recentre hint: after row 6 (`F9`) and before `Alt+L`, shown only
+/// while the session's `camera_follow` is `off`.
+pub const CENTER_VIEW: Hint = (KeyCode::Home, false, "Home: Center view");
+
+/// The rows unconditionally shown, before the two conditional ones.
+const ALWAYS: usize = 6;
 
 /// The plate's height, and its top edge, as a HUD message's.
 const PLATE_HEIGHT: i32 = 16;
@@ -52,8 +63,13 @@ pub type Shown = (usize, u8);
 /// The list a session works through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HotkeyToasts {
-    /// How many of [`HINTS`] this session has.
-    count: usize,
+    /// This session's rows in order: the six of [`HINTS`] always shown,
+    /// [`CENTER_VIEW`], then `Alt+L` with both editions found, so `Alt+L`
+    /// is last whichever rows the session has.
+    rows: Vec<Hint>,
+    /// The session's `camera_follow` is `off`: [`CENTER_VIEW`] shows. It
+    /// is read when the row comes up, so Alt+C before then decides it.
+    center_view: bool,
     at: usize,
     phase: Phase,
     /// The shell clock at the last tick.
@@ -66,10 +82,17 @@ pub struct HotkeyToasts {
 }
 
 impl HotkeyToasts {
-    /// The list, with the seventh hint when both editions were found.
+    /// The list, with `Alt+L` when both editions were found. The recentre
+    /// row waits for [`Self::set_center_view`]: until then it is skipped.
     pub fn new(both_editions: bool) -> Self {
+        let mut rows = HINTS[..ALWAYS].to_vec();
+        rows.push(CENTER_VIEW);
+        if both_editions {
+            rows.push(HINTS[ALWAYS]);
+        }
         Self {
-            count: HINTS.len() - usize::from(!both_editions),
+            rows,
+            center_view: false,
             at: 0,
             phase: Phase::Waiting(FIRST_MS),
             last: None,
@@ -111,10 +134,30 @@ impl HotkeyToasts {
             }
         }
     }
-    /// This hint is over.
+    /// Whether the session's `camera_follow` is `off`, so that the recentre
+    /// row shows. Turned off while that row waits or shows, it is passed
+    /// over, as if it had shown.
+    pub fn set_center_view(&mut self, on: bool) {
+        self.center_view = on;
+        if !on && self.phase != Phase::Done && self.rows.get(self.at) == Some(&CENTER_VIEW) {
+            self.next();
+        }
+    }
+    /// The rows this session shows now, in order.
+    #[cfg(test)]
+    fn rows(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.rows
+            .iter()
+            .filter(|row| self.center_view || **row != CENTER_VIEW)
+            .map(|row| row.2)
+    }
+    /// This hint is over: the next one this session shows.
     fn next(&mut self) {
         self.at += 1;
-        if self.at >= self.count {
+        while !self.center_view && self.rows.get(self.at) == Some(&CENTER_VIEW) {
+            self.at += 1;
+        }
+        if self.at >= self.rows.len() {
             self.phase = Phase::Done;
             self.finished = true;
         } else {
@@ -136,13 +179,13 @@ impl HotkeyToasts {
         self.drawn
     }
     pub fn text(&self) -> Option<&'static str> {
-        self.drawn.map(|(index, _)| HINTS[index].2)
+        self.drawn.map(|(index, _)| self.rows[index].2)
     }
     /// A key press: the shown hint's key ends it at once. No key's action
     /// changes. Returns whether what shows changed.
     pub fn key(&mut self, key: KeyCode, alt: bool) -> bool {
         let matches = self.drawn.is_some_and(|(index, _)| {
-            let (hint, needs_alt, _) = HINTS[index];
+            let (hint, needs_alt, _) = self.rows[index];
             hint == key && needs_alt == alt
         });
         if matches {
@@ -224,3 +267,100 @@ pub fn over(frame: &IndexedImage, plate: &IndexedImage) -> IndexedImage {
 #[cfg(test)]
 #[path = "toast_tests.rs"]
 mod tests;
+
+/// SPEC-020 §2.6's recentre row, under each condition of the list.
+#[cfg(test)]
+mod center_view_tests {
+    use super::*;
+
+    /// The texts in the order they first show, `ready` always true.
+    fn texts(toasts: &mut HotkeyToasts, start: u64, end: u64) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        for now in (start..end).step_by(50) {
+            toasts.tick(now, true);
+            if let Some(text) = toasts.text()
+                && out.last() != Some(&text)
+            {
+                out.push(text);
+            }
+        }
+        out
+    }
+
+    fn list(both_editions: bool, center_view: bool) -> HotkeyToasts {
+        let mut toasts = HotkeyToasts::new(both_editions);
+        toasts.set_center_view(center_view);
+        toasts
+    }
+
+    #[test]
+    fn spec020_the_center_view_row_shows_under_off_only() {
+        let six: Vec<_> = HINTS[..6].iter().map(|hint| hint.2).collect();
+        for both in [false, true] {
+            // Not `off`: the list as before the row was added.
+            let shown = texts(&mut list(both, false), 0, 80_000);
+            let mut want = six.clone();
+            if both {
+                want.push("Alt+L: Switch game");
+            }
+            assert_eq!(shown, want, "both editions: {both}");
+            assert_eq!(list(both, false).rows().collect::<Vec<_>>(), want);
+            // `off`: the row after row 6, and `Alt+L` still last.
+            let shown = texts(&mut list(both, true), 0, 80_000);
+            let mut want = six.clone();
+            want.push("Home: Center view");
+            if both {
+                want.push("Alt+L: Switch game");
+            }
+            assert_eq!(shown, want, "both editions: {both}");
+            assert_eq!(list(both, true).rows().collect::<Vec<_>>(), want);
+        }
+    }
+
+    #[test]
+    fn spec020_the_lists_end_is_reported_under_each_condition() {
+        for both in [false, true] {
+            for center in [false, true] {
+                let mut toasts = list(both, center);
+                texts(&mut toasts, 0, 80_000);
+                assert!(toasts.take_finished(), "{both} {center}");
+                assert!(!toasts.tick(90_000, true));
+            }
+        }
+    }
+
+    /// Home ends its own hint, and a mode change while the row waits passes
+    /// over it.
+    #[test]
+    fn spec020_the_center_view_row_follows_the_mode_in_play() {
+        let mut toasts = list(false, true);
+        toasts.tick(0, true);
+        for key in [
+            KeyCode::F1,
+            KeyCode::KeyI,
+            KeyCode::KeyS,
+            KeyCode::KeyP,
+            KeyCode::KeyZ,
+        ] {
+            toasts.tick(toasts.last.unwrap() + 2000, true);
+            assert!(toasts.key(key, false));
+        }
+        toasts.tick(toasts.last.unwrap() + 2000, true);
+        assert_eq!(toasts.text(), Some("F9: Debugger"));
+        assert!(toasts.key(KeyCode::F9, false));
+        toasts.tick(toasts.last.unwrap() + 1000, true);
+        assert_eq!(toasts.text(), Some("Home: Center view"));
+        assert!(toasts.key(KeyCode::Home, false));
+        assert!(toasts.take_finished(), "one edition: the row is the last");
+
+        // Alt+C to `smooth` while the row waits: it is passed over.
+        let mut toasts = list(true, true);
+        // F9, the sixth, shows from 29.5 to 34 seconds; the gap follows.
+        texts(&mut toasts, 0, 34_500);
+        assert_eq!(toasts.text(), None, "the gap after F9");
+        assert_eq!(toasts.rows[toasts.at], CENTER_VIEW);
+        toasts.set_center_view(false);
+        let rest = texts(&mut toasts, 34_500, 60_000);
+        assert_eq!(rest, ["Alt+L: Switch game"]);
+    }
+}

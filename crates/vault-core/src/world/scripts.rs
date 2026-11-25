@@ -346,7 +346,16 @@ impl WorldState {
     /// Under Fallout 2, `player_locals` is `scripts.lst` entry 0's declared
     /// count (SPEC-018 §6.5, Revision 3): the new record has a slice of that
     /// size, holding the saved map copy's values when it has a slice of that
-    /// size, and zeros otherwise.
+    /// size, and zeros otherwise. The copy's slice is handed over in place,
+    /// so a load does not leave the old values behind in the pool.
+    ///
+    /// The old records are removed before the new one is created, so the new
+    /// record takes the first free critter identifier of the restored world.
+    /// It then depends only on the map's own records, never on the identifier
+    /// the saved copy held, and a load of a load settles on the same
+    /// identifier (SPEC-021 §2.8 keys local slices by it). No record of the
+    /// restored world holds it at creation, and it comes last in the critter
+    /// stream, as at creation.
     pub(crate) fn replace_player_script(
         &mut self,
         saved: i32,
@@ -366,10 +375,8 @@ impl WorldState {
             copies.iter().find_map(|sid| {
                 let copy = self.scripts.get(sid)?;
                 let base = usize::try_from(copy.local_base).ok()?;
-                (copy.local_count == count)
-                    .then(|| self.lvars.get(base..base.checked_add(count)?))
-                    .flatten()
-                    .map(<[i32]>::to_vec)
+                let end = base.checked_add(count)?;
+                (copy.local_count == count && end <= self.lvars.len()).then_some(base)
             })
         });
         let mut old: Vec<u32> = self
@@ -386,18 +393,62 @@ impl WorldState {
         }
         old.sort_unstable();
         old.dedup();
-        // Created first, so the new identifier differs from the old ones.
-        let sid = self.create_player_script()?;
-        if let Some(count) = player_locals {
-            self.set_player_locals(sid, count, kept);
-        }
+        let mut freed: Vec<(usize, usize)> = old
+            .iter()
+            .filter_map(|id| self.scripts.get(id))
+            .filter_map(|script| {
+                Some((usize::try_from(script.local_base).ok()?, script.local_count))
+            })
+            .filter(|(base, count)| *count > 0 && Some(*base) != kept)
+            .collect();
         for id in &old {
             self.remove_script(*id);
         }
+        self.reclaim_trailing_locals(&mut freed);
         self.queue.retain(
             |event| !matches!(event.kind, EventKind::Script { script, .. } if old.contains(&script)),
         );
+        self.record_objects.retain(|(sid, _)| !old.contains(sid));
+        let sid = self.create_player_script()?;
+        if let Some(count) = player_locals {
+            self.set_player_locals(sid, count, None);
+            if let (Some(base), Some(script)) = (kept, self.scripts.get_mut(&sid)) {
+                script.local_base = base as i32;
+            }
+        }
         Ok(sid)
+    }
+    /// The slices (`base`, `count`) of removed records that end the pool are
+    /// cut from it, latest first, while no remaining record's slice (live or
+    /// inert) reaches into them. A load's old player records (the saved copy
+    /// runs the map-entry requests before the load removes it, and may take
+    /// a fresh slice there) then leave no values behind, so a chain of loads
+    /// of loads keeps one pool length. A slice in the middle of the pool
+    /// stays, as removing it would move other records' bases.
+    fn reclaim_trailing_locals(&mut self, freed: &mut [(usize, usize)]) {
+        freed.sort_unstable_by(|a, b| b.cmp(a));
+        let reaches = |base: i32, count: usize, from: usize| {
+            usize::try_from(base).is_ok_and(|base| count > 0 && base.saturating_add(count) > from)
+        };
+        for (base, count) in freed.iter().copied() {
+            if base.checked_add(count) != Some(self.lvars.len()) {
+                continue;
+            }
+            let held = self
+                .scripts
+                .values()
+                .any(|script| reaches(script.local_base, script.local_count, base))
+                || self.script_order.iter().any(|slot| {
+                    slot.inert.as_ref().is_some_and(|record| {
+                        let count = usize::try_from(record.local_count).unwrap_or(0);
+                        reaches(record.local_base, count, base)
+                    })
+                });
+            if held {
+                break;
+            }
+            self.lvars.truncate(base);
+        }
     }
     pub fn import_map(
         &mut self,
@@ -462,6 +513,10 @@ impl WorldState {
         self.map_script = None;
         self.mvars = map.mvars.clone();
         self.lvars = map.lvars.clone();
+        let saved = map
+            .header
+            .flags
+            .contains(vault_formats::pro::MapFlags::SAVED);
         // SPEC-003 §3.3: the first record of an identifier in the stream
         // its top byte names binds; a later duplicate, or a record in
         // another category's stream, is kept inert.
@@ -483,8 +538,16 @@ impl WorldState {
                     } else {
                         assets.local_count(script.file_index)
                     };
-                    self.scripts
-                        .insert(script.id, script_instance(script, locals));
+                    let mut instance = script_instance(script, locals);
+                    // SPEC-003 §3.2 safe rule: a saved record with no
+                    // locals owns no pool values, whatever base its first
+                    // lazy request left. The count its file declares gets
+                    // a fresh slice on first use, not a window over values
+                    // past its base that later slices are handed.
+                    if saved && script.local_count == 0 {
+                        instance.local_base = -1;
+                    }
+                    self.scripts.insert(script.id, instance);
                 }
             }
         }

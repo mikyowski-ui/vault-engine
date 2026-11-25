@@ -1018,6 +1018,81 @@ mod tests {
     /// are the Vanilla ones, so the digest is that of a preview that was
     /// never offered it. With the record, the world that takes it shows
     /// the unlocked viewport and its digest covers the enhanced frame.
+    /// Vector E (`docs/camera-follow-toggle.md` §7): an enhanced log
+    /// written before `camera_follow` existed replays to the digest it
+    /// had then (recorded before the change), with the legacy `smooth`
+    /// camera; naming `smooth` changes nothing, and a walk under `off`
+    /// leaves the view where it was and the digest differs.
+    #[test]
+    fn enhanced_logs_without_camera_follow_keep_their_digests() {
+        let dir = synthetic_corpus();
+        let legacy = replay_log(dir.path(), &enhanced_log(true));
+        assert_eq!(
+            legacy.state_sha256,
+            concat!(
+                "d915a3b07abf8d9085dd29ffe2e39f8f",
+                "f24699f971ccbfe28aabf0641c4888f7"
+            )
+        );
+        let named = enhanced_log(true).replace(
+            r#""ui_scale":null}}"#,
+            r#""ui_scale":null,"camera_follow":"smooth","camera_recenter_margin":96}}"#,
+        );
+        assert_ne!(named, enhanced_log(true));
+        assert_eq!(replay_log(dir.path(), &named), legacy);
+        // A walk of a few hexes: followed without the field, not under
+        // `off` (the margin rule does not fire this close).
+        let walk = |record: &str| {
+            let mut replay = Replay::new(session(args(dir.path()))).unwrap();
+            replay
+                .run(walk_log(record, 1100.5, 560.5).as_bytes())
+                .unwrap();
+            let world = interactive_world(&mut replay.session).unwrap();
+            let player = world.host.world.get(world.host.world.player).unwrap();
+            let hexes = (player.raw.hex, world.host.world.camera_hex);
+            (hexes, replay.finish(None).unwrap().state_sha256)
+        };
+        let (followed, smooth) = walk(ENHANCED_RECORD);
+        assert_eq!(followed, (Some(21101), 21101));
+        let named = ENHANCED_RECORD.replace(
+            r#""ui_scale":null}"#,
+            r#""ui_scale":null,"camera_follow":"smooth"}"#,
+        );
+        assert_eq!(walk(&named).1, smooth);
+        let off = ENHANCED_RECORD.replace(
+            r#""ui_scale":null}"#,
+            r#""ui_scale":null,"camera_follow":"off"}"#,
+        );
+        let (stayed, digest) = walk(&off);
+        assert_eq!(stayed, (Some(21101), 20100));
+        assert_ne!(digest, smooth);
+        assert_eq!(walk(&off).1, digest, "same log, same digest");
+    }
+
+    /// An `enhanced` record as logs before `camera_follow` wrote it.
+    const ENHANCED_RECORD: &str = r#"{"command_id":2,"kind":"enhanced","settings":{"viewport_mode":"unlocked_widescreen","default_zoom":1.0,"smooth_camera":false,"roof_peek":"vanilla","ui_scale":null}}"#;
+
+    /// An enhanced session with `record` that clicks the world at `x`, `y`
+    /// and walks there for a second.
+    fn walk_log(record: &str, x: f64, y: f64) -> String {
+        let mut lines = vec![
+            r#"{"command_id":1,"kind":"surface","width":1920,"height":1080}"#.to_owned(),
+            record.to_owned(),
+            r#"{"command_id":3,"kind":"tick","now_ms":16}"#.to_owned(),
+            format!(r#"{{"command_id":4,"kind":"pointer_moved","x":{x},"y":{y}}}"#),
+            r#"{"command_id":5,"kind":"tick","now_ms":32}"#.to_owned(),
+            r#"{"command_id":6,"kind":"pointer_button","button":"Left","pressed":true}"#.to_owned(),
+            r#"{"command_id":7,"kind":"pointer_button","button":"Left","pressed":false}"#
+                .to_owned(),
+        ];
+        for (id, now) in (8..).zip((48..=2000).step_by(16)) {
+            lines.push(format!(
+                r#"{{"command_id":{id},"kind":"tick","now_ms":{now}}}"#
+            ));
+        }
+        lines.join("\n") + "\n"
+    }
+
     #[test]
     fn enhanced_replays_are_deterministic_and_vanilla_without_the_record() {
         let dir = synthetic_corpus();

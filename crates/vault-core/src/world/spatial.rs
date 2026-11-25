@@ -1,10 +1,37 @@
 use super::{ObjectRef, ScriptEvent, Transition, WorldEffect, WorldState};
-use crate::{Perk, WorldError};
+use crate::{Perk, WorldError, camera::ViewFollow};
 use std::collections::{BTreeSet, VecDeque};
 use vault_formats::{
+    HexGrid,
     map::ObjectState,
     pro::{BasicFlags, Light},
 };
+
+/// The most holders [`WorldState::seat_held`] follows below the root, as
+/// the inventory code's owner-chain walks do.
+const HELD_DEPTH: usize = 64;
+
+/// The margin rule of `docs/camera-follow-toggle.md` §3.2: whether the
+/// center of `hex`, in the pixels of a view of `view` (width, height)
+/// centered on the center of hex `camera` (the default grid's geometry, as
+/// the map window draws it), lies less than `margin` pixels from an edge of
+/// that view, or outside it. A margin of 0 never fires; a margin above half
+/// the width or height is clamped, on that axis, to that half minus one
+/// pixel. A hex the geometry cannot place counts as outside.
+fn outside_margin(camera: i32, hex: i32, margin: u16, view: [u16; 2]) -> bool {
+    if margin == 0 {
+        return false;
+    }
+    let [width, height] = view.map(i64::from);
+    let Ok([x, y]) = HexGrid::centered(camera, u32::from(view[0]), u32::from(view[1]))
+        .and_then(|grid| grid.hex_center(hex))
+    else {
+        return true;
+    };
+    let clamp = |size: i64| i64::from(margin).min((size / 2 - 1).max(0));
+    let (mx, my) = (clamp(width), clamp(height));
+    x < mx || x > width - mx || y < my || y > height - my
+}
 
 impl WorldState {
     /// SPEC-014 §3.29: a view center outside the map border is refused and
@@ -15,6 +42,76 @@ impl WorldState {
             self.camera_hex = hex;
         }
         inside
+    }
+    /// The view-center hex that script words (`tile_is_visible`,
+    /// `obj_on_screen`) and the idle fidgets measure against, so their
+    /// results and random draws do not depend on the follow setting
+    /// (`docs/camera-follow-toggle.md` §5, question 3): under
+    /// [`ViewFollow::Off`] the player's hex, as [`ViewFollow::Step`] would
+    /// have centered it, while the player stands on a hex; otherwise
+    /// [`Self::camera_hex`].
+    pub fn script_view_hex(&self) -> i32 {
+        match self.view_follow {
+            ViewFollow::Step => self.camera_hex,
+            ViewFollow::Off { .. } => self
+                .get(self.player)
+                .and_then(|player| player.raw.hex)
+                .unwrap_or(self.camera_hex),
+        }
+    }
+    /// Whether a placement of the player on `hex` recenters the view
+    /// (`docs/camera-follow-toggle.md` §3.1-3.2). Under [`ViewFollow::Step`]
+    /// every placement does. Under [`ViewFollow::Off`] a placement that is
+    /// not a walk step (`animated` false: a transition, an elevator,
+    /// `move_to`, `override_map_start`) or that changes the elevation does,
+    /// and a walk step does when the margin rule fires.
+    fn placement_recenters(&self, hex: i32, animated: bool, changed_elevation: bool) -> bool {
+        match self.view_follow {
+            ViewFollow::Step => true,
+            ViewFollow::Off { .. } if !animated || changed_elevation => true,
+            ViewFollow::Off { margin, view } => outside_margin(self.camera_hex, hex, margin, view),
+        }
+    }
+    /// SPEC-003 §2.10 `[Must-match]`: every object `holder` holds,
+    /// recursively, has the elevation of the object at the root of the
+    /// tree, as the map and save readers seat them. Writes `elevation` over
+    /// `holder`'s inventory tree (not `holder` itself) by walking the
+    /// inventory lists; no other field changes, and the held objects get no
+    /// hex. `[Safe rule]` a tree that loops (an object listed again under
+    /// itself) or runs deeper than 64 holders is not followed past that
+    /// point, and is reported once per walk.
+    pub(crate) fn seat_held(&mut self, holder: ObjectRef, elevation: u8) {
+        if self
+            .get(holder)
+            .is_none_or(|object| object.inventory.is_empty())
+        {
+            return;
+        }
+        let mut visited = BTreeSet::from([holder]);
+        let mut pending = vec![(holder, 0_usize)];
+        let mut looped = false;
+        while let Some((parent, depth)) = pending.pop() {
+            let children: Vec<ObjectRef> = self
+                .get(parent)
+                .map(|object| object.inventory.iter().map(|(child, _)| *child).collect())
+                .unwrap_or_default();
+            for child in children {
+                if depth >= HELD_DEPTH || !visited.insert(child) {
+                    looped = true;
+                    continue;
+                }
+                if let Some(object) = self.get_mut(child) {
+                    object.raw.elevation = elevation;
+                    pending.push((child, depth + 1));
+                }
+            }
+        }
+        if looped {
+            self.diagnostic(format!(
+                "the inventory of object {holder} loops or is deeper than {HELD_DEPTH}; \
+                 its held objects' elevations are left as they are"
+            ));
+        }
     }
     pub fn move_object(
         &mut self,
@@ -44,13 +141,19 @@ impl WorldState {
         // onto the hex it is on, and resets its pixel offset.
         object.raw.displacement = [0; 2];
         self.reinsert(reference);
+        // SPEC-003 §2.10: what the object holds, recursively, is on its
+        // elevation, as a save and load of the world would seat it. Done
+        // before anything below can run a script.
+        self.seat_held(reference, elevation);
         // SPEC-005 0x80B6/0x80FF: changing a critter's elevation removes its
         // combat membership.
         if changed_elevation {
             self.remove_from_combat(reference);
         }
         if reference == self.player {
-            self.set_view_center(hex);
+            if self.placement_recenters(hex, animated, changed_elevation) {
+                self.set_view_center(hex);
+            }
             self.set_current_elevation(elevation);
             self.mark_visited(hex);
             self.check_exit_grids(hex, elevation);

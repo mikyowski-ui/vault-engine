@@ -36,6 +36,65 @@ impl RoofPeek {
     }
 }
 
+/// `camera_follow`: how the view follows the player
+/// (`docs/camera-follow-toggle.md`). Logged as `off`, `step` or `smooth`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CameraFollow {
+    /// The view moves only by edge or arrow scroll, a drag, a zoom, scripted
+    /// pans, map entry, an elevation change, the recentre key and the
+    /// margin rule.
+    Off,
+    /// Recentre on the player's hex at every placement (the Vanilla rule).
+    Step,
+    /// Track the player's drawn position every tick.
+    Smooth,
+}
+
+impl CameraFollow {
+    pub const ALL: [Self; 3] = [Self::Off, Self::Step, Self::Smooth];
+    /// What a configuration that names no `camera_follow` gets under the
+    /// Enhanced preset. [`EnhancedSettings::default`] is not this: it keeps
+    /// the legacy `Smooth`, which is also how a replay log without the
+    /// field reads.
+    pub const CONFIGURED: Self = Self::Off;
+    /// The `camera_recenter_margin` a configuration that names none gets.
+    pub const MARGIN: u16 = 96;
+    /// The largest `camera_recenter_margin` a file may name.
+    pub const MARGIN_MAX: u16 = 1024;
+
+    /// The value's spelling in files, logs and on the command line.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Step => "step",
+            Self::Smooth => "smooth",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.as_str() == text)
+    }
+
+    /// The label a settings row shows.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Step => "Step",
+            Self::Smooth => "Smooth",
+        }
+    }
+
+    /// The next value of a settings row: Off, Step, Smooth, Off.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Step,
+            Self::Step => Self::Smooth,
+            Self::Smooth => Self::Off,
+        }
+    }
+}
+
 /// The enhanced presentation settings (from `vault-engine.toml`, the
 /// launcher or the command line).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -56,6 +115,12 @@ pub struct EnhancedSettings {
     pub navigation_only: bool,
     /// The tactical overlay a session starts with; `None` leaves it as it is.
     pub tactical_overlay: Option<bool>,
+    /// How the view follows the player.
+    pub camera_follow: CameraFollow,
+    /// View pixels at zoom 1 between the player's drawn hex centre and each
+    /// view edge before the view recentres under [`CameraFollow::Off`]; 0
+    /// turns the rule off.
+    pub camera_recenter_margin: u16,
 }
 
 impl Default for EnhancedSettings {
@@ -68,6 +133,10 @@ impl Default for EnhancedSettings {
             ui_scale: None,
             navigation_only: false,
             tactical_overlay: None,
+            // The legacy behaviour, so that code and logs that name no
+            // mode keep it; a configuration takes `CameraFollow::CONFIGURED`.
+            camera_follow: CameraFollow::Smooth,
+            camera_recenter_margin: CameraFollow::MARGIN,
         }
     }
 }
@@ -102,6 +171,7 @@ impl BuiltinPreset {
                 preset: Some(Preset::Vanilla),
                 viewport_mode: Some(ViewportMode::Fixed),
                 tactical_overlay: Some(false),
+                camera_follow: Some(CameraFollow::Step),
                 ..EnhancedProfile::default()
             },
             Self::WidescreenClassic => EnhancedProfile {
@@ -110,6 +180,7 @@ impl BuiltinPreset {
                 default_zoom: Some(1.0),
                 roof_peek: Some(RoofPeek::Vanilla),
                 tactical_overlay: Some(false),
+                camera_follow: Some(CameraFollow::Off),
                 ..EnhancedProfile::default()
             },
             Self::ModernTactical => EnhancedProfile {
@@ -117,6 +188,7 @@ impl BuiltinPreset {
                 viewport_mode: Some(ViewportMode::Unlocked),
                 roof_peek: Some(RoofPeek::CursorXray),
                 tactical_overlay: Some(true),
+                camera_follow: Some(CameraFollow::Off),
                 ..EnhancedProfile::default()
             },
         }
@@ -143,10 +215,17 @@ pub struct ActiveEnhanced {
 
 impl ActiveEnhanced {
     /// `own`, a profile's table, under the top-level settings of `config`.
+    /// The Vanilla preset always steps: a `camera_follow` it names otherwise
+    /// is refused ([`config::refused_camera_follow`]) and `step` applies.
     pub fn new(config: &Config, own: EnhancedProfile) -> Self {
         let base = config.enhanced_settings();
+        let preset = own.preset.or(config.preset).unwrap_or_default();
+        let camera_follow = match preset {
+            Preset::Vanilla => CameraFollow::Step,
+            Preset::Enhanced => own.camera_follow.unwrap_or(base.camera_follow),
+        };
         Self {
-            preset: own.preset.or(config.preset).unwrap_or_default(),
+            preset,
             settings: EnhancedSettings {
                 viewport: own.viewport_mode.unwrap_or(base.viewport),
                 default_zoom: own.default_zoom.unwrap_or(base.default_zoom),
@@ -155,6 +234,10 @@ impl ActiveEnhanced {
                 ui_scale: own.ui_scale.map_or(base.ui_scale, UiScale::factor),
                 navigation_only: base.navigation_only,
                 tactical_overlay: own.tactical_overlay,
+                camera_follow,
+                camera_recenter_margin: own
+                    .camera_recenter_margin
+                    .unwrap_or(base.camera_recenter_margin),
             },
             game_speed: own.game_speed.unwrap_or(config.game_speed()),
             tactical_overlay: own.tactical_overlay.unwrap_or(false),
@@ -173,6 +256,8 @@ impl ActiveEnhanced {
             ui_scale: Some(UiScale::from_factor(self.settings.ui_scale)),
             game_speed: Some(self.game_speed),
             tactical_overlay: Some(self.tactical_overlay),
+            camera_follow: Some(self.settings.camera_follow),
+            camera_recenter_margin: Some(self.settings.camera_recenter_margin),
         }
     }
 
@@ -202,6 +287,12 @@ impl ActiveEnhanced {
             && preset
                 .tactical_overlay
                 .is_none_or(|value| value == self.tactical_overlay)
+            && preset
+                .camera_follow
+                .is_none_or(|value| value == settings.camera_follow)
+            && preset
+                .camera_recenter_margin
+                .is_none_or(|value| value == settings.camera_recenter_margin)
     }
 
     /// The preset these settings match: a custom one, which the player made

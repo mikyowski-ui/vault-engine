@@ -23,6 +23,19 @@
 //!   camera center whenever it changes, driven only by logged input and
 //!   tick times, so scripts that read the camera stay sensible and replays
 //!   stay deterministic.
+//! - **Follow mode** (`camera_follow`, `docs/camera-follow-toggle.md`).
+//!   `smooth` is the camera as it always was: it tracks the player's drawn
+//!   position, and the world recentres per step (`ViewFollow::Step`) as
+//!   ever. `step` leaves the world recentring per step and the camera
+//!   snaps to each new view center. `off` tells the world not to recentre
+//!   on walk steps (`ViewFollow::Off` with no margin: this camera writes
+//!   `camera_hex` itself), never follows, and runs the margin rule itself
+//!   at each change of the player's hex ([`Enhanced::outside_margin`]).
+//!   Map entry, an elevation change, a load, a placement that is not a
+//!   walk step, Home and the scripted reset centre once under both. The
+//!   touch UI's navigation-only view (Vanilla) is always `smooth`. In the
+//!   fixed viewport the world does all of it (`ViewFollow::Off` with the
+//!   margin, for the 640-by-380 map window).
 //! - **Roof peek.** The cursor X-ray cuts roofs away within 96 world pixels
 //!   of the pointer, dissolving over a further 48, both divided by the zoom
 //!   so the hole keeps one size on screen (96 and 48 interface pixels).
@@ -42,13 +55,13 @@ use super::{
 };
 use crate::AppResult;
 use crate::enhanced::{
-    EnhancedFrame, EnhancedSettings, PointerAt, PointerButton, RoofPeek, ViewportMode,
+    CameraFollow, EnhancedFrame, EnhancedSettings, PointerAt, PointerButton, RoofPeek, ViewportMode,
 };
 use crate::interface::Painter;
 use std::{collections::VecDeque, sync::Arc};
 use vault_core::{
     WorldState,
-    camera::{CameraCommand, CameraRegion, SCROLL_BLOCKER_PID},
+    camera::{CameraCommand, CameraRegion, SCROLL_BLOCKER_PID, ViewFollow},
     ui::cursor,
 };
 use vault_formats::{HexGrid, Palette};
@@ -166,6 +179,9 @@ pub(crate) struct Enhanced {
     region_key: Option<RegionKey>,
     /// The world's camera hex as last kept.
     synced_hex: i32,
+    /// The player's hex the last tick saw: a change is a placement, which
+    /// the margin rule of `camera_follow = "off"` tests.
+    player_hex: Option<i32>,
     /// The debug free camera: no region, no clamp, roofs cut away.
     pub(crate) free_camera: bool,
     demo: VecDeque<(u64, DemoStep)>,
@@ -197,7 +213,79 @@ pub(crate) struct Enhanced {
     last: Option<(IndexedImage, IndexedImage, Option<u8>, Backdrop)>,
 }
 
+/// The world's view rule for `settings` (`None`: Vanilla, which steps).
+/// `smooth` and `step` keep the per-step recentring; `off` under the
+/// unlocked view asks for none at all (the camera recentres and writes
+/// `camera_hex` itself), and under the fixed view for the margin rule over
+/// the 640-by-380 map window.
+pub(crate) fn view_follow(settings: Option<&EnhancedSettings>) -> ViewFollow {
+    let Some(settings) = settings else {
+        return ViewFollow::Step;
+    };
+    match (follow_mode(settings), settings.viewport) {
+        (CameraFollow::Off, ViewportMode::Unlocked) => ViewFollow::Off {
+            margin: 0,
+            view: [640, 380],
+        },
+        (CameraFollow::Off, ViewportMode::Fixed) => ViewFollow::Off {
+            margin: settings.camera_recenter_margin,
+            view: [640, 380],
+        },
+        (CameraFollow::Step | CameraFollow::Smooth, _) => ViewFollow::Step,
+    }
+}
+
+/// The follow mode `settings` run: their `camera_follow`, except the touch
+/// UI's navigation-only view (Vanilla), which keeps its following camera.
+pub(crate) fn follow_mode(settings: &EnhancedSettings) -> CameraFollow {
+    if settings.navigation_only {
+        CameraFollow::Smooth
+    } else {
+        settings.camera_follow
+    }
+}
+
+impl Camera {
+    /// Take `mode`: `smooth` tracks the player (following resumes when the
+    /// mode changes to it), `off` and `step` never follow.
+    fn set_follow_mode(&mut self, mode: CameraFollow) {
+        let tracking = mode == CameraFollow::Smooth;
+        if tracking && !self.tracking {
+            self.resume_follow();
+        }
+        if !tracking {
+            self.follow = false;
+        }
+        self.tracking = tracking;
+    }
+}
+
 impl Enhanced {
+    /// The follow mode in force ([`follow_mode`]).
+    fn follow_mode(&self) -> CameraFollow {
+        follow_mode(&self.settings)
+    }
+    /// The margin rule (`docs/camera-follow-toggle.md` §3.2): whether the
+    /// default-grid point `point` lies less than `camera_recenter_margin`
+    /// view pixels from an edge of the view, or outside it. The margin is
+    /// in view pixels at zoom 1, so it covers `margin / zoom` world pixels;
+    /// on each axis it is at most half the view less one pixel. A margin
+    /// of 0 never fires.
+    pub(crate) fn outside_margin(&self, point: [f64; 2]) -> bool {
+        let margin = f64::from(self.settings.camera_recenter_margin);
+        if margin <= 0.0 {
+            return false;
+        }
+        let zoom = self.drawn_zoom();
+        let size = self.world_size().map(f64::from);
+        (0..2).any(|axis| {
+            let view = size[axis] * zoom;
+            let half = view / 2.0;
+            let margin = margin.min((half - 1.0).max(0.0));
+            let at = (point[axis] - self.camera.center[axis]) * zoom + half;
+            at < margin || at > view - margin
+        })
+    }
     /// The canvas size: the last layout's, else a 640-by-380 view.
     fn world_size(&self) -> [u32; 2] {
         self.layout.map_or_else(
@@ -540,6 +628,7 @@ fn blocker_fingerprint(world: &WorldState) -> u64 {
 impl MapPreview {
     /// Select the enhanced presentation (`None` is Vanilla).
     pub fn set_enhanced(&mut self, settings: Option<EnhancedSettings>) {
+        self.host.world.view_follow = view_follow(settings.as_ref());
         let Some(settings) = settings else {
             self.enhanced = None;
             self.pointer.world = false;
@@ -555,6 +644,7 @@ impl MapPreview {
             enhanced.camera.smooth = settings.smooth_camera;
             enhanced.camera.default_zoom =
                 f64::from(settings.default_zoom).clamp(camera::MIN_ZOOM, camera::MAX_ZOOM);
+            enhanced.camera.set_follow_mode(follow_mode(&settings));
             enhanced.settings = settings;
             return;
         }
@@ -562,13 +652,20 @@ impl MapPreview {
             .player_point()
             .or_else(|| camera::hex_point(self.host.world.camera_hex))
             .unwrap_or_default();
+        let mut camera = Camera::new(
+            center,
+            f64::from(settings.default_zoom),
+            settings.smooth_camera,
+        );
+        camera.set_follow_mode(follow_mode(&settings));
+        let player_hex = self
+            .host
+            .world
+            .get(self.host.world.player)
+            .and_then(|player| player.raw.hex);
         self.enhanced = Some(Box::new(Enhanced {
             settings,
-            camera: Camera::new(
-                center,
-                f64::from(settings.default_zoom),
-                settings.smooth_camera,
-            ),
+            camera,
             layout: None,
             at: None,
             world_at: None,
@@ -576,6 +673,7 @@ impl MapPreview {
             region: Arc::new(CameraRegion::unbounded()),
             region_key: None,
             synced_hex: self.host.world.camera_hex,
+            player_hex,
             free_camera: false,
             demo: VecDeque::new(),
             scripted: VecDeque::new(),
@@ -1167,13 +1265,21 @@ impl MapPreview {
         }
         true
     }
-    /// Home in the unlocked view: the camera follows the player again.
-    /// Returns whether it did (else the Vanilla walk runs).
+    /// Home in the unlocked view: the camera follows the player again
+    /// (`camera_follow = "smooth"`), or centres on the player's drawn
+    /// position once, eased or at once by `smooth_camera`, and leaves
+    /// following off (`off` and `step`). Returns whether it did (else the
+    /// Vanilla walk runs).
     pub(crate) fn enhanced_follow_player(&mut self) -> bool {
+        let player = self.player_point();
         let Some(enhanced) = self.unlocked_mut() else {
             return false;
         };
-        enhanced.camera.resume_follow();
+        if enhanced.camera.tracking {
+            enhanced.camera.resume_follow();
+        } else if let Some(player) = player {
+            enhanced.camera.recenter(player);
+        }
         self.last_hover = None;
         true
     }
@@ -1387,7 +1493,9 @@ impl MapPreview {
             if let Some(player) = player {
                 enhanced.camera.snap(player);
             }
-            enhanced.camera.follow = true;
+            // Map entry and an elevation change centre once under every
+            // mode; only `smooth` follows on from there.
+            enhanced.camera.follow = enhanced.camera.tracking;
             enhanced.synced_hex = camera_hex;
             enhanced.frozen = None;
         }
@@ -1416,6 +1524,9 @@ impl MapPreview {
     /// the camera, and the world's camera hex kept at the hex nearest the
     /// camera center. Returns whether the view changed.
     pub(crate) fn enhanced_tick(&mut self, now: u64) -> bool {
+        // The world's view rule follows the settings, whatever replaced the
+        // world's own since.
+        self.host.world.view_follow = view_follow(self.enhanced.as_deref().map(|it| &it.settings));
         if self.unlocked().is_none() {
             return false;
         }
@@ -1435,17 +1546,38 @@ impl MapPreview {
         let Some(enhanced) = self.unlocked_mut() else {
             return changed;
         };
+        let mode = enhanced.follow_mode();
         // A view center the world moved itself (a script or a load), not
         // to the player (the player's own steps center it in Vanilla),
-        // takes the camera there.
+        // takes the camera there. Without following (`off` and `step`) a
+        // move to the player's hex does too: a placement that recentres
+        // under `off`, and every placement under `step`; and when the
+        // player was placed in the same tick (a load, a transition), the
+        // camera centres on the player's hex.
+        let placed = (mode != CameraFollow::Smooth && player_hex != enhanced.player_hex)
+            .then(|| player_hex.and_then(camera::hex_point))
+            .flatten();
         if camera_hex != enhanced.synced_hex
-            && Some(camera_hex) != player_hex
-            && let Some(point) = camera::hex_point(camera_hex)
+            && (Some(camera_hex) != player_hex || mode != CameraFollow::Smooth)
+            && let Some(point) = placed.or_else(|| camera::hex_point(camera_hex))
         {
             enhanced.camera.follow = false;
             enhanced.camera.snap(point);
             changed = true;
         }
+        // The margin rule, at a placement of the player only (a change of
+        // its hex), never per tick: a stationary player never moves the
+        // view.
+        if mode == CameraFollow::Off
+            && player_hex != enhanced.player_hex
+            && let Some(point) = player_hex.and_then(camera::hex_point)
+            && let Some(player) = player
+            && enhanced.outside_margin(point)
+        {
+            enhanced.camera.recenter(player);
+            changed = true;
+        }
+        enhanced.player_hex = player_hex;
         let bounds = enhanced.bounds();
         changed |= enhanced.camera.tick(
             now,

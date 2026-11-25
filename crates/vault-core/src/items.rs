@@ -327,7 +327,22 @@ impl WorldState {
         let object = self.get_mut(item).expect("item");
         object.owner = Some(owner);
         object.raw.hex = None;
+        self.seat_in_holder(item);
         Ok(())
+    }
+    /// SPEC-003 §2.10: a held `item` and what it holds, recursively, take
+    /// the elevation of the object at the root of its holder chain, as the
+    /// map and save readers seat them (a pick-up, a move between bags, an
+    /// unequip or a split never leaves a held object on another elevation).
+    fn seat_in_holder(&mut self, item: ObjectRef) {
+        let root = self.outermost_owner(item);
+        let Some(elevation) = self.get(root).map(|object| object.raw.elevation) else {
+            return;
+        };
+        if let Some(object) = self.get_mut(item) {
+            object.raw.elevation = elevation;
+        }
+        self.seat_held(item, elevation);
     }
     /// SPEC-011 §3.13 removal of `quantity` units from an entry that `owner`
     /// holds directly or inside a container. The removed object is detached
@@ -560,6 +575,8 @@ impl WorldState {
         object.owner = Some(owner);
         object.raw.hex = None;
         object.raw.flags.0 |= hands;
+        // The removal left it detached on elevation 0; it is held again.
+        self.seat_in_holder(item);
         Ok(item)
     }
     /// SPEC-014 §3.34 a hand or armor slot (`flag`) takes `item`, which

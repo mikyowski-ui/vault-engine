@@ -791,6 +791,8 @@ impl<A: WorldAssets> WorldHost<A> {
         // SPEC-014 §3.44: the entrance placement is a move to a hex.
         let player = self.world.player;
         self.world.reinsert(player);
+        // SPEC-003 §2.10: what the player carries is on its elevation.
+        self.world.seat_held(player, elevation);
         // SPEC-013 §3.22: the entrance placement is an ordinary player
         // placement, so exit grids on its hex request a transition (the
         // player is not moved off them). SPEC-014 §3.36: then, from "none"

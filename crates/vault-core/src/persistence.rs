@@ -278,8 +278,12 @@ impl WorldState {
             // saving (the party records while they carry their marks).
             let unwritten =
                 self.get(instance.owner).is_some() && !written.contains(&instance.owner);
+            // SPEC-003 §3.3: a temporary object is never written, so its
+            // script would come back as a record with no object; it is left
+            // out with its locals in every image, a save slot's included.
             if instance.flags & crate::world::party_marks::NOT_SAVED != 0
                 || (!include_party && unwritten)
+                || (unwritten && self.in_temporary(instance.owner))
             {
                 dropped.push((instance.local_base, instance.local_count));
                 continue;
@@ -326,6 +330,23 @@ impl WorldState {
         });
         map.objects.total = map.objects.elevations.iter().map(Vec::len).sum();
         map
+    }
+    /// Whether `reference` is a temporary object or held, at any depth, by
+    /// one.
+    fn in_temporary(&self, mut reference: ObjectRef) -> bool {
+        for _ in 0..=vault_formats::map::MAX_INVENTORY_DEPTH + 1 {
+            let Some(object) = self.get(reference) else {
+                return false;
+            };
+            if object.raw.flags.contains(BasicFlags::TEMPORARY) {
+                return true;
+            }
+            let Some(owner) = object.owner else {
+                return false;
+            };
+            reference = owner;
+        }
+        false
     }
     /// The objects an area-map image writes: placed top-level objects other
     /// than the player, temporary objects, objects past elevation 2 and,

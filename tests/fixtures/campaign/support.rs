@@ -125,10 +125,27 @@ fn critter(id: u32, hex: i32, team: i32, script: Option<i32>) -> (Vec<u8>, Optio
 }
 
 fn exit(id: u32, hex: i32, map: i32) -> (Vec<u8>, Option<Script>) {
-    let mut record = world::object(5, hex, id, &[map, ENTRY, 0, 0]);
+    (exit_to(id, hex, map, ENTRY, 0, 0), None)
+}
+
+/// The map object record of an exit grid with object id `id` on `hex`,
+/// leading to map number `map`, hex `to_hex`, elevation `elevation`, facing
+/// `orientation` (the SPEC-003 exit-grid record: map, hex, elevation,
+/// orientation). The map number may be the grid's own map's, which joins two
+/// of its elevations (a staircase). The record's own elevation word is left
+/// 0: the grid lies on the elevation whose object list holds it.
+pub fn exit_to(
+    id: u32,
+    hex: i32,
+    map: i32,
+    to_hex: i32,
+    elevation: i32,
+    orientation: i32,
+) -> Vec<u8> {
+    let mut record = world::object(5, hex, id, &[map, to_hex, elevation, orientation]);
     world::word(&mut record, 0x24, 0x1);
     world::word(&mut record, 0x2c, EXIT_PID);
-    (record, None)
+    record
 }
 
 /// A ladder of scenery prototype `row`. SPEC-016 §2: its record names a

@@ -164,6 +164,18 @@ engine's build reads: Team A wrote `oracle/SPEC-024/hook-points.tsv`, and the ta
 approved specs on this side, as their READMEs say. None of these has a research-side
 generator behind it.
 
+Engine Wave 1, of 2026-11-24, was built the same way, from the owner's briefs
+`docs/elevation-change-audit.md` and `docs/camera-follow-toggle.md` and the owner's
+decisions recorded at the end of each. Its tests use synthetic fixtures only.
+
+| Spec | Revision | What it records | Decisions |
+| --- | --- | --- | --- |
+| SPEC-006 | (note in section 3.5) | On a load the replaced player records are removed before the new one is created, so a load of a load gives the same script identifier | Owner decision, in the section |
+| SPEC-020 | 6 | The `camera_follow` setting and its rows, Alt+C, the `Home: Center view` hint as row 7, and `--camera-follow` (sections 2.6, 2.8, 2.9) | D-44 to D-49 |
+
+No spec changed for the elevation fix: SPEC-003 section 2.10 already gives a held object
+the elevation of the tree it is in, and the live world now agrees with a load.
+
 A later research-vault revision of any of these specs supersedes these changes, as it
 does Team A's.
 

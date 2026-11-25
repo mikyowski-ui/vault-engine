@@ -23,7 +23,7 @@ pub mod settings_preview;
 use crate::{
     AppResult, EnhancedShown, bezel_layer,
     config::{Config, GamePaths},
-    enhanced::{EnhancedSettings, RoofPeek, ViewportMode},
+    enhanced::{CameraFollow, EnhancedSettings, RoofPeek, ViewportMode},
     enhanced_layers,
     launcher::{self, Launcher, Setup, color, font},
     map_preview::{MapPreview, SharedRenderer},
@@ -195,6 +195,9 @@ const VIEW: i32 = 101 + 200 * 100;
 fn widen(preview: &mut AssetPreview, smooth: bool) -> AppResult<()> {
     preview.set_enhanced(Some(EnhancedSettings {
         smooth_camera: smooth,
+        // The legacy follow the gallery was filmed with, named so that a
+        // change of the configured default (`off`) leaves its bytes alone.
+        camera_follow: CameraFollow::Smooth,
         ..EnhancedSettings::default()
     }));
     map(preview)

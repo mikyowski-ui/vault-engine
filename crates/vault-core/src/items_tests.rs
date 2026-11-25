@@ -662,3 +662,74 @@ fn spec011_spawned_weapons_know_their_ammunition() {
     assert!(host.world.known_prototype(AMMO_X).is_some());
     assert!(host.world.unload_weapon(weapon).unwrap().is_some());
 }
+
+/// SPEC-003 §2.10: a held object is on its holder's elevation, whatever
+/// moved it into the inventory.
+#[test]
+fn spec003_held_items_take_the_elevation_of_their_outermost_holder() {
+    let mut host = support::host();
+    let player = host.world.player;
+    let elevation =
+        |host: &WorldHost<ItemAssets>, item: ObjectRef| host.world.get(item).unwrap().raw.elevation;
+    host.world.move_object(player, 20100, 1, false).unwrap();
+    // A pick-up on elevation 1 of an item lying on elevation 0.
+    let ground = support::spawn(&mut host, ARMOR_A);
+    assert_eq!(elevation(&host, ground), 0);
+    host.world.add_item(player, ground, 1, false).unwrap();
+    assert_eq!(elevation(&host, ground), 1);
+    // A hand takes one unit of a stack (the split), then lets it go back
+    // to the list (the unequip): held all along, on elevation 1.
+    let stack = support::carry(&mut host, player, AMMO_X, 3);
+    let held = host
+        .world
+        .equip_slot(player, stack, BasicFlags::LEFT_HAND.0)
+        .unwrap();
+    for (item, _) in entries(&host, player) {
+        assert_eq!(elevation(&host, item), 1);
+    }
+    host.world.unequip(player, held).unwrap();
+    for (item, _) in entries(&host, player) {
+        assert_eq!(elevation(&host, item), 1);
+    }
+    let armor = ground;
+    host.world
+        .equip_slot(player, armor, BasicFlags::WORN.0)
+        .unwrap();
+    host.world.unequip(player, armor).unwrap();
+    assert_eq!(elevation(&host, armor), 1);
+    // Into a carried bag: its contents are on the player's elevation.
+    let bag = support::carry(&mut host, player, CONTAINER, 1);
+    assert!(host.world.move_into(player, armor, bag, 1).unwrap());
+    assert_eq!(host.world.get(armor).unwrap().owner, Some(bag));
+    assert_eq!((elevation(&host, bag), elevation(&host, armor)), (1, 1));
+    // A move of the holder carries the whole tree.
+    host.world.move_object(player, 20100, 2, false).unwrap();
+    assert_eq!((elevation(&host, bag), elevation(&host, armor)), (2, 2));
+    // A drop lands on the holder's hex and elevation.
+    host.world.drop_item(player, bag, 1).unwrap();
+    let dropped = host.world.get(bag).unwrap();
+    assert_eq!((dropped.owner, dropped.raw.hex), (None, Some(20100)));
+    assert_eq!((elevation(&host, bag), elevation(&host, armor)), (2, 2));
+}
+
+/// SPEC-003 §2.10 `[Safe rule]`: an inventory that loops is left as it is,
+/// reported once, and not followed.
+#[test]
+fn spec003_a_looping_inventory_is_reported_once_and_not_followed() {
+    let mut host = support::host();
+    let [a, b] = [0; 2].map(|_| support::spawn(&mut host, CONTAINER));
+    // a holds b, and b holds a: no inventory call makes this.
+    host.world.get_mut(a).unwrap().inventory.push((b, 1));
+    host.world.get_mut(b).unwrap().inventory.push((a, 1));
+    host.world.get_mut(b).unwrap().owner = Some(a);
+    host.world.effects.clear();
+    host.world.move_object(a, 20100, 1, false).unwrap();
+    assert_eq!(host.world.get(b).unwrap().raw.elevation, 1);
+    let reports: Vec<_> = host
+        .world
+        .effects
+        .iter()
+        .filter(|effect| matches!(effect, WorldEffect::Diagnostic(text) if text.contains("loops")))
+        .collect();
+    assert_eq!(reports.len(), 1, "{reports:?}");
+}

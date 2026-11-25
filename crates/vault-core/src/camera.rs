@@ -18,6 +18,22 @@ pub const SCROLL_BLOCKER_PID: u32 = 0x0500_000c;
 /// The enhanced camera request words, `op_cam_pan_to` to `op_cam_reset`.
 pub const CAMERA_WORDS: std::ops::RangeInclusive<u16> = 0x8210..=0x8213;
 
+/// How a placement of the player moves the view center
+/// (`docs/camera-follow-toggle.md`). Presentation state: it is in no save
+/// and no state hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewFollow {
+    /// Every placement of the player recenters the view on its hex.
+    #[default]
+    Step,
+    /// A walk step leaves the view alone. A placement that is not a walk
+    /// step (a transition, `move_to`, `override_map_start`) still recenters,
+    /// and so does a step that brings the player's hex center within
+    /// `margin` pixels of an edge of a view of `view` pixels (width,
+    /// height) centered on the view-center hex; a margin of 0 never does.
+    Off { margin: u16, view: [u16; 2] },
+}
+
 /// A scripted camera request (enhanced opcodes `0x8210`-`0x8213`). Durations
 /// are presentation milliseconds; 0 applies at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

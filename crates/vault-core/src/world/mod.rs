@@ -481,6 +481,8 @@ pub struct WorldState {
     pub tile_light: [Vec<i64>; 3],
     pub elevation: u8,
     pub camera_hex: i32,
+    /// How the player's placements move `camera_hex`; the shell sets it.
+    pub view_follow: crate::camera::ViewFollow,
     pub spatial_enabled: bool,
     pub scripts_enabled: bool,
     pub background_enabled: bool,
@@ -663,6 +665,7 @@ impl WorldState {
             tile_light: std::array::from_fn(|_| vec![655; 40000]),
             elevation: 0,
             camera_hex: 20100,
+            view_follow: crate::camera::ViewFollow::Step,
             spatial_enabled: true,
             scripts_enabled: true,
             background_enabled: true,

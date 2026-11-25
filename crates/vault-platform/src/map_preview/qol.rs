@@ -182,6 +182,16 @@ impl MapPreview {
         self.qol_state.speed = speed;
         self.post_message(format!("Game speed {}", speed.label()).into_bytes(), false);
     }
+    /// The camera follow mode changed in play (Alt+C): the HUD names it
+    /// (`Camera follow Off`, `Smooth` or `Step`), as Alt+F names the game
+    /// speed. Only the message: the caller applies the mode
+    /// ([`MapPreview::set_enhanced`]).
+    pub fn announce_camera_follow(&mut self, mode: crate::enhanced::CameraFollow) {
+        self.post_message(
+            format!("Camera follow {}", mode.label()).into_bytes(),
+            false,
+        );
+    }
     /// World time at shell time `now`: the shell clock plus what the speed
     /// has run ahead of it. At 1.0x (always under Vanilla, and while a
     /// conversation is open) a frame adds nothing ahead, so world time is

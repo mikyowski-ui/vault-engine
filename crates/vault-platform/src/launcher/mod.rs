@@ -110,6 +110,9 @@ pub const ZOOM_STEPS: [f32; 8] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0];
 /// The enhanced preset's interface scales (`None`: auto).
 pub const UI_SCALES: [Option<f32>; 6] =
     [None, Some(1.0), Some(1.5), Some(2.0), Some(2.5), Some(3.0)];
+/// The enhanced preset's recentre margins (`camera_recenter_margin`, view
+/// pixels at zoom 1; 0 is off).
+pub const MARGIN_STEPS: [u16; 5] = [0, 48, 96, 144, 192];
 
 /// One input the shell passes on: frame pixels for the pointer.
 #[derive(Debug, Clone, PartialEq)]
@@ -215,6 +218,11 @@ pub enum Widget {
     UiScale,
     /// The game speed (`game_speed`), with the enhanced preset only.
     GameSpeed,
+    /// How the view follows the player (`camera_follow`), with the
+    /// enhanced preset only.
+    CameraFollow,
+    /// The `off` follow's recentre margin (`camera_recenter_margin`).
+    RecenterMargin,
     /// The hotkey toasts (`hotkey_hints`), under both presets.
     HotkeyHints,
     Layers,
@@ -762,6 +770,8 @@ impl Launcher {
                 | Widget::RoofPeek
                 | Widget::UiScale
                 | Widget::GameSpeed
+                | Widget::CameraFollow
+                | Widget::RecenterMargin
                 | Widget::HotkeyHints => self.choose(focus, delta),
                 _ => self.move_focus(delta),
             },
@@ -900,7 +910,7 @@ impl Launcher {
                     browser.list.selected = row;
                 }
             }
-            Widget::Zoom | Widget::UiScale | Widget::GameSpeed
+            Widget::Zoom | Widget::UiScale | Widget::GameSpeed | Widget::RecenterMargin
                 if view::slider_track(rect).contains(point) =>
             {
                 self.choose_stop(widget, view::slider_track(rect), point[0]);
@@ -955,6 +965,8 @@ impl Launcher {
             | Widget::RoofPeek
             | Widget::UiScale
             | Widget::GameSpeed
+            | Widget::CameraFollow
+            | Widget::RecenterMargin
             | Widget::HotkeyHints => self.choose(widget, 1),
             Widget::Layers | Widget::LayerToggle => self.edit_layers(Edit::Toggle),
             Widget::LayerUp => self.move_layer(-1),
@@ -1307,8 +1319,9 @@ impl Launcher {
     /// The next (`delta` 1) or previous (-1) choice of an enhanced
     /// presentation widget, wrapping: the viewport and camera smoothing
     /// toggle, the zoom steps through [`ZOOM_STEPS`], the roof peek cycles
-    /// as Alt+R does, the interface scale steps through [`UI_SCALES`], and
-    /// the game speed through 1.0, 1.5 and 2.0 as Alt+F does.
+    /// as Alt+R does, the interface scale steps through [`UI_SCALES`], the
+    /// game speed through 1.0, 1.5 and 2.0 as Alt+F does, the camera follow
+    /// through Off, Step and Smooth, and the margin through [`MARGIN_STEPS`].
     /// A value from the file between two steps moves from the nearest.
     /// What is a profile's goes in its table, so that another profile's stays.
     fn choose(&mut self, widget: Widget, delta: isize) {
@@ -1335,6 +1348,9 @@ impl Launcher {
                 own.ui_scale = Some(config::UiScale::from_factor(scale));
             }
             Widget::GameSpeed => own.game_speed = Some(speeds[stop(speeds.len())]),
+            Widget::RecenterMargin => {
+                own.camera_recenter_margin = Some(MARGIN_STEPS[stop(MARGIN_STEPS.len())]);
+            }
             _ => {}
         }
     }
@@ -1396,6 +1412,19 @@ impl Launcher {
                     .position(|speed| *speed == active.game_speed)
                     .unwrap_or(0);
                 own.game_speed = Some(speeds[step(at, speeds.len())]);
+            }
+            Widget::CameraFollow => {
+                let mut mode = settings.camera_follow;
+                // Backwards is two steps forwards in the three-mode cycle.
+                for _ in 0..step(0, 3) {
+                    mode = mode.next();
+                }
+                own.camera_follow = Some(mode);
+            }
+            Widget::RecenterMargin => {
+                let margins = &mut MARGIN_STEPS.iter().map(|margin| f32::from(*margin));
+                let at = nearest(margins, f32::from(settings.camera_recenter_margin));
+                own.camera_recenter_margin = Some(MARGIN_STEPS[step(at, MARGIN_STEPS.len())]);
             }
             _ => {}
         }

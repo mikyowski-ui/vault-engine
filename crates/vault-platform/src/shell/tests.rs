@@ -184,6 +184,16 @@ fn installed() -> config::Config {
     }
 }
 
+/// What a configuration naming no Enhanced keys launches with: the
+/// defaults, and the configured `camera_follow` (`off`), not the legacy
+/// `smooth` a log without the field reads as.
+fn configured() -> enhanced::EnhancedSettings {
+    enhanced::EnhancedSettings {
+        camera_follow: enhanced::CameraFollow::CONFIGURED,
+        ..Default::default()
+    }
+}
+
 #[test]
 fn no_arguments_start_the_game_from_the_settings() {
     let mut args = parse(&[]);
@@ -208,7 +218,7 @@ fn no_arguments_start_the_game_from_the_settings() {
             touch_ui: false,
             game: vault_core::GameProfile::Fallout1,
             preset: config::Preset::Enhanced,
-            enhanced: Some(enhanced::EnhancedSettings::default()),
+            enhanced: Some(configured()),
             mod_list: None,
             zero_arg_game: true,
             audio: true,
@@ -355,7 +365,7 @@ fn the_launchers_play_builds_the_zero_argument_launch() {
             touch_ui: false,
             game: vault_core::GameProfile::Fallout1,
             preset: config::Preset::Enhanced,
-            enhanced: Some(enhanced::EnhancedSettings::default()),
+            enhanced: Some(configured()),
             mod_list: chosen.mod_list.clone(),
             zero_arg_game: true,
             audio: false,
@@ -441,6 +451,189 @@ fn alt_f_cycles_the_game_speed_under_the_enhanced_preset_only() {
         seen.push(speed.label());
     }
     assert_eq!(seen, ["1.5x", "2.0x", "1.0x"]);
+}
+
+/// Alt+C is the shell's under the Enhanced preset only: `off` to `smooth`
+/// and back (`step` goes to `off`), applied to the session, logged as an
+/// `enhanced` record and named on the HUD. Under Vanilla it stays the
+/// game's C, as before.
+#[test]
+fn alt_c_toggles_the_camera_follow_under_the_enhanced_preset_only() {
+    use enhanced::CameraFollow;
+    assert_eq!(
+        qol_hotkey(KeyCode::KeyC, true, true),
+        Some(ShellHotkey::CameraFollow)
+    );
+    // Plain C, and Alt+C under Vanilla (its touch camera included: no game
+    // speed), reach the game.
+    assert_eq!(qol_hotkey(KeyCode::KeyC, false, true), None);
+    assert_eq!(qol_hotkey(KeyCode::KeyC, true, false), None);
+    for enhanced in [false, true] {
+        assert_eq!(shell_hotkey(KeyCode::KeyC, true, enhanced), None);
+    }
+    assert_eq!(
+        toggled_camera_follow(CameraFollow::Off),
+        CameraFollow::Smooth
+    );
+    assert_eq!(
+        toggled_camera_follow(CameraFollow::Smooth),
+        CameraFollow::Off
+    );
+    assert_eq!(toggled_camera_follow(CameraFollow::Step), CameraFollow::Off);
+
+    let dir = map_preview::test_support::synthetic_corpus();
+    let settings = enhanced::EnhancedSettings {
+        camera_follow: CameraFollow::Off,
+        ..Default::default()
+    };
+    let args = preview::PreviewArgs {
+        corpus_dir: Some(dir.path().into()),
+        preview_map: Some("maps/synthetic.map".into()),
+        player_gcd: Some("premade/synthetic.gcd".into()),
+        preset: vault_core::EnginePreset::Enhanced,
+        enhanced: Some(settings),
+        ..Default::default()
+    };
+    let session = session::SessionRuntime::start(session::SessionConfig::replay(args))
+        .unwrap()
+        .unwrap();
+    let log = SharedLog::default();
+    let mut shell = Shell {
+        session: Some(session),
+        input_log: InputLog(Some(Box::new(log.clone()))),
+        enhanced: Some(settings),
+        game_speed: Some(enhanced::GameSpeed::Normal),
+        ..Default::default()
+    };
+    let follow = |shell: &mut Shell| {
+        let session = shell.session.as_mut().unwrap();
+        session.enhanced_settings().unwrap().camera_follow
+    };
+    assert!(shell.session.as_ref().unwrap().hints_ready());
+    assert_eq!(
+        shell.apply_camera_follow_toggle(),
+        Some(CameraFollow::Smooth)
+    );
+    assert_eq!(follow(&mut shell), CameraFollow::Smooth);
+    assert_eq!(shell.enhanced.unwrap().camera_follow, CameraFollow::Smooth);
+    // The HUD names the mode: a toast waits while it shows.
+    assert!(!shell.session.as_ref().unwrap().hints_ready());
+    assert_eq!(shell.apply_camera_follow_toggle(), Some(CameraFollow::Off));
+    assert_eq!(follow(&mut shell), CameraFollow::Off);
+    // Two `enhanced` records: `smooth`, the legacy value, is left out.
+    let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    let records: Vec<_> = text.lines().collect();
+    assert_eq!(records.len(), 2, "{text}");
+    assert!(
+        records
+            .iter()
+            .all(|line| line.contains(r#""kind":"enhanced""#))
+    );
+    assert!(!records[0].contains("camera_follow"), "{text}");
+    assert!(records[1].contains(r#""camera_follow":"off""#), "{text}");
+    // Under Vanilla the shell has no enhanced settings: nothing happens.
+    let mut vanilla = Shell::default();
+    assert_eq!(vanilla.apply_camera_follow_toggle(), None);
+}
+
+/// SPEC-020 §2.6: the recentre hint is for an Enhanced `off` session only.
+#[test]
+fn the_center_view_hint_follows_the_sessions_camera_follow() {
+    use enhanced::{CameraFollow, EnhancedSettings};
+    let with = |camera_follow, navigation_only| {
+        Some(EnhancedSettings {
+            camera_follow,
+            navigation_only,
+            ..Default::default()
+        })
+    };
+    assert!(center_view_hint(with(CameraFollow::Off, false)));
+    assert!(!center_view_hint(with(CameraFollow::Step, false)));
+    assert!(!center_view_hint(with(CameraFollow::Smooth, false)));
+    // Vanilla: no settings, or the touch camera's.
+    assert!(!center_view_hint(None));
+    assert!(!center_view_hint(with(CameraFollow::Off, true)));
+}
+
+/// `--camera-follow` sets the Enhanced launch over the settings; a value it
+/// does not know is a usage error; under Vanilla anything but `step` is
+/// refused, said, and ignored. Play drops it with the other display flags,
+/// and a warm switch keeps it.
+#[test]
+fn the_camera_follow_flag_wins_under_the_enhanced_preset_only() {
+    use enhanced::CameraFollow;
+    let settings = config::Config {
+        camera_follow: Some(CameraFollow::Step),
+        ..installed()
+    };
+    let follow = |flags: &[&str], config: &config::Config| {
+        resolve_launch(&mut parse(flags), Some(config))
+            .enhanced
+            .map(|settings| settings.camera_follow)
+    };
+    assert_eq!(follow(&[], &installed()), Some(CameraFollow::Off));
+    assert_eq!(follow(&[], &settings), Some(CameraFollow::Step));
+    for (value, mode) in [
+        ("off", CameraFollow::Off),
+        ("step", CameraFollow::Step),
+        ("smooth", CameraFollow::Smooth),
+    ] {
+        assert_eq!(parse(&["--camera-follow", value]).camera_follow, Some(mode));
+        assert_eq!(follow(&["--camera-follow", value], &settings), Some(mode));
+    }
+    for bad in ["follow", "Off", "", "1"] {
+        assert!(Args::try_parse_from(["vault-platform", "--camera-follow", bad]).is_err());
+    }
+    // Vanilla: nothing to set, and only `step` passes without a word.
+    let vanilla = ["--preset", "vanilla", "--camera-follow"];
+    for value in ["off", "smooth", "step"] {
+        let flags = [&vanilla[..], &[value]].concat();
+        assert_eq!(follow(&flags, &settings), None);
+    }
+    use config::Preset::{Enhanced, Vanilla};
+    assert_eq!(
+        refused_camera_follow(Vanilla, Some(CameraFollow::Step)),
+        None
+    );
+    assert_eq!(refused_camera_follow(Vanilla, None), None);
+    assert_eq!(
+        refused_camera_follow(Enhanced, Some(CameraFollow::Off)),
+        None
+    );
+    let said = refused_camera_follow(Vanilla, Some(CameraFollow::Smooth)).unwrap();
+    assert!(said.starts_with("--camera-follow smooth:"), "{said}");
+    assert!(said.ends_with("ignored"), "{said}");
+    // The Vanilla touch camera keeps its own follow, whatever the flag.
+    let touch = parse(&[
+        "--preset",
+        "vanilla",
+        "--touch-ui",
+        "--camera-follow",
+        "off",
+    ]);
+    let launch = resolve_launch(&mut touch.clone(), Some(&settings));
+    assert_eq!(
+        launch.enhanced.map(|settings| settings.camera_follow),
+        Some(CameraFollow::Smooth)
+    );
+    // The launcher shows the flag as its own choice; Play then drops it.
+    let shown = parse(&[
+        "--launcher",
+        "--preset",
+        "enhanced",
+        "--camera-follow",
+        "smooth",
+    ]);
+    assert_eq!(play_args(&shown, false).camera_follow, None);
+    let launcher = launcher_on(&shown, None, None);
+    assert_eq!(
+        launcher.active_enhanced().settings.camera_follow,
+        CameraFollow::Smooth
+    );
+    assert_eq!(
+        switch_args(&shown).camera_follow,
+        Some(CameraFollow::Smooth)
+    );
 }
 
 #[test]
@@ -587,7 +780,7 @@ fn mod_manifests_set_the_launch_under_the_command_line() {
             default_zoom: 2.0,
             smooth_camera: false,
             roof_peek: enhanced::RoofPeek::CursorXray,
-            ..Default::default()
+            ..configured()
         })
     );
     // The command line's flags win over the mod's.
@@ -624,7 +817,7 @@ fn the_enhanced_settings_reach_the_launch_with_the_enhanced_preset_only() {
         viewport: enhanced::ViewportMode::Fixed,
         default_zoom: 1.5,
         roof_peek: enhanced::RoofPeek::Hidden,
-        ..Default::default()
+        ..configured()
     };
     assert_eq!(launch.enhanced, Some(expected));
     // The flags win over the file.

@@ -3,7 +3,7 @@
 use crate::{
     CharacterSheet, EnginePreset, WorldEffect, WorldHost, WorldState,
     assets::WorldAssets,
-    camera::{CameraCommand, CameraRegion, SCROLL_BLOCKER_PID, flood},
+    camera::{CameraCommand, CameraRegion, SCROLL_BLOCKER_PID, ViewFollow, flood},
     fixture_state as fixture,
     test_support::{TestAssets, dir_assets},
     ui::cursor,
@@ -520,4 +520,118 @@ fn the_camera_demo_map_is_a_well_formed_map() {
         .filter(|object| object.pid == SCROLL_BLOCKER_PID)
         .count();
     assert_eq!(blockers, 4 * 80);
+}
+
+/// `docs/camera-follow-toggle.md` §7 on an empty map with a 640 by 380
+/// view: the player placed on hex 20100 (step 0), then walked `steps` hexes
+/// southeast, one walk step each. Returns the world and the view center
+/// after each placement.
+fn walk(follow: ViewFollow, steps: i32) -> (WorldState, Vec<i32>) {
+    let mut world = WorldState::new(CharacterSheet::default(), 1).unwrap();
+    world.view_follow = follow;
+    let player = world.player;
+    world.move_object(player, 20100, 0, false).unwrap();
+    let mut centers = vec![world.camera_hex];
+    for step in 1..=steps {
+        let hex = 20100 + 200 * step;
+        assert_eq!(
+            HexGrid::step(hex - 200, 2, 1),
+            Ok(hex),
+            "southeast adds 200"
+        );
+        world.move_object(player, hex, 0, true).unwrap();
+        centers.push(world.camera_hex);
+    }
+    (world, centers)
+}
+const OFF_96: ViewFollow = ViewFollow::Off {
+    margin: 96,
+    view: [640, 380],
+};
+const OFF_0: ViewFollow = ViewFollow::Off {
+    margin: 0,
+    view: [640, 380],
+};
+
+#[test]
+fn follow_vector_a_step_recenters_every_placement_and_off_none() {
+    let hexes: Vec<i32> = (0..=5).map(|step| 20100 + 200 * step).collect();
+    assert_eq!(walk(ViewFollow::Step, 5).1, hexes);
+    assert_eq!(walk(OFF_96, 5).1, [20100; 6]);
+    assert_eq!(walk(OFF_0, 5).1, [20100; 6]);
+    // Under `off` after step 5 the player's hex center is at (400, 250).
+    let grid = HexGrid::centered(20100, 640, 380).unwrap();
+    assert_eq!(grid.hex_center(20100), Ok([320, 190]));
+    assert_eq!(grid.hex_center(21100), Ok([400, 250]));
+}
+
+#[test]
+fn follow_vector_b_the_margin_recenters_once_the_player_nears_an_edge() {
+    // After step k the player is at (320 + 16k, 190 + 12k); step 8 gives
+    // y = 286, past 380 - 96 = 284, and the view recenters on hex 21700.
+    let mut expected = vec![20100; 8];
+    expected.extend([21700; 3]);
+    assert_eq!(walk(OFF_96, 10).1, expected);
+    // A margin of 0 never recenters; `step` recenters every step.
+    assert_eq!(walk(OFF_0, 10).1, [20100; 11]);
+    let hexes: Vec<i32> = (0..=10).map(|step| 20100 + 200 * step).collect();
+    assert_eq!(walk(ViewFollow::Step, 10).1, hexes);
+}
+
+#[test]
+fn follow_off_recenters_for_placements_that_are_no_walk_step() {
+    let (mut world, centers) = walk(OFF_96, 3);
+    assert_eq!(centers, [20100; 4]);
+    let player = world.player;
+    // A placement that is not a walk step (a transition, `move_to`).
+    world.move_object(player, 20900, 0, false).unwrap();
+    assert_eq!(world.camera_hex, 20900);
+    // A walk step onto another elevation.
+    world.move_object(player, 21100, 1, true).unwrap();
+    assert_eq!((world.camera_hex, world.elevation), (21100, 1));
+    // A margin far above half the view is clamped to half minus one pixel:
+    // only the view center itself is inside it, so every walk step recenters.
+    let wide = ViewFollow::Off {
+        margin: 1000,
+        view: [640, 380],
+    };
+    let hexes: Vec<i32> = (0..=3).map(|step| 20100 + 200 * step).collect();
+    assert_eq!(walk(wide, 3).1, hexes);
+    // A recenter the border refuses leaves the view where it was.
+    let mut world = WorldState::new(CharacterSheet::default(), 1).unwrap();
+    world.view_follow = OFF_96;
+    let player = world.player;
+    world.move_object(player, 30100, 0, false).unwrap();
+    let edge = 200 * 160 + 100;
+    assert!(!cursor::inside_border(edge));
+    world.move_object(player, edge, 0, false).unwrap();
+    assert_eq!(world.camera_hex, 30100);
+}
+
+#[test]
+fn follow_off_changes_no_hash_and_scripts_see_the_players_hex() {
+    let (off, _) = walk(OFF_96, 10);
+    let (step, _) = walk(ViewFollow::Step, 10);
+    assert_ne!(off.camera_hex, step.camera_hex);
+    assert_eq!(off.state_hash(), step.state_hash());
+    // Script words read the view `step` would have: the player's hex.
+    assert_eq!(off.script_view_hex(), 22100);
+    assert_eq!(step.script_view_hex(), step.camera_hex);
+    // `tile_is_visible` gives one answer under either setting.
+    let visible = |world: WorldState, tile: i32| {
+        let mut host = WorldHost::new(world, TestAssets::default());
+        let mut vm = vanilla_fragment(&request(0x80f8, &[tile]));
+        vm.run(&mut host, 10).unwrap();
+        vm.value_stack.pop().unwrap().payload
+    };
+    for tile in [22910, 22110, 20110, 22100] {
+        let (off, _) = walk(OFF_96, 10);
+        let (step, _) = walk(ViewFollow::Step, 10);
+        assert_eq!(visible(off, tile), visible(step, tile), "{tile}");
+    }
+    // Under `off` the view itself is at 21700, from which hex 22910 fails
+    // the word's test; it still answers as from the player's 22100.
+    let (off, _) = walk(OFF_96, 10);
+    assert_eq!(off.camera_hex, 21700);
+    assert_eq!(visible(off, 22910), 1);
 }

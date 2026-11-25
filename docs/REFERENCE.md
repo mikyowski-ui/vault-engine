@@ -284,8 +284,9 @@ the palette-resolved colours only in a thin band at each texel edge, so pixels
 stay crisp while scrolling. `integer` keeps whole-pixel scaling with a border.
 Pointer mapping, the cursor warp and replay all use the same integer-snapped
 viewport. **F11** or **Alt+Enter** toggles borderless fullscreen. The shell
-keeps these keys and **Alt+L** (and, under `preset = "enhanced"`, **Alt+V** and
-**Alt+F**), and F10 stays the game's quit confirmation (SPEC-014 §3.17).
+keeps these keys and **Alt+L** (and, under `preset = "enhanced"`, **Alt+V**,
+**Alt+F** and **Alt+C**), and F10 stays the game's quit confirmation (SPEC-014 §3.17).
+Under Vanilla, Alt+C is not the shell's: it reaches the game as it always has.
 The window opens at 1280×960, or at the largest multiple of 640×480 that
 fits a smaller monitor.
 
@@ -331,9 +332,10 @@ Keys: `master_dat`, `critter_dat`, `data_root`, `mod_list` (or `load_order`),
 `preset` (`vanilla` or `enhanced`), `scaling`, `fullscreen`, `touch_ui`
 (see [Touch UI](#touch-ui)), `debug` and `audio` (`false` keeps the audio
 device closed, as `--no-audio` does), plus the enhanced preset's
-`viewport_mode`, `default_zoom`, `smooth_camera`, `roof_peek` and
-`ui_scale` (see [Enhanced viewport & camera](#enhanced-viewport--camera))
-and `game_speed` (`1.0`, the default, `1.5` or `2.0`; see
+`viewport_mode`, `default_zoom`, `smooth_camera`, `roof_peek`, `ui_scale`,
+`camera_follow` (`"off"`, the default, `"step"` or `"smooth"`) and
+`camera_recenter_margin` (0 to 1024, default 96) (see
+[Enhanced viewport & camera](#enhanced-viewport--camera)) and `game_speed` (`1.0`, the default, `1.5` or `2.0`; see
 [Quality of life](#quality-of-life)), and `render_path` (`reference`, the
 default, or `instanced`; see [Render path](#render-path)).
 
@@ -435,7 +437,7 @@ assets and its `Vfs` go with it. The new one is a cold start of that edition, an
 not recorded. Only the window and the renderer carry over, and the new session
 builds its own storage on its profile's save root. Of the
 command line, only `--scaling`, `--fullscreen`, `--touch-ui`, `--preset`, `--viewport`,
-`--zoom`, `--render-path` and `--no-audio` cross a switch, so a session started with
+`--zoom`, `--camera-follow`, `--render-path` and `--no-audio` cross a switch, so a session started with
 `--sfall` or `--master-dat` does not pass them on: the settings file and manifests
 decide. A toggle wins over a carried `--preset`, which then stops carrying, so the next
 switch takes the settings and manifests. Alt+L does nothing in a replay or a smoke test, and a session whose data
@@ -443,8 +445,10 @@ is in memory writes one diagnostic.
 
 **Hotkey hints.** A short amber plate near the top of the window teaches the keys,
 one at a time, on the map only: `F1: Help`, `I: Inventory`, `S: Skilldex`, `P: Pip-Boy`,
-`Z: Wait (Pip-Boy clock)`, `F9: Debugger`, then `Alt+L: Switch game` when both editions
-are found. The first shows 2 seconds after the map first appears. Each stays 4
+`Z: Wait (Pip-Boy clock)`, `F9: Debugger`, then `Home: Center view` while the session's
+`camera_follow` is `off` (the Enhanced preset only), then `Alt+L: Switch game` when both
+editions are found. `Alt+L` is always last; an Alt+C away from `off` while the Home hint
+waits or shows passes it over. The first shows 2 seconds after the map first appears. Each stays 4
 seconds, dissolves over 0.5 and leaves a 1-second gap. The timer stops during combat,
 dialogue, any window, a movie and the F9 panel, and a HUD message hides a hint until
 it has gone. Pressing the shown hint's key ends it, and changes nothing about that
@@ -529,7 +533,7 @@ opens when:
 - a game chosen on the boot menu does not start; or
 - `--launcher` is given. Display flags given with it (`--scaling`,
   `--fullscreen`, `--touch-ui`, `--preset`, `--viewport`, `--zoom`,
-  `--no-audio`) pre-set its choices.
+  `--camera-follow`, `--no-audio`) pre-set its choices.
 
 Replays (`--replay-inputs`), `--smoke-test`, `--game` and the `--preview-*`
 and `--play-movie` flags never show it, and `--launcher` conflicts with them.
@@ -571,6 +575,10 @@ the settings.
     - **Default zoom:** a stepper over 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5
       and 3.
     - **Smooth camera.**
+    - **Camera follow:** `Off`, `Step` or `Smooth`, the `camera_follow`;
+      Alt+C toggles Off and Smooth in play.
+    - **Recentre margin:** `Off` (0), 48, 96, 144 or 192 pixels, the
+      `camera_recenter_margin`; it acts with the follow Off only.
     - **Roof peek mode.**
     - **Interface scale:** auto, 1, 1.5, 2, 2.5 or 3.
     - **Game speed:** 1.0x, 1.5x or 2.0x.
@@ -745,6 +753,34 @@ takes this section's viewport and camera only.
   over the world, and side panels continue the interface bar to the window's
   edges. `fixed_640x480` keeps the Vanilla frame. **Alt+V** toggles the two
   in play, on any screen (a shell key, like Alt+S; V is no game key).
+- **Camera follow.** `camera_follow` says how the view follows the player,
+  in the fixed view and the unlocked one alike:
+  - `off`, the default: the player's moves do not move the view. Edge and
+    arrow scrolling, a drag, a zoom, the camera words, `move_to` and
+    `override_map_start` on the player, metarule3 108, map entry, an
+    elevation change, a load, **Home** and the margin rule below still do.
+  - `step`: the view recentres on the player's hex at every placement,
+    exactly as Vanilla does.
+  - `smooth`: the view tracks the player's drawn position every frame,
+    eased by `smooth_camera`; a drag, a pan, an off-centre zoom or
+    `op_cam_pan_to` stops it, and **Home** or `op_cam_reset` resumes it.
+
+  **Alt+C** toggles `off` and `smooth` in play (from `step` it goes to
+  `off`; only the settings reach `step`), and the HUD names the new mode, as
+  Alt+F does for the game speed. It is a shell key under the enhanced preset
+  only. **Home** is the recentre key under every mode: under Vanilla and
+  `step` it walks the view back toward the player hex by hex (SPEC-014
+  §3.29); under `off` it centres the view on the player once, by that walk in
+  the fixed view or one snap or ease in the unlocked one, and following stays
+  off; under `smooth` it resumes following.
+
+  **The margin rule.** Under `off`, after each placement of the player, the
+  view recentres when the player's drawn hex centre comes within
+  `camera_recenter_margin` pixels of any view edge, or leaves the view. The
+  margin is in view pixels at zoom 1 (so 96 covers 32 world pixels at 3×),
+  is clamped to half the view's width or height less one pixel, and 0 turns
+  the rule off. It runs at placements only, never per frame, so a player
+  standing still never moves the view; `step` and `smooth` ignore it.
 - **Windows over the map.** The inventory, loot (Companion Gear included),
   barter and conversation, Skilldex, elevator, automap and options (pause
   and preferences included) windows keep the whole world canvas drawn
@@ -811,7 +847,8 @@ takes this section's viewport and camera only.
     while panning.
   - Clicks go through a cut-away roof to the floor, object or critter
     beneath.
-- **Camera bounds.** The camera follows the player and eases back inside
+- **Camera bounds.** The camera follows the player as `camera_follow`
+  says (above), and eases back inside
   the region the map's scroll blockers enclose (`CameraRegion::compute`,
   below). The blockers bound only the camera center, never what is drawn.
   Floor, walls, scenery and critters past them are drawn normally, because
@@ -833,10 +870,18 @@ takes this section's viewport and camera only.
 The settings are `viewport_mode` (`"fixed_640x480"` or
 `"unlocked_widescreen"`), `default_zoom` (a number from 0.5 to 3.0, default
 1.0), `smooth_camera` (default `true`), `roof_peek` (`"vanilla"`, the default,
-`"cursor_xray"` or `"hidden"`) and `ui_scale` (`"auto"`, the default, which
-fits the interface to the window's height, or a number from 0.5 to 8). They
-are read only with the enhanced preset. `--viewport MODE` and `--zoom ZOOM`
-override the first two from the command line (and pre-set the launcher).
+`"cursor_xray"` or `"hidden"`), `ui_scale` (`"auto"`, the default, which
+fits the interface to the window's height, or a number from 0.5 to 8),
+`camera_follow` (`"off"`, the default, `"step"` or `"smooth"`) and
+`camera_recenter_margin` (a whole number of pixels from 0 to 1024, default
+96). They are read only with the enhanced preset. The Vanilla preset always
+recentres at every step (`step`), and cannot be set otherwise: a
+`camera_follow` other than `"step"` under it is refused with a diagnostic.
+`--viewport MODE` and `--zoom ZOOM` override the first two from the command
+line, and `--camera-follow off|step|smooth` overrides `camera_follow` (all
+three pre-set the launcher). Any other `--camera-follow` value is a usage
+error. Under Vanilla a value other than `step` is refused with a warning and
+ignored, and the Vanilla touch UI's camera keeps its own follow.
 
 #### Camera opcodes and the camera demo
 
@@ -895,11 +940,16 @@ stays clean.
       --preset enhanced --preview-map maps/cam_demo.map
 
 An enhanced session's input log has one more record after `surface` and
-`scaling`, and another on every Alt+V:
+`scaling`, and another on every Alt+V and Alt+C:
 
 ```json
-{"command_id":3,"kind":"enhanced","settings":{"viewport_mode":"unlocked_widescreen","default_zoom":1.0,"smooth_camera":true,"roof_peek":"vanilla","ui_scale":null}}
+{"command_id":3,"kind":"enhanced","settings":{"viewport_mode":"unlocked_widescreen","default_zoom":1.0,"smooth_camera":true,"roof_peek":"vanilla","ui_scale":null,"camera_follow":"off"}}
 ```
+
+`camera_follow` is written only when it is not `smooth`, and
+`camera_recenter_margin` only when it is not 96. A record without them reads
+as `smooth` and 96, the behaviour before the setting existed, so every
+earlier log, golden and gallery image replays with the same bytes.
 
 A replay applies it to the world. While the world shows the unlocked
 viewport, the replay routes pointer moves, buttons (the middle one included)
@@ -1055,8 +1105,8 @@ roof_peek = "cursor_xray"
 - On launch each **enabled** layer's `[enhanced]` keys apply over
   `vault-engine.toml`, lowest layer first, so the highest layer wins a key
   as it wins a file.
-- Command-line flags (`--preset`, `--viewport`, `--zoom`) still win over
-  both. A replay takes nothing from either.
+- Command-line flags (`--preset`, `--viewport`, `--zoom`,
+  `--camera-follow`) still win over both. A replay takes nothing from either.
 - A malformed manifest stops the launch with `mod_list:` and the folder's
   name. The launcher shows the same error on the layer.
 

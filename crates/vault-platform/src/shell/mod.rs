@@ -74,15 +74,46 @@ enum ShellHotkey {
     Viewport,
     /// Alt+F, with the enhanced preset only: the next game speed.
     GameSpeed,
+    /// Alt+C, with the enhanced preset only: `camera_follow` `off` or
+    /// `smooth`.
+    CameraFollow,
     /// Alt+L: the warm switch (SPEC-020 §2.5), under both presets.
     Switch,
 }
 
 /// The `enhanced` preset's shell hotkey `key` is with Alt held or not:
-/// Alt+F cycles the game speed (`qol`: an enhanced-preset session). F is
-/// no game key with Alt, and under Vanilla it stays the game's.
+/// Alt+F cycles the game speed and Alt+C toggles the camera follow (`qol`:
+/// an enhanced-preset session). Under Vanilla both stay the game's, as
+/// they always were: Alt+C reaches it as C.
 fn qol_hotkey(key: KeyCode, alt: bool, qol: bool) -> Option<ShellHotkey> {
-    (key == KeyCode::KeyF && alt && qol).then_some(ShellHotkey::GameSpeed)
+    if !(alt && qol) {
+        return None;
+    }
+    match key {
+        KeyCode::KeyF => Some(ShellHotkey::GameSpeed),
+        KeyCode::KeyC => Some(ShellHotkey::CameraFollow),
+        _ => None,
+    }
+}
+
+/// Alt+C's next mode: `off` becomes `smooth`, and `smooth` or `step` (which
+/// only the settings reach) becomes `off`.
+fn toggled_camera_follow(mode: enhanced::CameraFollow) -> enhanced::CameraFollow {
+    match mode {
+        enhanced::CameraFollow::Off => enhanced::CameraFollow::Smooth,
+        enhanced::CameraFollow::Step | enhanced::CameraFollow::Smooth => {
+            enhanced::CameraFollow::Off
+        }
+    }
+}
+
+/// SPEC-020 §2.6: the `Home: Center view` hint shows while the session's
+/// `camera_follow` is `off`, which only the Enhanced preset has (Vanilla,
+/// its touch camera included, keeps its own follow).
+fn center_view_hint(settings: Option<enhanced::EnhancedSettings>) -> bool {
+    settings.is_some_and(|settings| {
+        !settings.navigation_only && settings.camera_follow == enhanced::CameraFollow::Off
+    })
 }
 
 /// The shell hotkey `key` is with Alt held or not, in an `enhanced`
@@ -217,7 +248,8 @@ pub(crate) struct Shell {
     /// Shift is held, for the launcher's text entry.
     pub(crate) shift: bool,
     /// The `enhanced` session's presentation settings (`None` under
-    /// Vanilla): logged when the game starts and changed by Alt+V.
+    /// Vanilla): logged when the game starts and changed by Alt+V and
+    /// Alt+C.
     pub(crate) enhanced: Option<enhanced::EnhancedSettings>,
     /// The enhanced frame last presented, with the layout it was built
     /// for and its side-panel tiles; a pointer-only move redraws it with

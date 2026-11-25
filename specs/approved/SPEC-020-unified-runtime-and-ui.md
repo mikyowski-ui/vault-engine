@@ -1,6 +1,6 @@
 # SPEC-020: Unified Session Runtime and Core UI Authority
 
-**Status:** approved by the owner, 2026-10-27. Revision 1, 2026-10-27, by the coordinator at the owner's request: module paths replace file paths, two module references in the draft are corrected, and tags and a Decisions section are added. Revision 2 (Team A, 2026-11-01), on the owner's brief of the same day, adds rule 5 of section 2.1 and the gallery note in section 3. Revision 3 (Team A, 2026-11-01), on the owner's brief of the same day, adds Phase L1: sections 2.4 to 2.6. Revision 4 (Team A, 2026-11-01) adds the preset toggle, Setup and the `Hotkey hints` launcher row. Revision 5 (2026-11-01), by the implementing side as an owner instruction, on the owner's brief for Phase B, adds sections 2.7 and 2.8 and records Wave 1 to Wave 3's profiles, launcher and storage rules. See "Provenance of Revision 5".
+**Status:** approved by the owner, 2026-10-27. Revision 1, 2026-10-27, by the coordinator at the owner's request: module paths replace file paths, two module references in the draft are corrected, and tags and a Decisions section are added. Revision 2 (Team A, 2026-11-01), on the owner's brief of the same day, adds rule 5 of section 2.1 and the gallery note in section 3. Revision 3 (Team A, 2026-11-01), on the owner's brief of the same day, adds Phase L1: sections 2.4 to 2.6. Revision 4 (Team A, 2026-11-01) adds the preset toggle, Setup and the `Hotkey hints` launcher row. Revision 5 (2026-11-01), by the implementing side as an owner instruction, on the owner's brief for Phase B, adds sections 2.7 and 2.8 and records Wave 1 to Wave 3's profiles, launcher and storage rules. See "Provenance of Revision 5". Revision 6 (2026-11-24), by the implementing side as an owner decision, on the owner's brief `docs/camera-follow-toggle.md`, adds the `Home: Center view` hint to section 2.6 and section 2.9, the camera follow controls. See "Provenance of Revision 6".
 
 **Provenance:** drafted by the project owner on 2026-10-27 as the contract for Wave 1. Revised the same day by the coordinator. Source categories:
 
@@ -11,6 +11,8 @@
 No decompilation, disassembly or re-implementation source was consulted, and no game asset was read (`PROVENANCE.md`). This is an architecture specification: it fixes where state and logic live, and it changes no game rule that SPEC-001 to SPEC-019 define.
 
 **Provenance of Revision 5.** The owner ended the Team A/B split on 2026-11-01, and this revision is an owner instruction, on the owner's brief for Phase B of that date. The implementing side wrote it, after reading the engine's code, so where an earlier revision says Team A read no engine code, that does not hold for this one. It states what the code does and invents no behavior. Its sources are the owner's brief, `docs/wave-2-brief.md`, `docs/wave-3-brief.md`, this spec, SPEC-014, SPEC-023 and SPEC-024b, and the engine's own code. No decompilation, disassembly or re-implementation source was used, and no game asset was read. Its changes are decisions D-37 to D-43.
+
+**Provenance of Revision 6.** An owner decision of 2026-11-24, on the owner's brief `docs/camera-follow-toggle.md` (a camera follow setting), with the owner's answers to that brief's open questions 1, 2, 6 and 7 and the owner's scope for this revision. There is no Team A/B split. The implementing side wrote it, after reading the engine's code. Its sources are that brief, this spec, SPEC-014 and the engine's own code. No decompilation, disassembly or re-implementation source was used, and no game asset was read. The brief's `camera` replay record, its F9 place-camera action and its `--replay-frames` and `--replay-frame-every` options are deferred by the owner and are not part of this revision. Its changes are decisions D-44 to D-49.
 
 ## 1. Goal & Scope
 
@@ -24,7 +26,7 @@ Consolidate the split execution paths in `vault_platform::game`, `vault_platform
 - `[May-improve]`: a place where the paths disagree today. The refactor may settle it on the `vault-core` side, but only as section 3.4 allows.
 - `[Safe rule]`: how the unified code handles a state or input that one path does not expect. It refuses or clamps; it never panics or reads out of bounds.
 
-**Phase L1 (Revision 3).** Sections 2.4 to 2.6 add three pre-multiplayer conveniences: a boot selector, a warm switch between editions, and hotkey toasts. They add new behavior, so in those three sections the tags compare an implementation with **this text**, not with the engine before the refactor. A `[Must-match]` there must be reproduced exactly. SPEC-014's main menu does not change: each of the three happens outside it. `[Must-match]` Sections 2.7 and 2.8 (Revision 5) are tagged in the same way.
+**Phase L1 (Revision 3).** Sections 2.4 to 2.6 add three pre-multiplayer conveniences: a boot selector, a warm switch between editions, and hotkey toasts. They add new behavior, so in those three sections the tags compare an implementation with **this text**, not with the engine before the refactor. A `[Must-match]` there must be reproduced exactly. SPEC-014's main menu does not change: each of the three happens outside it. `[Must-match]` Sections 2.7 and 2.8 (Revision 5) and section 2.9 (Revision 6) are tagged in the same way.
 
 ## 2. Architectural Invariants
 
@@ -127,9 +129,12 @@ Consolidate the split execution paths in `vault_platform::game`, `vault_platform
 | 4 | `P: Pip-Boy` | Always |
 | 5 | `Z: Wait (Pip-Boy clock)` | Always |
 | 6 | `F9: Debugger` | Always |
-| 7 | `Alt+L: Switch game` | Both editions found |
+| 7 | `Home: Center view` | The session's `camera_follow` is `off` (Revision 6) |
+| 8 | `Alt+L: Switch game` | Both editions found |
 
 The texts are exact, and are engine strings, not `.msg` entries. No key's action changes (SPEC-014 section 3.19). `[Must-match]`
+
+**The conditional rows (Revision 6).** Rows 7 and 8 are each shown only under their own condition, independently, and a session's list is the rows whose conditions hold, in the table's order. `Alt+L: Switch game` is therefore always the last row a session shows. `camera_follow` is `off` only under the Enhanced preset (section 2.9), so row 7 never shows under Vanilla. Row 7's condition is read when the row comes up. If the mode leaves `off` (by Alt+C) while row 7 waits for its turn or shows, the row is passed over as if it had shown, and the list goes on. Home ends row 7 as any shown hint's key ends it. `[Must-match]`
 
 **Timing.** `[Safe rule]` for each number.
 
@@ -197,6 +202,29 @@ Where earlier text names the Game data, Mods or Display & audio tab, it means th
 Under the `enhanced` preset with its presentation on, the options menu page gains one button below its plate, and `H` presses it. Both open the Enhanced window. `E` stays Exit Game: SPEC-014 section 3.17's keys keep their meaning, so this window takes the next letter of the word. Under Vanilla the button is not drawn and neither it nor `H` takes input, so SPEC-014's windows are as they were. `[Must-match]`
 
 A click in the window applies at once to the session, and its clicks are logged input, as a preferences change is. The Vanilla or Enhanced rules cannot change there: that row only names what the next launch runs. Save writes the active profile's table of `vault-engine.toml` and nothing else. A headless or replay session writes nothing, and a file whose active profile is another game's is refused. `[Safe rule]`
+
+**Camera rows (Revision 6).** The window's rows are, top to bottom: `Viewport`, `Default zoom`, `Smooth camera`, `Camera follow`, `Recentre margin`, `Roof peek`, `Interface scale`, `Game speed`, `Tactical overlay` and `Game rules`. The two camera rows are section 2.9's, and they act in the fixed view as in the unlocked one. `[Must-match]`
+
+### 2.9 Camera follow controls (Revision 6)
+
+**The setting.** `camera_follow` says how the view follows the player under the Enhanced preset: `off`, `step` or `smooth`. `camera_recenter_margin` is the `off` mode's margin, in view pixels at zoom 1, where 0 turns it off. A configuration that names neither gets `off` and 96. The Vanilla preset always uses `step`, and it cannot be set there. What the three modes and the margin do to the view is the brief's, `docs/camera-follow-toggle.md`, sections 3.1 and 3.2, and is not restated here. `[Must-match]`
+
+**Launcher rows.** The `Enhanced & Visuals` pill's Enhanced rows gain two, after `Smooth camera`, and they show with those rows only, under the Enhanced preset. `[Must-match]`
+
+| Row | Steps through | Writes |
+| --- | --- | --- |
+| `Camera follow` | `Off`, `Step`, `Smooth`, then `Off` again; backwards the other way | `camera_follow` |
+| `Recentre margin` | 0 (shown `Off`), 48, 96, 144 and 192, wrapping; a click on its track takes the stop under it | `camera_recenter_margin` |
+
+A value from the file between two stops moves from the nearest one. Both rows write the active profile's table, as the other Enhanced rows do. `[Safe rule]`
+
+**`Alt+C`.** Under the Enhanced preset only, Alt+C is a shell key, as Alt+V and Alt+F are. It sets `camera_follow` to `smooth` from `off`, and to `off` from `smooth` or `step` (`step` is reached only from the settings). The change applies to the running session at once, is logged as an `enhanced` record as Alt+V's change is (never as a key), and the HUD names the new mode, as Alt+F does for the game speed. While the selector is open over a session, Alt+C does nothing (Decision D-21). Under Vanilla, its touch camera included, Alt+C is not the shell's and reaches the game exactly as it did before this revision. `[Must-match]`
+
+**Home.** Home stays the recentre key under both presets (SPEC-014 section 3.29). The launcher's `KEYS IN PLAY` table names it, with Alt+C. `[Must-match]`
+
+**`--camera-follow off|step|smooth`.** It wins over the settings, the manifests and the launcher for that start, under the Enhanced preset. Any other value is a usage error, as for the other value flags. Under Vanilla a value other than `step` is refused with a diagnostic and ignored, and `step` applies. The Vanilla touch camera keeps its own follow. Like `--viewport` and `--zoom`, the launcher shows the flag as its choice, Play drops it, and a warm switch keeps it. `[Safe rule]`
+
+**Determinism.** None of these changes `state_hash`, `combat_hash`, the checkpoint stream or the RNG. A log whose `enhanced` records name no `camera_follow` replays as before. The gallery films with the legacy `smooth`, so its images keep their bytes. `[Must-match]`
 
 ## 3. Verification Criteria
 
@@ -283,6 +311,19 @@ The implementing side wrote these, on the owner's brief for Phase B of 2026-11-0
 | D-42 | `H` opens the in-game Enhanced window, and `E` stays Exit Game | Owner instruction | SPEC-014 section 3.17's `E` is `[Must-match]`, so the window takes another letter |
 | D-43 | A warm switch's first step also validates the chosen profile | Owner instruction | The code does this, so that a bad mod stack cannot cost the running session |
 
+### Camera follow decisions (Revision 6)
+
+The implementing side wrote these, as an owner decision of 2026-11-24, on the owner's brief `docs/camera-follow-toggle.md`.
+
+| ID | Decision | Class | Why |
+| --- | --- | --- | --- |
+| D-44 | The Enhanced preset defaults to `camera_follow = "off"`, with a margin of 96 | Owner instruction (brief's question 1) | A view that recentres at every step makes long walks hard to watch, and the margin keeps the player in view |
+| D-45 | The Vanilla preset keeps `step`, and it cannot be set. `--camera-follow` other than `step` is refused there and ignored | Owner instruction (brief's question 2) | SPEC-005, SPEC-013, SPEC-014 and the SPEC-021 scenarios rely on per-step recentring |
+| D-46 | A hint `Home: Center view`, row 7 of section 2.6, shown under `off` only. `Alt+L` becomes row 8, still last. This revises a `[Must-match]` table, and D-14's seven keys become eight | Owner instruction (brief's question 7) | Under `off` the view stays put, so the recentre key is the one a player needs first |
+| D-47 | Alt+C toggles `off` and `smooth` under the Enhanced preset, and is logged as an `enhanced` record | Owner instruction (brief's question 6) | One key away from the old behavior. Alt+C was free under Enhanced, and Vanilla keeps C for the game |
+| D-48 | The margin rows step through 0, 48, 96, 144 and 192 | Implementing-side default | Half and whole steps of the default, up to twice it. Other values stay reachable in the file |
+| D-49 | The brief's `camera` record, F9 place-camera action, `--replay-frames` and `--replay-frame-every` are deferred | Owner instruction | The owner's scope for this revision |
+
 ## 5. Verification Checklist
 
 - [x] Module paths only; no file path under a source directory, and no 40-character hash.
@@ -290,3 +331,4 @@ The implementing side wrote these, on the owner's brief for Phase B of 2026-11-0
 - [x] Every module named here exists in the workspace as of 2026-10-27, except `SessionRuntime`, which this refactor introduces.
 - [x] Decisions record each correction to the draft and whether it is an owner instruction or a coordinator default.
 - [x] Revision 5: `cargo xtask clean-room-check` finds no source path and no 40-character hash. Every rule it adds was read from the code as it stood on 2026-11-01. Team A did not review it, because that split has ended.
+- [x] Revision 6: no source path and no 40-character hash. Every rule it adds is the owner's brief `docs/camera-follow-toggle.md` as the owner decided it, written as the code implements it on 2026-11-24.

@@ -45,7 +45,7 @@
 //!
 //! This is engine infrastructure, not part of any specification: it only
 //! decides which game data and display options the shell starts with.
-use crate::enhanced::{EnhancedSettings, GameSpeed, RoofPeek, ViewportMode};
+use crate::enhanced::{CameraFollow, EnhancedSettings, GameSpeed, RoofPeek, ViewportMode};
 use std::{
     fmt,
     path::{Path, PathBuf},
@@ -175,6 +175,20 @@ pub fn roof_peek_name(mode: RoofPeek) -> &'static str {
         RoofPeek::Vanilla => "vanilla",
         RoofPeek::CursorXray => "cursor_xray",
         RoofPeek::Hidden => "hidden",
+    }
+}
+
+/// The diagnostic for a `camera_follow` the Vanilla preset refuses: it
+/// recentres at every step, so any other mode is refused and `step` applies
+/// (`docs/camera-follow-toggle.md` §4.3). `None` when nothing is refused.
+pub fn refused_camera_follow(preset: Preset, follow: Option<CameraFollow>) -> Option<String> {
+    match (preset, follow) {
+        (Preset::Vanilla, Some(mode)) if mode != CameraFollow::Step => Some(format!(
+            "`camera_follow = \"{}\"` is refused under the Vanilla preset, which recentres \
+             at every step: \"step\" applies",
+            mode.as_str()
+        )),
+        _ => None,
     }
 }
 
@@ -319,11 +333,15 @@ pub struct EnhancedProfile {
     /// The tactical overlay (HP bars, AP badges and the rest), on from the
     /// start of a session.
     pub tactical_overlay: Option<bool>,
+    /// `camera_follow` (`docs/camera-follow-toggle.md`).
+    pub camera_follow: Option<CameraFollow>,
+    /// `camera_recenter_margin`: view pixels at zoom 1, 0 to 1024.
+    pub camera_recenter_margin: Option<u16>,
 }
 
 impl EnhancedProfile {
     /// The keys it reads, as the top level spells them.
-    const KEYS: [&str; 8] = [
+    const KEYS: [&str; 10] = [
         "preset",
         "viewport_mode",
         "default_zoom",
@@ -332,6 +350,8 @@ impl EnhancedProfile {
         "ui_scale",
         "game_speed",
         "tactical_overlay",
+        "camera_follow",
+        "camera_recenter_margin",
     ];
 
     /// Read `key = value`; `false` when the key is none of these.
@@ -355,6 +375,10 @@ impl EnhancedProfile {
         self.roof_peek = parsed.roof_peek.or(self.roof_peek);
         self.ui_scale = parsed.ui_scale.or(self.ui_scale);
         self.game_speed = parsed.game_speed.or(self.game_speed);
+        self.camera_follow = parsed.camera_follow.or(self.camera_follow);
+        self.camera_recenter_margin = parsed
+            .camera_recenter_margin
+            .or(self.camera_recenter_margin);
         Ok(true)
     }
 
@@ -386,6 +410,12 @@ impl EnhancedProfile {
         }
         if let Some(on) = self.tactical_overlay {
             line("tactical_overlay", on.to_string());
+        }
+        if let Some(mode) = self.camera_follow {
+            line("camera_follow", quote(mode.as_str()));
+        }
+        if let Some(margin) = self.camera_recenter_margin {
+            line("camera_recenter_margin", margin.to_string());
         }
     }
 }
@@ -535,6 +565,11 @@ pub struct Config {
     /// The `enhanced` preset's game speed (1.0, 1.5 or 2.0; unused under
     /// Vanilla).
     pub game_speed: Option<GameSpeed>,
+    /// How the view follows the player under the `enhanced` preset
+    /// (`docs/camera-follow-toggle.md`); the Vanilla preset always steps.
+    pub camera_follow: Option<CameraFollow>,
+    /// `camera_follow = "off"`'s safety margin, view pixels at zoom 1.
+    pub camera_recenter_margin: Option<u16>,
     /// SPEC-022 §3.1 the world canvas's render path, `reference` or
     /// `instanced`, under every preset and game. The engine only reads it:
     /// a rewrite keeps the file's own line, and nothing the engine chose
@@ -1069,6 +1104,27 @@ impl Config {
                     format!("`hotkey_hints` is \"once\", \"always\" or \"off\", not \"{text}\"")
                 })?);
             }
+            "camera_follow" => {
+                let text = string(value)?;
+                self.camera_follow = Some(CameraFollow::parse(&text).ok_or_else(|| {
+                    format!("`camera_follow` is \"off\", \"step\" or \"smooth\", not \"{text}\"")
+                })?);
+            }
+            "camera_recenter_margin" => {
+                let expects = format!(
+                    "`camera_recenter_margin` is a whole number from 0 to {}",
+                    CameraFollow::MARGIN_MAX
+                );
+                let Value::Integer(margin) = value else {
+                    return Err(expects);
+                };
+                self.camera_recenter_margin = Some(
+                    u16::try_from(margin)
+                        .ok()
+                        .filter(|margin| *margin <= CameraFollow::MARGIN_MAX)
+                        .ok_or_else(|| format!("{expects}, not {margin}"))?,
+                );
+            }
             "game_speed" => {
                 let expects = "`game_speed` is 1.0, 1.5 or 2.0";
                 let factor = value.number().ok_or_else(|| expects.to_owned())?;
@@ -1181,6 +1237,12 @@ impl Config {
         }
         if let Some(speed) = self.game_speed {
             line("game_speed", float(f64::from(speed.factor())));
+        }
+        if let Some(mode) = self.camera_follow {
+            line("camera_follow", quote(mode.as_str()));
+        }
+        if let Some(margin) = self.camera_recenter_margin {
+            line("camera_recenter_margin", margin.to_string());
         }
         if let Some(path) = self.render_path {
             line("render_path", quote(path.name()));
@@ -1449,12 +1511,17 @@ impl Config {
             let table = table.lines().next().unwrap_or_default();
             tracing::warn!(file = %path.display(), table, "unknown table ignored");
         }
+        for (table, message) in config.camera_follow_refusals() {
+            tracing::warn!(file = %path.display(), table, "{message}");
+        }
         let base = path.parent().unwrap_or(Path::new(""));
         Ok(config.relative_to(base))
     }
 
     /// The `enhanced` preset's presentation settings; missing keys take
-    /// [`EnhancedSettings::default`].
+    /// [`EnhancedSettings::default`], except `camera_follow`, which takes
+    /// [`CameraFollow::CONFIGURED`] (the default keeps the legacy mode for
+    /// code and logs that name none).
     pub fn enhanced_settings(&self) -> EnhancedSettings {
         let default = EnhancedSettings::default();
         EnhancedSettings {
@@ -1465,7 +1532,62 @@ impl Config {
             ui_scale: self.ui_scale.map_or(default.ui_scale, UiScale::factor),
             navigation_only: false,
             tactical_overlay: self.enhanced.tactical_overlay,
+            camera_follow: self.camera_follow.unwrap_or(CameraFollow::CONFIGURED),
+            camera_recenter_margin: self.camera_recenter_margin.unwrap_or(CameraFollow::MARGIN),
         }
+    }
+
+    /// Each table whose `camera_follow` the Vanilla preset refuses
+    /// ([`refused_camera_follow`]), by name (empty for the top level and
+    /// the running profile), with the diagnostic. A launch of such a table
+    /// steps.
+    pub fn camera_follow_refusals(&self) -> Vec<(String, String)> {
+        let mut found = Vec::new();
+        let mut check = |table: String, preset: Option<Preset>, follow| {
+            if let Some(message) = refused_camera_follow(preset.unwrap_or_default(), follow) {
+                found.push((table, message));
+            }
+        };
+        // The running scope over the top level, as a launch reads it.
+        let own = &self.enhanced;
+        check(
+            String::new(),
+            own.preset.or(self.preset),
+            own.camera_follow.or(self.camera_follow),
+        );
+        // Every other table that names either key, over the top level.
+        let mut others: Vec<(String, &EnhancedProfile)> = Vec::new();
+        for game in GAMES {
+            others.push((
+                format!("profiles.{}", game_name(game)),
+                &self.scopes.get(game).enhanced,
+            ));
+        }
+        for custom in &self.custom_profiles {
+            others.push((format!("profiles.{}", custom.name), &custom.scope.enhanced));
+        }
+        for (table, own) in others {
+            if own.preset.is_some() || own.camera_follow.is_some() {
+                check(
+                    table,
+                    own.preset.or(self.preset),
+                    own.camera_follow.or(self.camera_follow),
+                );
+            }
+        }
+        // A saved preset applies over whatever is in force: only one that
+        // names the Vanilla preset itself refuses its own mode.
+        for preset in &self.custom_presets {
+            let own = &preset.settings;
+            if own.preset.is_some() {
+                check(
+                    format!("presets.{}", preset.name),
+                    own.preset,
+                    own.camera_follow,
+                );
+            }
+        }
+        found
     }
 
     /// The `enhanced` preset's game speed; missing, 1.0x.
@@ -1669,6 +1791,8 @@ impl Config {
         self.roof_peek = own.roof_peek.or(self.roof_peek);
         self.ui_scale = own.ui_scale.or(self.ui_scale);
         self.game_speed = own.game_speed.or(self.game_speed);
+        self.camera_follow = own.camera_follow.or(self.camera_follow);
+        self.camera_recenter_margin = own.camera_recenter_margin.or(self.camera_recenter_margin);
     }
 
     /// The `sfall` and `mod_list` a launch of `game` reads.
@@ -1861,7 +1985,7 @@ impl SettingsLines {
     }
 }
 
-const KNOWN: [&str; 22] = [
+const KNOWN: [&str; 24] = [
     "master_dat",
     "critter_dat",
     "data_root",
@@ -1880,6 +2004,8 @@ const KNOWN: [&str; 22] = [
     "roof_peek",
     "ui_scale",
     "game_speed",
+    "camera_follow",
+    "camera_recenter_margin",
     "render_path",
     "load_order",
     "last_played",
@@ -2542,6 +2668,8 @@ future_float = 5e-1
                 ui_scale: Some(2.0),
                 navigation_only: false,
                 tactical_overlay: None,
+                camera_follow: CameraFollow::CONFIGURED,
+                camera_recenter_margin: CameraFollow::MARGIN,
             }
         );
         // The writer keeps every key, numbers as numbers (floats with a
@@ -2573,17 +2701,22 @@ future_float = 5e-1
         assert!(written.contains("ui_scale = \"auto\"\n"), "{written}");
         assert!(written.contains("default_zoom = 1.1\n"), "{written}");
         assert_eq!(Config::parse(&written).unwrap(), other);
-        // Missing keys take the defaults; whole numbers are numbers too.
-        assert_eq!(
-            Config::default().enhanced_settings(),
-            EnhancedSettings::default()
-        );
+        // Missing keys take the defaults, but for `camera_follow`, which a
+        // configuration takes as `off` (the default keeps the legacy
+        // `smooth` for code and logs); whole numbers are numbers too.
+        let configured = EnhancedSettings {
+            camera_follow: CameraFollow::CONFIGURED,
+            ..EnhancedSettings::default()
+        };
+        assert_eq!(Config::default().enhanced_settings(), configured);
+        assert_eq!(configured.camera_follow, CameraFollow::Off);
+        assert_eq!(configured.camera_recenter_margin, 96);
         let zoom = Config::parse("default_zoom = 3\nsmooth_camera = true").unwrap();
         assert_eq!(
             zoom.enhanced_settings(),
             EnhancedSettings {
                 default_zoom: 3.0,
-                ..EnhancedSettings::default()
+                ..configured
             }
         );
         // A Vanilla file writes none of them.
@@ -2592,6 +2725,140 @@ future_float = 5e-1
             vanilla.to_toml().unwrap(),
             "# Vault Engine launcher settings.\npreset = \"vanilla\"\n"
         );
+    }
+
+    /// `camera_follow` and `camera_recenter_margin` at the top level and in
+    /// a profile table: parsed, written back, read by a launch (the
+    /// profile's over the top level), and bad values named by line
+    /// (vector D: `camera_follow = "follow"`).
+    #[test]
+    fn the_camera_follow_keys_round_trip_and_name_bad_values() {
+        let config = Config::parse(concat!(
+            "preset = \"enhanced\"\n",
+            "camera_follow = \"smooth\"\n",
+            "camera_recenter_margin = 0\n",
+            "[profiles.fallout1]\n",
+            "camera_follow = \"step\"\n",
+            "camera_recenter_margin = 1024\n",
+            "[presets.mine]\n",
+            "camera_follow = \"off\"\n",
+        ))
+        .unwrap();
+        assert!(config.unknown.is_empty());
+        assert_eq!(config.camera_follow, Some(CameraFollow::Smooth));
+        assert_eq!(config.camera_recenter_margin, Some(0));
+        assert_eq!(config.enhanced.camera_follow, Some(CameraFollow::Step));
+        assert_eq!(config.enhanced.camera_recenter_margin, Some(1024));
+        assert_eq!(
+            config.custom_presets[0].settings.camera_follow,
+            Some(CameraFollow::Off)
+        );
+        let written = config.to_toml().unwrap();
+        for line in [
+            "camera_follow = \"smooth\"\n",
+            "camera_recenter_margin = 0\n",
+            "camera_follow = \"step\"\n",
+            "camera_recenter_margin = 1024\n",
+            "camera_follow = \"off\"\n",
+        ] {
+            assert!(written.contains(line), "{line}: {written}");
+        }
+        assert_eq!(Config::parse(&written).unwrap(), config);
+        // The running profile's keys win, as a launch reads them.
+        let launch = config.scoped_to(GameProfile::Fallout1).enhanced_settings();
+        assert_eq!(launch.camera_follow, CameraFollow::Step);
+        assert_eq!(launch.camera_recenter_margin, 1024);
+        let top = Config::parse("camera_follow = \"smooth\"\ncamera_recenter_margin = 12")
+            .unwrap()
+            .enhanced_settings();
+        assert_eq!(
+            (top.camera_follow, top.camera_recenter_margin),
+            (CameraFollow::Smooth, 12)
+        );
+        // Known keys: only once, and each bad value names its line.
+        assert_eq!(
+            Config::parse("camera_follow = \"off\"\ncamera_follow = \"off\"")
+                .unwrap_err()
+                .to_string(),
+            "line 2: duplicate key `camera_follow`"
+        );
+        for (text, message) in [
+            (
+                "camera_follow = \"follow\"",
+                "`camera_follow` is \"off\", \"step\" or \"smooth\", not \"follow\"",
+            ),
+            ("camera_follow = true", "`camera_follow` expects a string"),
+            (
+                "camera_recenter_margin = 1025",
+                "`camera_recenter_margin` is a whole number from 0 to 1024, not 1025",
+            ),
+            ("camera_recenter_margin = -1", "not -1"),
+            ("camera_recenter_margin = 9.5", "from 0 to 1024"),
+            ("camera_recenter_margin = \"96\"", "from 0 to 1024"),
+            (
+                "[profiles.fallout2]\ncamera_follow = \"Off\"",
+                "not \"Off\"",
+            ),
+        ] {
+            let error = Config::parse(&format!("audio = true\n{text}")).unwrap_err();
+            let line = 2 + text.matches('\n').count();
+            assert_eq!(error.line, line, "{text}");
+            assert!(error.to_string().contains(message), "{text}: {error}");
+        }
+    }
+
+    /// The Vanilla preset always steps: any other `camera_follow` it names
+    /// is refused with a diagnostic (vector D), and a launch of it steps.
+    #[test]
+    fn the_vanilla_preset_refuses_any_camera_follow_but_step() {
+        assert_eq!(
+            refused_camera_follow(Preset::Vanilla, Some(CameraFollow::Off)).unwrap(),
+            "`camera_follow = \"off\"` is refused under the Vanilla preset, which recentres \
+             at every step: \"step\" applies"
+        );
+        for (preset, follow) in [
+            (Preset::Vanilla, None),
+            (Preset::Vanilla, Some(CameraFollow::Step)),
+            (Preset::Enhanced, Some(CameraFollow::Off)),
+            (Preset::Enhanced, Some(CameraFollow::Smooth)),
+        ] {
+            assert_eq!(refused_camera_follow(preset, follow), None, "{follow:?}");
+        }
+        let config = Config::parse(concat!(
+            "preset = \"vanilla\"\n",
+            "camera_follow = \"smooth\"\n",
+            "[profiles.fallout2]\n",
+            "preset = \"enhanced\"\n",
+            "[profiles.ettu]\n",
+            "edition = \"fallout2\"\n",
+            "camera_follow = \"off\"\n",
+            "[presets.calm]\n",
+            "preset = \"vanilla\"\n",
+            "camera_follow = \"off\"\n",
+            "[presets.wide]\n",
+            "preset = \"enhanced\"\n",
+            "camera_follow = \"off\"\n",
+        ))
+        .unwrap();
+        let refused: Vec<String> = config
+            .camera_follow_refusals()
+            .into_iter()
+            .map(|(table, _)| table)
+            .collect();
+        // The top level (Vanilla, smooth) and Et Tu (Vanilla from the top,
+        // off) are refused; Fallout 2's own table is Enhanced.
+        assert_eq!(refused, ["", "profiles.ettu", "presets.calm"]);
+        let active = crate::enhanced::ActiveEnhanced::new(&config, config.enhanced);
+        assert_eq!(active.preset, Preset::Vanilla);
+        assert_eq!(active.settings.camera_follow, CameraFollow::Step);
+        let (_, ettu) = config.profile_enhanced("ettu").unwrap();
+        let ettu = crate::enhanced::ActiveEnhanced::new(&config, ettu);
+        assert_eq!(ettu.settings.camera_follow, CameraFollow::Step);
+        let (_, fallout2) = config.profile_enhanced("fallout2").unwrap();
+        let fallout2 = crate::enhanced::ActiveEnhanced::new(&config, fallout2);
+        assert_eq!(fallout2.preset, Preset::Enhanced);
+        assert_eq!(fallout2.settings.camera_follow, CameraFollow::Smooth);
+        assert!(Config::default().camera_follow_refusals().is_empty());
     }
 
     #[test]

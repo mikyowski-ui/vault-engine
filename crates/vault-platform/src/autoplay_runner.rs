@@ -864,11 +864,6 @@ mod allow {
     /// town or world map moves its low art index up by 16, on every read,
     /// saved maps too. Shipped maps never qualify; the fixture's does.
     pub const EXIT_ART: &str = "exit-grid art a load moved";
-    /// SPEC-003 §2.10 `[Must-match]`: a load replaces a held object's stored
-    /// elevation with the elevation of the tree it is in, so an item a critter
-    /// came by on an upper elevation reads that elevation, not the 0 it was
-    /// taken with. Shown by maps with objects above elevation 0.
-    pub const HELD_ELEVATION: &str = "held object's elevation replaced by a load";
     /// SPEC-005 §3.8 steps 1-2: a load ends in the gender update, which
     /// rebuilds the art of a player with no armor on, without its pose.
     pub const PLAYER_ART: &str = "player art rebuilt at the end of a load";
@@ -897,18 +892,6 @@ fn diff_ledgers(
         let Some(other) = loaded.objects.get(id) else {
             findings.push(format!("object {id} ({:#010x}) is gone", row.pid));
             continue;
-        };
-        if row == other {
-            continue;
-        }
-        let other = &if holder_elevation(row, other, loaded) {
-            taken.take(allow::HELD_ELEVATION, allow::HELD_ELEVATION.to_owned());
-            ObjectRow {
-                elevation: row.elevation,
-                ..other.clone()
-            }
-        } else {
-            other.clone()
         };
         if row == other {
             continue;
@@ -1020,19 +1003,6 @@ fn diff_ledgers(
         findings.extend(queue_findings(&live.queue, &loaded.queue));
     }
     findings
-}
-
-/// Whether the one change is SPEC-003 §2.10's: a held object has no place, and
-/// loading replaces its stored elevation with that of the tree it is in.
-fn holder_elevation(row: &ObjectRow, other: &ObjectRow, loaded: &Ledger) -> bool {
-    let mut top = other;
-    for _ in 0..=vault_formats::map::MAX_INVENTORY_DEPTH {
-        match top.holder.and_then(|holder| loaded.objects.get(&holder)) {
-            Some(holder) => top = holder,
-            None => break,
-        }
-    }
-    row.hex.is_none() && row.elevation != other.elevation && other.elevation == top.elevation
 }
 
 /// The art change SPEC-003 makes when an exit grid to the town or world map is
@@ -1349,6 +1319,26 @@ fn hashed_parts(first: &StateSnapshot, second: &StateSnapshot) -> Vec<String> {
     for (part, differs) in parts {
         if differs {
             findings.push(format!("{part} differ"));
+        }
+    }
+    if first.lvars != second.lvars {
+        // By script identifier, as the hash keys them: a slice under another
+        // identifier shows as one gone and one new.
+        let slices = |snapshot: &StateSnapshot| -> BTreeMap<u32, Vec<i32>> {
+            let all = snapshot.lvars.iter();
+            all.map(|slice| (slice.script, slice.values.clone()))
+                .collect()
+        };
+        let (one, other) = (slices(first), slices(second));
+        let scripts: BTreeSet<u32> = one.keys().chain(other.keys()).copied().collect();
+        for script in scripts
+            .into_iter()
+            .filter(|it| one.get(it) != other.get(it))
+        {
+            let (was, now) = (one.get(&script), other.get(&script));
+            findings.push(format!(
+                "  script {script:#x} locals: {was:?} became {now:?}"
+            ));
         }
     }
     if findings.is_empty() {
@@ -2740,10 +2730,11 @@ mod tests {
         );
     }
 
-    /// SPEC-003 §2.10: a held object reads the elevation of its tree, and a
-    /// placed one keeps its own.
+    /// SPEC-003 §2.10: a held object is on the elevation of its tree in the
+    /// live world as in a load of it, so a difference there is a finding and
+    /// no entry of the allowlist takes it.
     #[test]
-    fn autoplay_only_a_held_object_takes_the_elevation_of_its_tree() {
+    fn autoplay_a_held_object_off_the_elevation_of_its_tree_is_a_finding() {
         let holder = ObjectRow {
             elevation: 1,
             contents: BTreeMap::from([(9, 1)]),
@@ -2761,13 +2752,11 @@ mod tests {
         };
         let mut taken = AuditTally::default();
         let writes = LoadWrites::default();
-        assert!(diff_ledgers(&ledger(held(0)), &ledger(held(1)), &writes, &mut taken).is_empty());
-        assert_eq!(taken.allowlisted[allow::HELD_ELEVATION], 1);
-        let other = ledger(held(2));
-        assert_eq!(
-            diff_ledgers(&ledger(held(0)), &other, &writes, &mut taken).len(),
-            1
-        );
+        assert!(diff_ledgers(&ledger(held(1)), &ledger(held(1)), &writes, &mut taken).is_empty());
+        let findings = diff_ledgers(&ledger(held(0)), &ledger(held(1)), &writes, &mut taken);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].starts_with("object 9:"), "{findings:?}");
+        assert!(taken.allowlisted.is_empty(), "{:?}", taken.allowlisted);
     }
 
     /// Audit `world` once, as a change of map would.
@@ -3000,6 +2989,86 @@ mod tests {
             let replayed = replay_bundle(fixture.output.path()).unwrap();
             assert_eq!(replayed.state_hash, Some(report.state_hash), "{edition:?}");
         }
+    }
+
+    /// SPEC-003 §2.10 (`docs/elevation-change-audit.md`): what the player
+    /// carries changes elevation with it, there and back, so the audit after
+    /// each change is clean and takes nothing from the allowlist.
+    #[test]
+    fn autoplay_a_carried_item_changes_elevation_with_the_player() {
+        for edition in EDITIONS {
+            let fixture = Fixture::new(edition);
+            let args = fixture.args();
+            let mut session = start_world(&args).unwrap();
+            let mut auditor = ParityAuditor::new(&args).unwrap();
+            let world = interactive_world(&mut session).unwrap();
+            let state = &mut world.host.world;
+            let player = state.player;
+            let pistol = state
+                .iter()
+                .find(|(_, object)| object.raw.id == campaign::PISTOL)
+                .map(|(reference, _)| reference)
+                .unwrap();
+            state.add_item(player, pistol, 1, false).unwrap();
+            for (hex, elevation) in [(campaign::UPPER_LANDING, 1), (campaign::LOWER_LANDING, 0)] {
+                let state = &mut world.host.world;
+                state.move_object(player, hex, elevation, false).unwrap();
+                assert_eq!(state.get(pistol).unwrap().raw.elevation, elevation);
+                let verdict = audited(&mut auditor, world, &mut NoFaults);
+                assert_eq!(verdict, AuditVerdict::Clean, "{edition:?} to {elevation}");
+            }
+            let taken = &auditor.tally().allowlisted;
+            assert!(
+                !taken.keys().any(|entry| entry.contains("elevation")),
+                "{edition:?}: {taken:?}"
+            );
+        }
+    }
+
+    /// SPEC-006 §3.5: a load of a load gives the player's script record the
+    /// identifier the first load gave it. Under Fallout 2 that record has
+    /// locals, so with another identifier at each load the audit reported
+    /// "the locals differ" once the player's script had written one. A long
+    /// chaos run over both elevations, with entry 0 of `scripts.lst` writing
+    /// its locals at every map entry, stays clean.
+    #[test]
+    fn autoplay_player_locals_settle_over_elevation_changes() {
+        for edition in EDITIONS {
+            let fixture = Fixture::new(edition);
+            let body = [state::push(1), state::push(7), state::instruction(0x80c2)];
+            fixture.script("synthetic.int", body.concat());
+            let mut options = fixture.options(20_000);
+            options.seed = 7;
+            options.session.seed = Some(7);
+            options.chaos = true;
+            let report = run_headless_autoplay(options).unwrap();
+            assert_eq!(report.failure, None, "{edition:?}");
+            assert_eq!(report.tally.audits["elevation change"], 2, "{edition:?}");
+            assert!(report.ticks > 500, "{edition:?}: {} ticks", report.ticks);
+        }
+    }
+
+    /// The report names the script whose locals differ.
+    #[test]
+    fn autoplay_differing_locals_are_named_by_script() {
+        let fixture = Fixture::new(EDITIONS[0]);
+        let mut session = start_world(&fixture.args()).unwrap();
+        let world = interactive_world(&mut session).unwrap();
+        let mut first = world.host.world.state_snapshot();
+        first.lvars = vec![vault_core::state_hash::LvarSlice {
+            script: 0x0400_0001,
+            values: vec![0, 7],
+        }];
+        let mut second = first.clone();
+        second.lvars[0].script = 0x0400_0002;
+        assert_eq!(
+            hashed_parts(&first, &second),
+            [
+                "the locals differ",
+                "  script 0x4000001 locals: Some([0, 7]) became None",
+                "  script 0x4000002 locals: None became Some([0, 7])",
+            ]
+        );
     }
 
     /// Handles alone may differ only with everything else the hash covers

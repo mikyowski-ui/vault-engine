@@ -907,3 +907,254 @@ fn shift_highlights_the_ground_items_in_the_enhanced_world_only() {
     let (_, again) = frame(&mut preview, [1920, 1080]);
     assert_eq!(again.world.pixels(), plain.world.pixels());
 }
+
+/// The synthetic world in the unlocked view under `mode` with `margin`,
+/// without smoothing and without the soft clamp (the free camera), the
+/// player placed on hex 20100 (column 100, row 100) and the view on it:
+/// `docs/camera-follow-toggle.md` §7's set-up.
+fn follow_world(dir: &std::path::Path, mode: CameraFollow, margin: u16) -> (MapPreview, u64) {
+    let mut preview = interactive(dir);
+    preview.set_enhanced(Some(EnhancedSettings {
+        smooth_camera: false,
+        camera_follow: mode,
+        camera_recenter_margin: margin,
+        ..Default::default()
+    }));
+    preview.tick(16).unwrap();
+    assert!(preview.toggle_free_camera());
+    let world = &mut preview.host.world;
+    let (player, elevation) = (world.player, world.elevation);
+    world.move_object(player, 20100, elevation, false).unwrap();
+    preview.tick(32).unwrap();
+    assert_eq!(preview.host.world.camera_hex, 20100);
+    (preview, 32)
+}
+
+/// `steps` walk steps southeast (orientation 2) from where the player
+/// stands, a tick after each; the view-center hex after each.
+fn walk_southeast(preview: &mut MapPreview, now: &mut u64, steps: usize) -> Vec<i32> {
+    let mut centers = Vec::new();
+    for _ in 0..steps {
+        let world = &mut preview.host.world;
+        let player = world.player;
+        let hex = world.get(player).unwrap().raw.hex.unwrap();
+        let next = HexGrid::step(hex, 2, 1).unwrap();
+        let elevation = world.elevation;
+        world.move_object(player, next, elevation, true).unwrap();
+        *now += 16;
+        preview.tick(*now).unwrap();
+        centers.push(preview.host.world.camera_hex);
+    }
+    centers
+}
+
+/// Vectors A and B (`docs/camera-follow-toggle.md` §7) for the unlocked
+/// camera: `step` and `smooth` (snapping) recentre on every placement;
+/// `off` with margin 96 stays until step 8 brings the player's hex centre
+/// to y 286, past the box's 284, then recentres on 21700 and stays; `off`
+/// with margin 0 never moves.
+#[test]
+fn the_follow_modes_give_vectors_a_and_b_in_the_unlocked_view() {
+    let dir = synthetic_corpus();
+    let walk: Vec<i32> = (1..=10).map(|step| 20100 + 200 * step).collect();
+    assert_eq!(walk[..5], [20300, 20500, 20700, 20900, 21100]);
+    for mode in [CameraFollow::Step, CameraFollow::Smooth] {
+        let (mut preview, mut now) = follow_world(dir.path(), mode, CameraFollow::MARGIN);
+        assert_eq!(walk_southeast(&mut preview, &mut now, 10), walk, "{mode:?}");
+    }
+    let (mut preview, mut now) = follow_world(dir.path(), CameraFollow::Off, 96);
+    assert_eq!(
+        preview.host.world.view_follow,
+        ViewFollow::Off {
+            margin: 0,
+            view: [640, 380]
+        },
+        "this camera recentres, not the world"
+    );
+    let centers = walk_southeast(&mut preview, &mut now, 5);
+    assert_eq!(centers, [20100; 5]);
+    // After step 5 the player's hex centre is at view point (400, 250).
+    let enhanced = preview.unlocked().unwrap();
+    let player = camera::hex_point(21100).unwrap();
+    let view = [0, 1].map(|axis| player[axis] - enhanced.camera.center[axis]);
+    assert_eq!([view[0] + 320.0, view[1] + 190.0], [400.0, 250.0]);
+    assert!(!enhanced.camera.follow);
+    let rest = walk_southeast(&mut preview, &mut now, 5);
+    assert_eq!(rest, [20100, 20100, 21700, 21700, 21700]);
+    assert!(!camera(&preview).follow, "the margin rule does not follow");
+    // A stationary player never moves the view.
+    run(&mut preview, now, 500);
+    assert_eq!(preview.host.world.camera_hex, 21700);
+    let (mut preview, mut now) = follow_world(dir.path(), CameraFollow::Off, 0);
+    assert_eq!(walk_southeast(&mut preview, &mut now, 10), [20100; 10]);
+}
+
+/// The margin is in view pixels at zoom 1: at zoom 3.0 a margin of 96
+/// covers 32 world pixels, and a margin above half the view is clamped to
+/// that half minus one pixel.
+#[test]
+fn the_margin_scales_with_the_zoom_and_is_clamped_to_the_view() {
+    let dir = synthetic_corpus();
+    let (mut preview, _) = follow_world(dir.path(), CameraFollow::Off, 96);
+    let center = camera(&preview).center;
+    let enhanced = preview.enhanced.as_mut().unwrap();
+    // Zoom 1, a 640-by-380 view: the box is x 96-544, y 96-284.
+    for (dy, outside) in [(94.0, false), (95.0, true), (-94.0, false), (-95.0, true)] {
+        let point = [center[0], center[1] + dy];
+        assert_eq!(enhanced.outside_margin(point), outside, "{dy}");
+    }
+    // Zoom 3: the view is 640 by 380 view pixels over 214 by 127 world
+    // pixels (the canvas rounds up), and 96 view pixels are 32 world ones.
+    enhanced.camera.zoom = 3.0;
+    let half = 127.0 * 3.0 / 2.0;
+    let inside = (half - 96.0) / 3.0;
+    assert!(!enhanced.outside_margin([center[0], center[1] + inside - 0.1]));
+    assert!(enhanced.outside_margin([center[0], center[1] + inside + 0.1]));
+    enhanced.camera.zoom = 1.0;
+    // Clamped: 1024 is 189 on y (half of 380, less one) and 319 on x.
+    enhanced.settings.camera_recenter_margin = 1024;
+    assert!(!enhanced.outside_margin(center));
+    assert!(enhanced.outside_margin([center[0], center[1] + 1.5]));
+    assert!(!enhanced.outside_margin([center[0] + 0.5, center[1]]));
+    enhanced.settings.camera_recenter_margin = 0;
+    assert!(!enhanced.outside_margin([center[0] + 5000.0, center[1]]));
+}
+
+/// Under `off`, Home centres on the player once and leaves following off;
+/// so does the scripted reset (at the default zoom). An elevation change
+/// centres on the player too.
+#[test]
+fn home_the_reset_and_an_elevation_change_centre_once_under_off() {
+    let dir = synthetic_corpus();
+    let (mut preview, mut now) = follow_world(dir.path(), CameraFollow::Off, 0);
+    walk_southeast(&mut preview, &mut now, 5);
+    assert_eq!(preview.host.world.camera_hex, 20100);
+    preview.center_on_player();
+    now += 16;
+    preview.tick(now).unwrap();
+    assert_eq!(preview.host.world.camera_hex, 21100);
+    assert_eq!(camera(&preview).center, preview.player_point().unwrap());
+    assert!(!camera(&preview).follow);
+    // It centred once: the next steps leave the view.
+    assert_eq!(walk_southeast(&mut preview, &mut now, 2), [21100; 2]);
+    // The scripted reset: back to the default zoom, centred, not following.
+    set_zoom(&mut preview, 2.0);
+    preview.camera_command(CameraCommand::Reset { duration_ms: 0 });
+    now += 16;
+    preview.tick(now).unwrap();
+    let player = preview.player_point().unwrap();
+    assert_eq!(camera(&preview).center, player);
+    assert_eq!(camera(&preview).zoom, 1.0);
+    assert!(!camera(&preview).follow);
+    assert_eq!(walk_southeast(&mut preview, &mut now, 1), [21500]);
+    // An elevation change, the walk having left the view behind.
+    let start = preview.host.world.camera_hex;
+    walk_southeast(&mut preview, &mut now, 3);
+    assert_eq!(preview.host.world.camera_hex, start);
+    let world = &mut preview.host.world;
+    let player = world.player;
+    let hex = world.get(player).unwrap().raw.hex.unwrap();
+    world.move_object(player, hex, 1, true).unwrap();
+    world.elevation = 1;
+    now += 16;
+    preview.tick(now).unwrap();
+    assert_eq!(preview.host.world.camera_hex, hex);
+    assert!(!camera(&preview).follow);
+}
+
+/// Under `smooth` Home resumes following, as it always has; under `step`
+/// it centres once.
+#[test]
+fn home_resumes_following_under_smooth_only() {
+    let dir = synthetic_corpus();
+    let (mut preview, _) = follow_world(dir.path(), CameraFollow::Smooth, 96);
+    preview.enhanced.as_mut().unwrap().camera.follow = false;
+    preview.center_on_player();
+    assert!(camera(&preview).follow);
+    let (mut preview, mut now) = follow_world(dir.path(), CameraFollow::Step, 96);
+    preview.enhanced.as_mut().unwrap().camera.drag([300.0, 0.0]);
+    now += 16;
+    preview.tick(now).unwrap();
+    assert_ne!(preview.host.world.camera_hex, 20100);
+    preview.center_on_player();
+    now += 16;
+    preview.tick(now).unwrap();
+    assert_eq!(preview.host.world.camera_hex, 20100);
+    assert!(!camera(&preview).follow);
+}
+
+/// The world's view rule follows the settings: Vanilla, `smooth`, `step`
+/// and the navigation-only touch view step; `off` asks for nothing under
+/// the unlocked view and for the margin rule under the fixed one. A
+/// running session takes a changed mode and margin at once.
+#[test]
+fn the_world_view_rule_follows_the_settings_and_changes_at_once() {
+    let dir = synthetic_corpus();
+    let mut preview = interactive(dir.path());
+    assert_eq!(preview.host.world.view_follow, ViewFollow::Step);
+    let off = EnhancedSettings {
+        camera_follow: CameraFollow::Off,
+        camera_recenter_margin: 48,
+        ..Default::default()
+    };
+    let fixed = EnhancedSettings {
+        viewport: ViewportMode::Fixed,
+        ..off
+    };
+    preview.set_enhanced(Some(fixed));
+    preview.tick(16).unwrap();
+    assert_eq!(
+        preview.host.world.view_follow,
+        ViewFollow::Off {
+            margin: 48,
+            view: [640, 380]
+        }
+    );
+    preview.set_enhanced(Some(off));
+    assert_eq!(
+        preview.host.world.view_follow,
+        ViewFollow::Off {
+            margin: 0,
+            view: [640, 380]
+        }
+    );
+    assert!(!camera(&preview).follow && !camera(&preview).tracking);
+    preview.set_enhanced(Some(EnhancedSettings::default()));
+    assert_eq!(preview.host.world.view_follow, ViewFollow::Step);
+    assert!(camera(&preview).follow, "smooth follows again");
+    preview.set_enhanced(Some(EnhancedSettings {
+        camera_follow: CameraFollow::Step,
+        ..Default::default()
+    }));
+    assert_eq!(preview.host.world.view_follow, ViewFollow::Step);
+    assert!(!camera(&preview).follow);
+    preview.set_enhanced(None);
+    assert_eq!(preview.host.world.view_follow, ViewFollow::Step);
+    // The touch UI's navigation-only view keeps its following camera
+    // whatever the mode says.
+    let mut touch = interactive(dir.path());
+    touch.set_enhanced(Some(EnhancedSettings {
+        navigation_only: true,
+        ..off
+    }));
+    touch.tick(16).unwrap();
+    assert_eq!(touch.host.world.view_follow, ViewFollow::Step);
+    assert!(camera(&touch).follow && camera(&touch).tracking);
+}
+
+/// Alt+C's HUD line names the new mode.
+#[test]
+fn the_hud_names_the_camera_follow_mode() {
+    let dir = synthetic_corpus();
+    let mut preview = unlocked(dir.path());
+    for (mode, text) in [
+        (CameraFollow::Off, "Camera follow Off"),
+        (CameraFollow::Smooth, "Camera follow Smooth"),
+        (CameraFollow::Step, "Camera follow Step"),
+    ] {
+        preview.announce_camera_follow(mode);
+        let message = preview.qol_state.message.as_ref().unwrap();
+        assert_eq!(message.text, text.as_bytes());
+        assert!(!message.error);
+    }
+}
