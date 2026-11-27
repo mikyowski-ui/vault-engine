@@ -1,6 +1,6 @@
 # SPEC-017: Fallout 2 Host Words and VM Deltas
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Section 8 revised (Revision 2) by the coordinator at the owner's request, 2026-10-25. Revision 3 (retail audit recorded; script gate open) by the coordinator, 2026-10-25. Revision 4 (the opt-in sfall word set, section 2) by Team A, 2026-10-30, on the owner's instruction. Revision 5 (Team A, 2026-11-01) changes `metarule` rule 49 during an explosion. Revision 6 (2026-11-01), by the implementing side on the owner's instruction, records the stack model's step budget.
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-25, under AGENTS.md "Spec Authoring (Team A)". Section 8 revised (Revision 2) by the coordinator at the owner's request, 2026-10-25. Revision 3 (retail audit recorded; script gate open) by the coordinator, 2026-10-25. Revision 4 (the opt-in sfall word set, section 2) by Team A, 2026-10-30, on the owner's instruction. Revision 5 (Team A, 2026-11-01) changes `metarule` rule 49 during an explosion. Revision 6 (2026-11-01), by the implementing side on the owner's instruction, records the stack model's step budget. Revision 7 (2026-11-27), by the implementing side on the owner's instruction, gives `metarule3` rule 107 its extended-identifier case.
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-25.
 Sources:
@@ -91,6 +91,21 @@ disassembly, re-implementation source or game asset was used.
 - **What did not change.** No word number, no stack effect, no vector of sections 7 or
   8.6, and no audit result. The budget is far above what a real script takes, so the
   recorded audits are as they were.
+
+**Revision 7 (rule 107 and extended art identifiers), 2026-11-27.** An owner
+decision of 2026-11-27 on the owner brief `docs/extended-art-namespaces.md`
+(its question 9), written by the implementing side. SPEC-007 section 2.1.1 adds
+extended art identifiers, which name list rows past 4095 in a session whose
+list has more than 4,096 rows.
+
+- **What changed.** Section 5.2 rule 107 takes an extended identifier's full
+  row for a non-player, non-critter object; Vector F gains three cases.
+  Decision 52 is new.
+- **What did not change.** Every other call of rule 107 (a plain argument, the
+  player, a critter, and every call in a session with no list past 4,096 rows)
+  keeps its result exactly. No word number, stack effect or other vector
+  changes. No decompilation, disassembly, re-implementation source or game
+  asset was used.
 
 ## Clean-Room Rules for Research Agents
 - Document ONLY binary file layouts (byte offsets, endianness, data types), mathematical formulas, state transitions, and observable behavior.
@@ -564,7 +579,7 @@ p1 U, sub-function. Push I value. `[Must-match]`
 | 104 | `METARULE3_MARK_MAP_ENTRANCE` | map number | state | elevation | Every entrance slot that SPEC-018 §5.8 "Entrances by map" selects for the map and elevation becomes known when the state is nonzero, and unknown when it is 0. Elevation -1 selects every elevation. I 0 when the map has a `maps.txt` record, else I -1. |
 | 105 | `METARULE3_WM_SUBTILE_STATE` | world X | world Y | unused | I the discovery value, 0 unknown, 1 seen or 2 visited (SPEC-018 §5.5), of the subtile that holds world pixel (X, Y). A point outside the world gives -1. |
 | 106 | `METARULE3_TILE_GET_NEXT_CRITTER` | hex | elevation | previous critter | Consider every critter-category object placed at that hex and elevation, in the map's object order for that elevation (SPEC-003), including the player and dead or hidden critters. With p3 null, return the first one. Otherwise return the first one after p3. Return I 0 when there is none, when p3 is not among them, or when the hex is outside 0-39999 or the elevation outside 0-2. |
-| 107 | `METARULE3_ART_SET_BASE_FID_NUM` | object | art identifier or base index | unused | Let B be the low 12 bits of p2 (SPEC-007 §2.1). For the player, set the default player art (SPEC-005 §3.8) to base B; if no armor is worn, replace the base field of the player's art at once, keeping every other field, with no animation. For any other object, replace the base field of its art at once, keeping every other field. Redraw either way. I 0. A null object changes nothing. |
+| 107 | `METARULE3_ART_SET_BASE_FID_NUM` | object | art identifier or base index | unused | Let B be the low 12 bits of p2 (SPEC-007 §2.1). For the player, set the default player art (SPEC-005 §3.8) to base B; if no armor is worn, replace the base field of the player's art at once, keeping every other field, with no animation. For any other object, replace the base field of its art at once, keeping every other field. Redraw either way. I 0. A null object changes nothing. **Extended case (Revision 7):** when p2 is an extended identifier under SPEC-007 §2.1.1 item 1 and the object is neither the player nor a critter-category object, the object's art becomes the canonical identifier (SPEC-007 §2.1.1 item 5) of row R = p2's bits 12-23 × 4096 + bits 0-11 in the category of the object's current art; when that category's resolved list has no row R, the art is unchanged, with a diagnostic (`[Safe rule]`). Every other call takes the low 12 bits as above (Decision 52). |
 | 108 | `METARULE3_TILE_SET_CENTER` | hex | unused | unused | Center the view on the hex, on the current elevation, as the player recenter does. Scroll limits apply (SPEC-014 §3.29). I 0. A hex outside 0-39999 changes nothing. |
 | 109 | `METARULE3_CHEM_USE_LEVEL` | critter | unused | unused | I the `chem_use` field of the critter's control record (SPEC-019 §2.5), as its index in SPEC-018 §4.5's vocabulary. A null critter, or one without a control record, gives -1. Packets' own `chem_use` keys are not read in this revision (SPEC-018 §4.7). |
 | 110 | `METARULE3_CAR_OUT_OF_FUEL` | unused | unused | unused | I 1 when `has_car` is 1 and `car_fuel` is 0 (SPEC-019 §3.19.1), else 0. |
@@ -773,6 +788,21 @@ Player variant: replace self with the player, wearing no armor, with art
 `0x0100400B`. The default player art becomes base 5 and the art
 `0x01004005`. With armor worn, the default player art becomes base 5 but the
 art is unchanged.
+
+Extended variants (Revision 7), in a session whose scenery list resolves to
+5,001 rows, the last registered by a mod layer (SPEC-024a §2.4): self is a
+scenery object with art `0x02030000`.
+
+| p2 | Self's art after | Why |
+| --- | --- | --- |
+| `0x02000005` | `0x02030005` | A plain argument: base 5, every other field kept, as before |
+| `0x82001388` | `0x82001388` | Extended: row 5000's canonical identifier |
+| `0x82000000` | `0x02000000` | Extended form of row 0: its canonical, plain identifier |
+| `0x82001389` | unchanged, with a diagnostic | Row 5001 is past the scenery list |
+
+For a non-player critter with art `0x01004003`, p2 `0x82001388` still gives
+`0x01004388`, and for the player the default player art becomes base `0x388`:
+critters and the player keep the low-12-bit rule.
 
 ### 7.7 Vector G: `tile_in_tile_rect`
 
@@ -1529,6 +1559,8 @@ it touches, and SPEC-018 §10 lists them as R1-R6.
 50. **Rule 49 stays unknown under `fallout1`** (Team A default). This section's `fallout1` rule is `[Must-match]`, and the brief changes rule 49's result, not which profile has it. So a Fallout 1 door has to read `fixed_param`.
 51. **A program's units share a step budget of `(16 × instructions).clamp(250_000, 1_000_000)`, and running out is a `step budget` finding** (owner instruction, brief for Phase B, 2026-11-01; written by the implementing side). The engine checks each mod `.INT` with this model before it enters the VM, so the check itself must be bounded against a hostile file. Counting steps, and not time, keeps the answer the same on every host.
 
+52. **Rule 107 takes an extended identifier's full row for a non-player, non-critter object** (owner decision, 2026-11-27, on the brief `docs/extended-art-namespaces.md`, question 9; written by the implementing side). The condition is exactly SPEC-007 §2.1.1 item 1, so every existing call keeps its `[Must-match]` result. The row is looked up in the category of the object's current art, as the plain rule keeps that category (implementing-side default); the result is the row's canonical identifier, so an extended argument for a row below 4096 gives the plain identifier, with its animation and selector bits clear. A row that category lacks changes nothing (implementing-side default, `[Safe rule]`).
+
 ## 10. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included
 - [x] All multi-byte integer endianness explicitly stated (big-endian words and payloads, SPEC-004)
@@ -1556,3 +1588,8 @@ Verification notes for Revision 6 (2026-11-01): the implementing side read secti
 8.2's budget from the engine's stack model and states what it does. `cargo xtask
 clean-room-check` finds no implementation-source path and no 40-character hexadecimal
 string. Team A did not review this revision, because the split it belonged to has ended.
+
+Verification notes for Revision 7 (2026-11-27): the implementing side wrote section
+5.2's extended case and Vector F's extended variants from the engine it builds, and
+the variants are the engine's test `extended_art_metarule3_107_takes_an_extended_row_only_for_non_critters`.
+No implementation-source path and no 40-character hexadecimal string was added.

@@ -20,6 +20,7 @@ Important distinctions: a directional-file selector is not a critter's zero-base
 
 ### Revision history
 
+- **R1-rev11 (2026-11-27, engine extension).** Owner decisions of 2026-11-27 on the owner brief `docs/extended-art-namespaces.md`, written by the implementing side (the owner ended the spec-author split on 2026-11-01). New section 2.1.1 gives extended art identifiers: bit 31 plus bits 12-23 as the high bits of a 24-bit list row, for the categories whose filename lookup ignores those bits, in a session whose resolved list has more than 4,096 rows; the resolved list (a served list file plus the rows mod layers register, SPEC-024a §2.4); the canonical form; and the constructor that refuses instead of wrapping. New section 2.1.2 gives the `VTLX` tile remap sidecar. New Fixture K holds the brief's vectors A to E. Section 2.1's table and rules are unchanged: every identifier keeps its meaning in a session with no list past 4,096 rows. This revision adds a third tag, `[Safe rule]`, for what the engine does with data it cannot honour. No decompilation, disassembly, re-implementation source or game asset was used.
 - **R1-rev2 (2026-10-18).** Section 3.6 now gives the exact draw range and position of the punch-to-kick draw. Section 3.7 now gives the complete missed-shot bystander algorithm: the line-of-fire stage, the impact fallback, victim selection, hit location, damage, and draw order. Fixtures D and E are added. The raw revision hash was replaced by the label R1.
 - **R1-rev3 (2026-10-19).** Section 3.6 now holds the single authoritative intended-target, onlooker and retaliation rule, which SPEC-009 cites. A surviving conscious unintended victim, whether a missed-shot bystander or a critical-failure random target, makes the retaliation check only when its team differs from the attacker's. Section 3.7 now states that the disabled splash enumeration serves every explosion, so no explosion damages beyond its center target, which matches SPEC-013 §3.10.
 - **R1-rev9 (2026-10-22).** Section 3.3: the combat-request AP bonus is always 0 in R1, because no request source sets it. Section 3.4: the UI aiming flag in reload mode, and the called-shot window of SPEC-014 §3.38. New Fixture I gives the spray draw order with Sniper, Jinxed, an extra-only hit and a critical failure.
@@ -77,6 +78,40 @@ For ordinary supported values, numeric encoding is base index plus `4096 * weapo
 Thus the animation/variant bits do not universally append suffixes to every art category. Normal non-critter construction clears the directional selector. A raw identifier of another category can retain such bits, but ordinary filename lookup does not use them. `[Must-match]` Invalid categories/list indexes are not comprehensively bounds-checked before all accesses: alias lookup and the list-length test can read a category's list before the category range is checked. `[May-improve]`: produce no filename for a category above 10 or a base index at or beyond that category's list length, before any list access.
 
 Head animation selectors 0-11 append, respectively, `gv, gf, gn, ng, nf, nb, bn, bf, bv, gp, np, bp`, then `.frm`. Selectors 1, 4, 7 additionally append the decimal value of bits 12-15 after their two letters. `[Must-match]` There is no zero padding and no guarantee of an eight-character head filename. `[Must-match]` Other head selector values are not safely bounded by the suffix lookup. `[May-improve]`: produce no filename for a head selector above 11.
+
+#### 2.1.1 Extended identifiers and resolved lists (engine extension, R1-rev11)
+
+This section is an engine extension, not reference behavior. It is written for mod tool authors as well as the engine, so it holds the whole encoding. Besides the two tags above it uses **`[Safe rule]`**: what the engine does with data it cannot honour; it refuses, ignores or logs as stated, and never panics, wraps or reads out of bounds.
+
+**Resolved list.** Each art category 0-10 has one resolved list per session: its list file `art/<directory>/<directory>.lst` as the VFS serves it (the highest mod layer's copy, else the base), followed by the rows enabled mod layers register with `[[art]]` (SPEC-024a §2.4), each at its explicit index. Rows between the file's end and a registered index are empty rows with no name. A list file is never merged line by line with another layer's copy. `[Safe rule]`
+
+1. **When bit 31 counts.** An identifier is **extended** exactly when bit 31 is set, its category (bits 24-27) is 0-10 and neither 1 (critters) nor 8 (heads), and that category's resolved list has more than 4,096 rows. `[Safe rule]`
+2. **The row.** An extended identifier addresses row `R = (bits 12-23) × 4096 + (bits 0-11)` of its category's resolved list, a 24-bit row number 0 to 16,777,215. As a word it is `0x80000000 | category << 24 | R`. Its bits 28-30 are clear. `[Safe rule]`
+3. **Every other identifier keeps section 2.1 exactly:** bit 31 clear; bit 31 set in a category whose resolved list has at most 4,096 rows (the bit is ignored); critters and heads; categories 11-15, `0xFFFFFFFF` included. A session whose lists all hold at most 4,096 rows sees no difference. `[Must-match]`
+4. **Past the list.** An extended identifier whose row is past the resolved list, or is an empty registered-gap row, has no filename, as section 2.1's `[May-improve]` rule gives for a plain one. The object is logged and not drawn, as for any missing art. A registered row whose file no layer serves has a filename and no file: it is not drawn either. `[Safe rule]`
+5. **Canonical form.** The canonical identifier of row R of category C is the plain identifier `C << 24 | R` (animation, weapon and selector 0) when R is below 4096, and the extended identifier of item 2 when R is 4096 or more, C is not 1 or 8, and the resolved list holds row R. Any other row has none. An extended identifier of a row below 4096 means the same row as the plain one. SPEC-024a word `0x830A` `mod_art_fid(category, row)` pushes the canonical identifier, or -1 when there is none (also for a row below 4096 past the resolved list). `[Safe rule]`
+6. **Critters and heads stay capped** at 4,096 addressable rows: their bits 12-23 carry the weapon code, animation and head variant. A critter or head list longer than 4,096 rows still loads whole; its rows from 4096 are never drawn. `[Safe rule]`
+7. **Diagnostics.** The engine records one line per resolved list longer than 4,096 rows, naming the list path, its row count (with thousands separators), how many came from the file when some were registered, and the first row a plain identifier cannot reach, 4096. The lines are logged once per session and are never a world effect. `[May-improve]`
+8. **No silent wrap.** The checked constructor refuses a base index above 4095 for every category, and a category above 10, with an error; the extended constructor refuses critters, heads, a category above 10 and a row above 16,777,215. Section 2.1's masking constructor stays for the bit-exact paths. Every engine path that builds an identifier from a row it computed uses the checked form, and on a row that does not fit it logs and leaves the art unchanged. `[May-improve]`
+9. **Fields keep their size.** Every FID-bearing field of SPEC-003 and SPEC-008 still holds one big-endian 32-bit word, so no map, prototype, save or `AUTOMAP.DB` layout changes. A save that holds extended identifiers loads in a session without the registering layer: there bit 31 is ignored, the plain meaning of item 3 applies, and an object whose art has no file is logged and not drawn. `[Must-match]` for the layouts, `[Safe rule]` for the load.
+10. **Words that carry an identifier.** `obj_art_fid` returns the stored word unchanged; a script that masks it with `0xFFF` gets the low 12 bits, as for any identifier. `anim_action_frame` (`0x813A`) and the kill path on a non-critter (section 3.8) keep an extended identifier as it is, because it has no animation bits to change. `metarule3` rule 107 takes an extended argument's full row only as SPEC-017 §5.2 (Revision 7) states. The sound stems of SPEC-010 for a non-critter art read the list token of its row under this section. `[Safe rule]`
+11. **Determinism.** The resolved lists are a function of the load order and the manifests alone, and registration adds no value to `state_hash`, `combat_hash` or the checkpoint stream. Round trip, for every row r of a category other than 1 and 8 whose resolved list has more than r rows and more than 4,096 rows: the extended identifier of r addresses r, and for r below 4096 the canonical identifier is the plain one. `[Must-match]`
+
+#### 2.1.2 Tile remap sidecar `VTLX` (engine extension, R1-rev11)
+
+A map's floor and roof tile words hold 12-bit indexes into the tile list (SPEC-003 §2.8), a cap no identifier change lifts. A mod layer's `[[tile_remap]]` row (SPEC-024a §2.4) names one sidecar per map, which maps local indexes to rows of the resolved tile list (category 4). `[Safe rule]`
+
+| Offset | Size | Big-endian field |
+| ---: | ---: | --- |
+| 0 | 4 | Magic `56 54 4C 58` (`VTLX`) |
+| 4 | 2 | Version, 1 |
+| 6 | 2 | Entry count N, at most 4096 |
+| 8 + 6k | 2 | Entry k's local index, 0-4095 |
+| 10 + 6k | 4 | Entry k's resolved tile list row, 0-16,777,215 |
+
+- The file is exactly `8 + 6N` bytes. Entries ascend by local index with no repeats. Local index 1 is the blank tile and may not be listed. A file that breaks any of these rules is refused, and the launch stops (SPEC-024a §2.4). `[Safe rule]`
+- A listed local index draws the mapped row. An unlisted one draws its own index, as without a sidecar. `[Safe rule]`
+- The map's tile words, roof hiding and the hide bits do not change. `[Must-match]`
 
 ### 2.2 Critter List Rows, Weapon Letters, and Animation Suffixes
 
@@ -1481,6 +1516,33 @@ A male NPC named "Raider" (alias 0, so the head is `combat.msg` 1110 "the head")
 | Normal hit, 1 damage, torso | "Raider was hit for 1 hit point." | Same |
 | Player's critical miss, 3 self-damage, flags lose turn (`0x8000`) | "You critically missed and took 3 hit points and ." (safe rule: "… and lost your next turn.") | Same |
 
+### 4.11 Fixture K: Extended Identifiers, Registration and Tile Remap (R1-rev11)
+
+All lists are synthetic, one name per LF-terminated line.
+
+**Vector A.** A scenery list of 4,100 rows, `s0000.frm` to `s4099.frm`, with no registrations.
+
+| Row | Plain FID | Extended FID | Resolves to |
+| ---: | --- | --- | --- |
+| 0 | `0x02000000` | `0x82000000` | `s0000.frm` |
+| 5 | `0x02000005` | `0x82000005` | `s0005.frm` |
+| 4095 | `0x02000FFF` | `0x82000FFF` | `s4095.frm` |
+| 4096 | none | `0x82001000` | `s4096.frm` |
+| 4099 | none | `0x82001003` | `s4099.frm` |
+| 4100 | none | `0x82001004` | no filename |
+
+- The checked constructor refuses base 4096 of category 2 (a base-range error naming category 2 and index 4096); the masking constructor still packs it as `0x02000000`, row 0.
+- The raw identifier `0x02001000` (bits 12-15 set, bit 31 clear) is row 0, as section 2.1 gives.
+- One diagnostic names `art/scenery/scenery.lst`, 4,100 rows, first unreachable row 4096.
+
+**Vector B.** The same list cut to 4,096 rows: `0x82001000` has bit 31 ignored and addresses row 0 (`s0000.frm`). No diagnostic.
+
+**Vector C.** Base `art/items/items.lst` of 3 rows; layer `tc` registers `[[art]] category = "items" file = "tc_a.frm" index = 4100`. The resolved list has 4,101 rows: rows 3-4099 are empty and row 4100 is `tc_a.frm`. `mod_art_fid(0, 4100)` pushes `0x80001004`, `mod_art_fid(0, 2)` pushes `0x00000002`, `mod_art_fid(0, 4101)` and `mod_art_fid(1, 4096)` push -1.
+
+**Vector D (refused at launch).** `[[art]] index = 2` over a 3-row list; two layers both registering scenery row 5000; `[[art]] category = "critters" index = 4096`; `[[protos]] index = 0`; a `[[protos]]` index at or below the served prototype list's entry count; a `[[tile_remap]]` whose sidecar is missing or fails section 2.1.2.
+
+**Vector E (tile remap).** The sidecar `56 54 4C 58 00 01 00 01 0F A0 00 00 13 88` maps local index 4000 to row 5000 of a 5,001-row tile list. Floor index `0x0FA0` draws row 5000; `0x0FA1` draws row 4001.
+
 ## 5. Clean-Room Verification Checklist
 - [x] Zero C/C++ code snippets or struct definitions included
 - [x] All multi-byte integer endianness explicitly stated
@@ -1494,3 +1556,5 @@ Verification notes (R1-rev8): `tools/spec_lint.py` gives 0 errors, and no source
 Update notes (2026-10-22, R1-rev9): sections 3.3 and 3.4 and new Fixture I. Fixture I was stepped by hand through the section 3.7 draw order; the combat-request AP bonus was checked at all six request sources. Tag count is now 215 `[Must-match]`, 39 `[May-improve]`. `tools/spec_lint.py` gives 0 errors.
 
 Update notes (2026-10-23, R1-rev10): section 3.12 and Fixture J. All message numbers and texts were checked against the English corpus `combat.msg`, which has no entries 0-31. The Fixture J critical effects were taken from the section 2.5 man/head row. Net tags: +5 `[Must-match]`, +1 `[May-improve]`. `tools/spec_lint.py` gives 0 errors.
+
+Update notes (2026-11-27, R1-rev11): sections 2.1.1 and 2.1.2 and Fixture K, an engine extension written by the implementing side as owner decisions on the brief `docs/extended-art-namespaces.md`. Fixture K is the brief's vectors A to E, which the engine's tests run (the `vault-formats` art identifier and tile remap tests, and `vault-core`'s `extended_art_tests`). The new rules carry the brief's tags; `[Safe rule]` is defined in section 2.1.1 for this extension only. No implementation-source path and no 40-character hexadecimal string was added. `tools/spec_lint.py` was not run for this revision.

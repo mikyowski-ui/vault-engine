@@ -473,12 +473,12 @@ fn no_chain_starts_in_the_checkpoint_or_presentation_phases() {
     assert_eq!(wrong.load(Ordering::Relaxed), 0);
 }
 /// §4.4: a script the check refuses runs none of its rows, and the session
-/// goes on. `0x830A` is in no set (§7.1).
+/// goes on. `0x830B` is in no set (§7.1).
 #[test]
-fn a_script_using_a_word_past_the_ten_is_refused_and_its_rows_run_nothing() {
+fn a_script_using_a_word_past_the_eleven_is_refused_and_its_rows_run_nothing() {
     let dir = corpus();
     let root = dir.path();
-    let body = fixture::instruction(0x830a);
+    let body = fixture::instruction(0x830b);
     let script = fixture::corpus_program(&[], &[(b"start", fixture::returning(body))]);
     let row = "name = \"R\"\nid = \"r\"\napi = 1\n[[hooks]]\npoint = \"HOOK_CALCAPCOST\"\n\
                file = \"gl_refused.int\"\n";

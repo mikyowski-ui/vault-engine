@@ -489,6 +489,10 @@ pub(super) fn start(
     args.preview.touch_ui = launch.touch_ui;
     args.preview.mod_export = Some(mods::export_root(launch.mod_list.as_ref()));
     args.preview.render_path = launch_render_path(args, config);
+    // The backdrop chunk cache's budget; a replay reads no settings.
+    args.preview.backdrop_cache_mib = config
+        .filter(|_| args.replay_inputs.is_none())
+        .and_then(|config| config.backdrop_cache_mib);
     // SPEC-024b §3.1: `--sfall` wins; a replay reads no settings.
     if args.replay_inputs.is_none() {
         args.preview.sfall |= modded

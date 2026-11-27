@@ -653,7 +653,8 @@ fn t4_the_load_time_vectors() {
     for (word, in_off, in_on, in_sfall) in [
         (0x8300, false, true, true),
         (0x8309, false, true, true),
-        (0x830a, false, false, false),
+        (0x830a, false, true, true),
+        (0x830b, false, false, false),
         (0x83ff, false, false, false),
         (0x8281, false, false, true),
     ] {
@@ -671,7 +672,7 @@ fn t4_the_load_time_vectors() {
         assert_eq!(row.operands.len().to_string(), cells[2], "{line}");
         assert_eq!(usize::from(row.name == cells[1]), 1, "{line}");
     }
-    assert!(table.row(0x830a).is_none());
+    assert!(table.row(0x830b).is_none());
 }
 /// N13 and N14: accepted, one diagnostic at setup, and nothing runs.
 #[test]

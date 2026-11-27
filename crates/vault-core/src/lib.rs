@@ -160,6 +160,8 @@ pub(crate) use vault_fixtures::vm as fixture_vm;
 #[cfg(test)]
 pub(crate) use vault_fixtures::world as fixture_world;
 #[cfg(test)]
+mod extended_art_tests;
+#[cfg(test)]
 mod host_ai_tests;
 #[cfg(test)]
 mod host_sound_tests;

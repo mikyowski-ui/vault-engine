@@ -21,7 +21,7 @@ use vault_formats::{
 };
 
 /// A `width` by `height` frame whose pixel (x, y) is `color(x, y)`.
-fn pattern(width: u16, height: u16, color: impl Fn(u16, u16) -> u8) -> FrmArchive {
+pub(super) fn pattern(width: u16, height: u16, color: impl Fn(u16, u16) -> u8) -> FrmArchive {
     let mut bytes = fixture::frm(width, height, 1);
     let start = bytes.len() - usize::from(width) * usize::from(height);
     for y in 0..height {
@@ -35,7 +35,7 @@ fn pattern(width: u16, height: u16, color: impl Fn(u16, u16) -> u8) -> FrmArchiv
 /// A palette whose six-bit channels stay below 32, with a scrambled
 /// RGB555 lookup. (Every palette's gray levels are 0-7, the blend tables'
 /// rows: they are taken over the five-bit components.)
-fn palette() -> Palette {
+pub(super) fn palette() -> Palette {
     let mut bytes = Vec::with_capacity(0x8300);
     for index in 0..256_u32 {
         bytes.extend(
@@ -56,7 +56,7 @@ fn palette() -> Palette {
 
 /// The map: patterned floors (with a hidden one), and a block of roofs over
 /// the view's center whose top-left group is hidden.
-fn map() -> MapFile {
+pub(super) fn map() -> MapFile {
     let mut map = preview();
     let tiles = (0..10000)
         .map(|square: u32| {
@@ -80,13 +80,13 @@ fn map() -> MapFile {
 }
 
 /// Object art ids.
-const ITEM: u32 = 0x0000_0001;
-const CRITTER: u32 = 0x0100_0001;
-const SCENERY: u32 = 0x0200_0001;
-const WALL: u32 = 0x0300_0001;
+pub(super) const ITEM: u32 = 0x0000_0001;
+pub(super) const CRITTER: u32 = 0x0100_0001;
+pub(super) const SCENERY: u32 = 0x0200_0001;
+pub(super) const WALL: u32 = 0x0300_0001;
 
 /// Patterned tiles and objects: holes (index 0) and indexes 229 and up.
-fn art() -> Keyed {
+pub(super) fn art() -> Keyed {
     let mut art = BTreeMap::new();
     art.insert(
         (true, 1),
@@ -139,7 +139,7 @@ fn art() -> Keyed {
 /// one object per translucency bit (and "explicitly none", and two bits),
 /// outlined critters of every ink, a hidden object, and two objects without
 /// a hex.
-fn objects(map: &MapFile) -> MapObjects {
+pub(super) fn objects(map: &MapFile) -> MapObjects {
     let mut list = vec![
         object(map, 1, SCENERY, 20100),
         object(map, 2, CRITTER, 20100),
@@ -202,7 +202,7 @@ fn objects(map: &MapFile) -> MapObjects {
 
 /// The hex light: 655, plus lights on the player and on 19700 (SPEC-006
 /// §3.6's falloff without blockers).
-fn tiles() -> Vec<i64> {
+pub(super) fn tiles() -> Vec<i64> {
     let mut tiles = vec![655_i64; 40000];
     for (center, radius, intensity) in [(20100, 4, 65536), (19700, 3, 40000), (20708, 2, 30000)] {
         let step = (intensity - 655) / (radius + 1);
@@ -217,23 +217,23 @@ fn tiles() -> Vec<i64> {
 }
 
 /// Everything a scene borrows.
-struct Fixture {
-    map: MapFile,
-    objects: MapObjects,
-    art: Keyed,
-    palette: Palette,
-    tiles: Vec<i64>,
-    ambient: i32,
-    mask: FrmArchive,
-    inks: OutlineInks,
-    floating: Vec<FloatingSprite>,
-    cursor_art: IndexedImage,
-    cursor_text: IndexedImage,
-    ring: FrmArchive,
+pub(super) struct Fixture {
+    pub(super) map: MapFile,
+    pub(super) objects: MapObjects,
+    pub(super) art: Keyed,
+    pub(super) palette: Palette,
+    pub(super) tiles: Vec<i64>,
+    pub(super) ambient: i32,
+    pub(super) mask: FrmArchive,
+    pub(super) inks: OutlineInks,
+    pub(super) floating: Vec<FloatingSprite>,
+    pub(super) cursor_art: IndexedImage,
+    pub(super) cursor_text: IndexedImage,
+    pub(super) ring: FrmArchive,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let map = map();
         let objects = objects(&map);
         let palette = palette();
@@ -279,7 +279,7 @@ impl Fixture {
             ring: FrmArchive::parse(&fixture::frm(32, 16, 99)).unwrap(),
         }
     }
-    fn light(&self) -> MapLight<'_> {
+    pub(super) fn light(&self) -> MapLight<'_> {
         MapLight {
             palette: &self.palette,
             ambient: self.ambient,
@@ -287,7 +287,7 @@ impl Fixture {
         }
     }
     /// The cutout on the player's hex, with the palette.
-    fn cutout(&self) -> Cutout<'_> {
+    pub(super) fn cutout(&self) -> Cutout<'_> {
         Cutout {
             mask: self.mask.frame(0, 0).unwrap(),
             hex: 20100,
@@ -301,16 +301,16 @@ impl Fixture {
 
 /// What a scenario's scene includes.
 #[derive(Clone, Copy)]
-struct Options {
-    lit: bool,
-    cutout: bool,
-    outlines: bool,
-    cursor: bool,
-    overscan: bool,
+pub(super) struct Options {
+    pub(super) lit: bool,
+    pub(super) cutout: bool,
+    pub(super) outlines: bool,
+    pub(super) cursor: bool,
+    pub(super) overscan: bool,
 }
 
 impl Options {
-    const FULL: Self = Self {
+    pub(super) const FULL: Self = Self {
         lit: true,
         cutout: true,
         outlines: true,
@@ -320,7 +320,7 @@ impl Options {
 }
 
 /// The scenario's scene in `view`.
-fn scene_of<'a>(
+pub(super) fn scene_of<'a>(
     fixture: &'a Fixture,
     cutout: &'a Cutout<'a>,
     view: MapView,
@@ -344,11 +344,12 @@ fn scene_of<'a>(
         shroud: None,
         overscan: options.overscan,
         highlight: None,
+        backdrop: None,
     }
 }
 
 /// The view centered on hex `center`, `size` pixels, roofs shown.
-fn view_at(center: i32, size: [u32; 2]) -> MapView {
+pub(super) fn view_at(center: i32, size: [u32; 2]) -> MapView {
     MapView {
         grid: HexGrid::centered(center, size[0], size[1]).unwrap(),
         elevation: 0,
@@ -362,7 +363,7 @@ fn view_at(center: i32, size: [u32; 2]) -> MapView {
 /// sorted instance list, the CPU executor's canvas equals the reference
 /// canvas, and so does the GPU executor's (when a device exists). Returns
 /// the plan's counts.
-fn parity<A: MapArt>(
+pub(super) fn parity<A: MapArt>(
     label: &str,
     map: &MapFile,
     objects: &MapObjects,
@@ -442,7 +443,7 @@ fn palette_for_unlit() -> Palette {
     palette()
 }
 
-fn assert_canvas(label: &str, got: &IndexedImage, want: &IndexedImage) {
+pub(super) fn assert_canvas(label: &str, got: &IndexedImage, want: &IndexedImage) {
     assert_eq!(
         [got.width(), got.height()],
         [want.width(), want.height()],
@@ -472,7 +473,7 @@ fn assert_canvas(label: &str, got: &IndexedImage, want: &IndexedImage) {
 }
 
 /// The GPU executor of a GPU test, if a device exists.
-fn gpu_executor() -> Option<GpuExecutor> {
+pub(super) fn gpu_executor() -> Option<GpuExecutor> {
     gpu::test_device().map(GpuExecutor::new)
 }
 
@@ -907,6 +908,7 @@ fn corpus_parity(label: &str, corpus: &Corpus, path: &str, gpu: &mut Option<GpuE
             shroud: None,
             overscan,
             highlight: None,
+            backdrop: None,
         };
         drawn += parity(
             &format!("{label} {name}"),
@@ -943,7 +945,7 @@ fn t9_t10_t11_synthetic_corpus_maps_keep_parity() {
 /// The reference X-ray's cutaway for the cursor at canvas pixel `at` and
 /// `zoom`, as the `enhanced` view builds it (96 and 48 interface pixels
 /// over the zoom, rounded).
-fn reference_cutaway(at: [i64; 2], zoom: f64) -> RoofCutaway {
+pub(super) fn reference_cutaway(at: [i64; 2], zoom: f64) -> RoofCutaway {
     let [inner, ring] = RoofPeekParams::radii(zoom).unwrap();
     RoofCutaway {
         center: at,
@@ -953,7 +955,7 @@ fn reference_cutaway(at: [i64; 2], zoom: f64) -> RoofCutaway {
 }
 
 /// The tile of `canvas` with corner `corner`, as a separate view.
-fn tile_of(canvas: MapView, corner: [i64; 2], size: [u32; 2]) -> MapView {
+pub(super) fn tile_of(canvas: MapView, corner: [i64; 2], size: [u32; 2]) -> MapView {
     let mut tile = canvas;
     tile.width = size[0];
     tile.height = size[1];

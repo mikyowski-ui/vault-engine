@@ -1,7 +1,7 @@
 use std::process::Command;
 
 use vault_fixtures::formats as fixtures;
-use vault_fixtures::{state, vm, world};
+use vault_fixtures::{art, state, vm, world};
 
 #[test]
 fn validates_gam_and_gcd_and_rejects_undefined_initializers() {
@@ -224,6 +224,137 @@ fn resolves_art_identifiers_and_separates_missing_from_invalid() {
         String::from_utf8_lossy(&output.stdout)
             .contains("Art identifiers: 11 resolved, 1 missing, 1 invalid")
     );
+}
+
+/// A synthetic corpus plus a scenery list of `rows` rows, `s4096.frm` on disk,
+/// and two scenery prototypes holding the extended identifiers of rows 4096
+/// and 4100.
+fn extended_art_corpus(root: &std::path::Path, rows: u32) {
+    world::write_corpus(root);
+    std::fs::write(
+        root.join("art/scenery/scenery.lst"),
+        art::art_list("s", rows),
+    )
+    .unwrap();
+    for file in ["s0000.frm", "s4096.frm"] {
+        std::fs::write(root.join("art/scenery").join(file), world::frm(12, 20, 17)).unwrap();
+    }
+    for (name, fid) in [
+        ("ext_row4096", 0x8200_1000u32),
+        ("ext_row4100", 0x8200_1004),
+    ] {
+        let mut scenery = world::prototype(2, 5);
+        world::word(&mut scenery, 8, fid as i32);
+        std::fs::write(root.join(format!("proto/scenery/{name}.pro")), scenery).unwrap();
+    }
+}
+
+fn audit_art_ids(root: &std::path::Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_asset-audit"))
+        .arg("--corpus-dir")
+        .arg(root)
+        .arg("--validate-art-ids")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn resolves_extended_art_identifiers_and_reports_long_lists() {
+    let short = tempfile::tempdir().unwrap();
+    extended_art_corpus(short.path(), 4096);
+    let before = audit_art_ids(short.path());
+
+    let temp = tempfile::tempdir().unwrap();
+    extended_art_corpus(temp.path(), 4100);
+    let output = audit_art_ids(temp.path());
+    let errors = String::from_utf8_lossy(&output.stderr);
+    let text = String::from_utf8_lossy(&output.stdout);
+    // Row 4096 resolves to the file on disk; row 4100 is past the list.
+    assert!(
+        errors.contains(
+            "MISSING proto/scenery/ext_row4100.pro: art 0x82001004: art list for category 2 \
+             has no row 4100"
+        ),
+        "{errors}"
+    );
+    assert!(!errors.contains("ext_row4096"), "{errors}");
+    assert!(text.contains(".pro\t9\t1\t0\t0"), "{text}");
+    assert!(text.contains("Art identifiers: 14 resolved, 1 missing, 0 invalid"));
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("Art list: "))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(
+        line.contains("art/scenery/scenery.lst: 4,100 rows"),
+        "{line}"
+    );
+    assert!(line.contains("first unreachable row 4096"), "{line}");
+    assert_eq!(text.matches("Art list: ").count(), 1);
+    assert!(text.contains("Art lists past 4,096 rows: 1"));
+    // Report only: the exit status is what it is without the long list.
+    assert_eq!(output.status.code(), Some(0), "{errors}");
+    assert_eq!(output.status.success(), before.status.success());
+
+    // At 4,096 rows bit 31 is ignored: 0x82001000 addresses row 0, and
+    // 0x82001004 addresses row 4, whose file is not on disk.
+    let text = String::from_utf8_lossy(&before.stdout);
+    assert!(before.status.success());
+    assert!(!text.contains("Art list"), "{text}");
+    assert!(!text.contains("past 4,096"), "{text}");
+    assert!(text.contains("Art identifiers: 14 resolved, 1 missing, 0 invalid"));
+}
+
+#[test]
+fn short_art_lists_print_no_long_list_lines() {
+    let temp = tempfile::tempdir().unwrap();
+    world::write_corpus(temp.path());
+    let output = audit_art_ids(temp.path());
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "Mounted files: 43\nextension\tfiles\n.frm\t11\n.pal\t1\n.fon\t1\n.aaf\t1\n\
+         .pro\t6\n.map\t1\n.int\t0\n.msg\t3\n.lst\t13\n.gam\t0\n.gcd\t0\n\
+         art-id source\tresolved\tmissing\tinvalid\tunreadable\n\
+         .pro\t8\t0\t0\t0\n\
+         .map\t5\t0\t0\t0\n\
+         Art identifiers: 13 resolved, 0 missing, 0 invalid\n\
+         Art-id source files: 0 unreadable\n\
+         Audit categories: 1 run, 0 failed\n"
+    );
+}
+
+#[test]
+fn art_fixture_builders_match_the_parsers() {
+    use vault_formats::{ModManifest, TileRemap};
+    let text = art::manifest(
+        "Art",
+        &[("scenery", "tc_a.frm", 5000)],
+        &[("items", "00005000.pro", 5000)],
+        &[("tc_hall.map", "maps/tc_hall.tlx")],
+    );
+    let manifest = ModManifest::parse(&text).unwrap_or_else(|error| panic!("{error}\n{text}"));
+    assert_eq!(manifest.name, "Art");
+    assert_eq!(
+        (
+            manifest.art.len(),
+            manifest.protos.len(),
+            manifest.tile_remaps.len()
+        ),
+        (1, 1, 1)
+    );
+    assert_eq!(manifest.art[0].index, 5000);
+    // Vector E.
+    let vector = [
+        0x56, 0x54, 0x4C, 0x58, 0x00, 0x01, 0x00, 0x01, 0x0F, 0xA0, 0x00, 0x00, 0x13, 0x88,
+    ];
+    assert_eq!(art::tile_remap(&[(4000, 5000)]), vector);
+    let remap = TileRemap::parse(&vector).unwrap();
+    assert_eq!(remap.row(4000), 5000);
+    assert_eq!(remap.row(4001), 4001);
+    assert_eq!(remap.to_bytes(), vector);
+    assert!(TileRemap::parse(&art::tile_remap(&[])).is_ok());
+    // A sidecar that lists the blank tile is refused.
+    assert!(TileRemap::parse(&art::tile_remap(&[(1, 7)])).is_err());
 }
 
 #[test]

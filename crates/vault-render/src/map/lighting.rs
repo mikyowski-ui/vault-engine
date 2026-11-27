@@ -124,7 +124,7 @@ impl<'a> Pens<'a> {
         }
     }
     /// The lit draw: indexes 229 and up unchanged, the rest relit at L.
-    fn lit(&self, source: u8, level: u8) -> u8 {
+    pub(super) fn lit(&self, source: u8, level: u8) -> u8 {
         if self.light.is_none() || source >= 229 {
             source
         } else {
@@ -132,7 +132,7 @@ impl<'a> Pens<'a> {
         }
     }
     /// `intensity[source][level]` with no exemption (the masked draw).
-    fn relit(&self, source: u8, level: u8) -> u8 {
+    pub(super) fn relit(&self, source: u8, level: u8) -> u8 {
         if self.light.is_none() {
             source
         } else {

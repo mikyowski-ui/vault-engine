@@ -23,7 +23,7 @@ use vault_core::{
 use vault_formats::{Fid, FrmArchive, HexGrid, map::outline, pro::Category};
 use vault_render::{
     IndexedImage,
-    map::{MapView, pick_candidates, pick_candidates_cut},
+    map::{MapView, pick_candidates_backdrop, pick_candidates_cut_backdrop},
 };
 
 /// The scroll blocker (misc PID `0x0500000C`).
@@ -356,8 +356,23 @@ impl MapPreview {
         let cutout = self.cutout(egg.as_deref(), &extended);
         // A point of the `enhanced` world canvas picks in the canvas tile
         // that draws it, through the same roof cutaway.
-        let candidates = match self.enhanced_pick(point) {
-            Some((view, point, cutaway)) => pick_candidates_cut(
+        let picked = self.enhanced_pick(point);
+        let view = picked.map_or(self.view, |(view, ..)| view);
+        // The backdrop the refresh of that view draws: a sprite pixel a
+        // painted wall covers is no hit, and a suppressed object never is
+        // (brief §3.8.5-6).
+        let prepared = {
+            let mut backdrops = self.backdrops.borrow_mut();
+            backdrops.sync(&self.host);
+            backdrops.prepare(&*self.host.assets.vfs, &view)
+        };
+        let tiles = prepared
+            .as_ref()
+            .map(super::backdrop::Prepared::tiles)
+            .unwrap_or_default();
+        let backdrop = prepared.as_ref().map(|prepared| prepared.view(&tiles));
+        let candidates = match picked {
+            Some((view, point, cutaway)) => pick_candidates_cut_backdrop(
                 map,
                 &objects,
                 view,
@@ -365,8 +380,17 @@ impl MapPreview {
                 point,
                 cutout.as_ref(),
                 cutaway,
+                backdrop.as_ref(),
             ),
-            None => pick_candidates(map, &objects, self.view, &self.art, point, cutout.as_ref()),
+            None => pick_candidates_backdrop(
+                map,
+                &objects,
+                self.view,
+                &self.art,
+                point,
+                cutout.as_ref(),
+                backdrop.as_ref(),
+            ),
         };
         let hits: Vec<_> = candidates?
             .into_iter()

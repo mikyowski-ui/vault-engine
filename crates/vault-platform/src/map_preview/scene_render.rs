@@ -29,6 +29,9 @@ pub(crate) struct Shared {
     pub(crate) renderer: SceneRenderer,
     /// Every refresh this session, by how it was drawn.
     pub(crate) session: FrameRender,
+    /// The byte budget of each world's backdrop chunk cache
+    /// (`backdrop_cache_mib`); it changes no canvas byte.
+    pub(crate) backdrop_cache: usize,
 }
 
 impl SharedRenderer {
@@ -43,7 +46,15 @@ impl SharedRenderer {
         Self(Arc::new(Mutex::new(Shared {
             renderer,
             session: FrameRender::default(),
+            backdrop_cache: super::backdrop::cache_bytes(super::backdrop::DEFAULT_CACHE_MIB),
         })))
+    }
+    /// This renderer with the worlds' backdrop chunk caches holding up to
+    /// `mib` MiB (`backdrop_cache_mib`; `None`: the 64 MiB default).
+    pub fn with_backdrop_cache_mib(self, mib: Option<u32>) -> Self {
+        let mib = mib.unwrap_or(super::backdrop::DEFAULT_CACHE_MIB);
+        self.lock().backdrop_cache = super::backdrop::cache_bytes(mib);
+        self
     }
     pub(crate) fn lock(&self) -> MutexGuard<'_, Shared> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
@@ -107,7 +118,9 @@ impl<'a> FrameRefreshes<'a> {
         art: &A,
         scene: MapScene,
     ) -> Result<vault_render::IndexedImage, MapRenderError> {
-        let Shared { renderer, session } = &mut *self.shared;
+        let Shared {
+            renderer, session, ..
+        } = &mut *self.shared;
         let image = renderer.render(map, objects, view, art, scene)?;
         for counts in [&mut self.counts, session] {
             match renderer.last_refresh() {
@@ -131,6 +144,8 @@ impl MapPreview {
     /// Draw this world's canvas with `renderer` from the next frame on
     /// (the session's, shared by its worlds).
     pub fn set_scene_renderer(&mut self, renderer: SharedRenderer) {
+        let budget = renderer.lock().backdrop_cache;
+        self.backdrops.get_mut().set_budget(budget);
         self.scene_renderer = renderer;
         self.render_frame = FrameRender::default();
         self.thaw_view();

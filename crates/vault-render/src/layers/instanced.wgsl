@@ -39,6 +39,8 @@ struct Uniforms {
 const RECORD_WORDS: u32 = 12u;
 const EXEMPT: u32 = 1u;
 const PEEK: u32 = 2u;
+// Mode 4 only: the level image selects the pixels drawn through the mask.
+const SELECT: u32 = 4u;
 const LAST_MODE: u32 = 6u;
 const BAYER = array<u32, 16>(0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);
 
@@ -211,9 +213,17 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<u32> {
             result = intensity(blended, level);
         }
         case 4u: {
-            let s1 = lit(item, s, level);
+            var s1 = lit(item, s, level);
+            var selected = true;
+            if (item.flags & SELECT) != 0u {
+                selected = textureLoad(atlas, item.level + uv, 0).r != 0u;
+                if selected && item.light != 0u {
+                    // The masked draw relights with no exemption.
+                    s1 = intensity(s, level);
+                }
+            }
             var weight = 0u;
-            if (uniforms.flags & 1u) != 0u {
+            if selected && (uniforms.flags & 1u) != 0u {
                 let m = pixel - uniforms.cutout_at;
                 let size = vec2<i32>(uniforms.cutout_size);
                 if m.x >= 0 && m.y >= 0 && m.x < size.x && m.y < size.y {

@@ -1,6 +1,6 @@
 # SPEC-024a: Engine Hooks and Mod Scripts
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-31, under AGENTS.md "Spec Authoring (Team A)". Revisions 2 and 3 (Team A, 2026-10-31), and Revision 4 (2026-11-01, by the implementing side as an owner instruction); see "Revision history".
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-31, under AGENTS.md "Spec Authoring (Team A)". Revisions 2 and 3 (Team A, 2026-10-31), Revision 4 (2026-11-01, by the implementing side as an owner instruction), and Revision 5 (2026-11-27, by the implementing side as owner decisions); see "Revision history".
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-31. Sources:
 
@@ -16,6 +16,8 @@ No decompilation, disassembly, re-implementation source, game asset, research-va
 **Provenance of Revision 3.** Author: the Spec-Author sub-agent (Team A), 2026-10-31, on the owner's brief of 2026-10-31. Sources: the owner's brief; this spec; SPEC-024b Revision 5; the implementer's notes in `docs/REFERENCE.md` and in the message of the commit that implements Revision 2. No engine Rust code was read, and the owner's budget figure in section 5.3 was not measured. No decompilation, disassembly, re-implementation source, game asset, research-vault material, or sfall material was used.
 
 **Provenance of Revision 4.** The owner ended the Team A/B split on 2026-11-01, and this revision is an owner instruction, on the owner's brief for Phase B of that date. The implementing side wrote it. It moves one file's path and changes no rule. No decompilation, disassembly, re-implementation source or game asset was used.
+
+**Provenance of Revision 5.** Owner decisions of 2026-11-27 on the owner brief `docs/extended-art-namespaces.md` (extended art addressing and additive art and prototype rows), written by the implementing side; the owner ended the Team A/B split on 2026-11-01. Sources: that brief, this spec, SPEC-007, SPEC-017, and the engine this side builds. No decompilation, disassembly, re-implementation source or game asset was used.
 
 **Fixtures:** `tests/fixtures/spec024a/`, written by Team A from this spec. They are not in `oracle/`, which is reserved for research-side vectors, with one exception since Revision 4: the hook list is `oracle/SPEC-024/hook-points.tsv` (Decision D-34).
 
@@ -38,6 +40,11 @@ No decompilation, disassembly, re-implementation source, game asset, research-va
 - **Revision 4 (2026-11-01, the implementing side).** On the owner's brief for Phase B of the same day, as an owner instruction.
   - **Sections 2.2, 3.1, and 9.** `hook-points.tsv` moves to `oracle/SPEC-024/hook-points.tsv`, because the engine's build now reads it (Decision D-34).
   - No row of that file, and no word, chain rule, or vector changes.
+- **Revision 5 (2026-11-27, the implementing side).** Owner decisions on the brief `docs/extended-art-namespaces.md`.
+  - **New section 2.4.** Manifests gain `[[art]]`, `[[protos]]` and `[[tile_remap]]` rows, with their launch checks (Decisions D-36 to D-45).
+  - **Sections 7.1 and 7.3.** Word `0x830A` `mod_art_fid` is defined, in the set only with manifest scripting on, like `0x8300..=0x8309`. The words refused at load are now `0x830B..=0x83FF` (Decision D-35).
+  - **Sections 1, 1.1 and 9.4, and `mod-words.tsv`.** Eleven words and dispatch indices 768 to 778. The refused example word of the load-time vectors moves from `0x830A` to `0x830B`, and vectors W23 to W27 are added.
+  - **Unchanged.** The hook list, the chain order and every rule of sections 3 to 6, the other ten words and their numbers, and every other vector. A manifest with none of the new rows means what it meant.
 
 ## Clean-Room Rules for Spec Authors
 
@@ -61,7 +68,8 @@ This spec defines:
 3. how scripts attach, and how global scripts load (section 4);
 4. the order of a chain, how returns combine, and what an error does (section 5);
 5. the determinism rules (section 6);
-6. the reserved word range and its first ten words (section 7).
+6. the reserved word range and its first eleven words (section 7);
+7. since Revision 5, the art, prototype and tile-remap rows a manifest registers (section 2.4).
 
 Section 8 records what stays out of scope. The chain and the registry stay in `vault_core::host`, the words in `vault_vm::extensions`, and manifests in `vault_platform::mods`.
 
@@ -95,7 +103,9 @@ These amendments apply only while manifest scripting is on. SPEC-024b and SPEC-0
 | SPEC-024b section 6.2, who may register | A manifest script counts as a global script |
 | SPEC-024b section 6.20 and Decision D-24 | No change: the 20 tier P2 hooks stay inert in both blocks. Revision 1's exception for `HOOK_ADJUSTFID` is gone, because SPEC-024b Revision 4 gives that hook a boundary |
 | SPEC-024b section 1, invariant | With sfall mode off, a hook point can run for manifest members. `hs_*.int`, sfall's words, arrays, and the sidecar still do not exist |
-| SPEC-017 section 2.1 and SPEC-024b section 3.2 | Dispatch indices 768 to 777 are registered slots (section 7.1). Every other index those sections call unregistered stays so |
+| SPEC-017 section 2.1 and SPEC-024b section 3.2 | Dispatch indices 768 to 778 are registered slots (section 7.1). Every other index those sections call unregistered stays so |
+| SPEC-007 sections 2.1.1 and 2.1.2 (Revision 5) | Not limited to manifest scripting: a layer's `[[art]]` rows extend the resolved art lists, and a `[[tile_remap]]` row gives a map its `VTLX` sidecar, whenever the layer is enabled (section 2.4) |
+| SPEC-017 section 5.2 rule 107 (Revision 5) | Its extended-identifier case (SPEC-017 Revision 7, Decision 52) applies in any session with a list past 4,096 rows |
 
 ## 2. Manifests and Activation
 
@@ -154,6 +164,55 @@ Each of these stops the launch, with `mod_list:` and the folder's name, as a mal
 A `file` is read through the `Vfs` layers, so a higher layer may replace it, and that is an ordinary file override. The row still belongs to the mod that declared it. Every script passes the mod-script check of `docs/REFERENCE.md`, with section 7's words in its table. `[Must-match]`
 
 A manifest with `[settings]` and no script row is valid, is not scripted, and has no effect. `[Safe rule]`
+
+### 2.4 Art, prototype and tile-remap rows (Revision 5)
+
+A manifest may register rows past the base list files, without replacing those files. These rows do not make a layer scripted (section 2.1), and they work in every session the layer is enabled in. `[Must-match]` for the grammar.
+
+```toml
+[[art]]
+category = "scenery"         # an art directory name of SPEC-007 section 2.1
+file = "tc_rock01.frm"       # a list name, under art/scenery/
+index = 5000                 # the resolved list row
+
+[[protos]]
+category = "items"           # a SPEC-003 section 2.1 prototype category name
+file = "00005000.pro"        # under proto/items/
+index = 5000                 # the one-based entry number
+
+[[tile_remap]]
+map = "tc_hall.map"          # under maps/
+file = "maps/tc_hall.tlx"    # the VTLX sidecar of SPEC-007 section 2.1.2
+```
+
+| Key | Table | Required | Rule |
+| --- | --- | --- | --- |
+| `category` | `[[art]]` | Yes | One of `items`, `critters`, `scenery`, `walls`, `tiles`, `misc`, `intrface`, `inven`, `heads`, `backgrnd`, `skilldex` (categories 0 to 10) |
+| `file` | `[[art]]` | Yes | One list name, 1 to 12 ASCII bytes, with no space, comma, semicolon, TAB, other control byte or folder. Kept lowercased |
+| `index` | `[[art]]` | Yes | Decimal integer 0 to 16,777,215; 0 to 4095 for `critters` and `heads` |
+| `category` | `[[protos]]` | Yes | One of `items`, `critters`, `scenery`, `walls`, `tiles`, `misc` (categories 0 to 5) |
+| `file` | `[[protos]]` | Yes | A `.pro` file name with no folder and no space. Kept lowercased |
+| `index` | `[[protos]]` | Yes | Decimal integer 1 to 16,777,215: the PID's one-based entry number |
+| `map` | `[[tile_remap]]` | Yes | A `.map` file name with no folder. Kept lowercased |
+| `file` | `[[tile_remap]]` | Yes | A layer-relative VFS path |
+
+**What they do.** `[Safe rule]`
+
+- An `[[art]]` row is row `index` of its category's **resolved list** (SPEC-007 section 2.1.1): the list file the VFS serves, then the registered rows at their indexes, with empty rows between. A row past 4095 is reached by an extended identifier; `mod_art_fid` (section 7.3) gives it.
+- A `[[protos]]` row answers PID `category << 24 | index` when the served prototype list has no such entry: that PID reads `proto/<category>/<file>`, for prototypes, for map parsing, and for saves. Without rows, prototypes resolve as before.
+- A `[[tile_remap]]` row gives map `maps/<map>` the sidecar `file` (SPEC-007 section 2.1.2).
+- Every registered file is read through the VFS layers, so a higher layer may replace it as an ordinary file override. Rows apply on top of a layer that replaces a list file whole.
+- Numbering is explicit and nothing is numbered by listing order, hash order or time. Registration runs once, when the session is built, and adds no value to `state_hash`, `combat_hash` or the checkpoint stream. No slot records the rows (section 6 item 10).
+
+**Refused.** Each of these stops the launch. `[Safe rule]`
+
+- In one manifest, with `mod_list:` and the folder's name, as a malformed manifest does today: an unknown key, a missing key, or a value outside the table above; an `[[art]]` `index` above 4095 for `critters` or `heads`; two rows of one table with the same (category, index), or two `[[tile_remap]]` rows for one map.
+- Across enabled layers, as a script conflict is: two layers registering one art (category, index), one prototype (category, index), or one map's remap. The message names both mods.
+- Against the served files, with `mod registration: "<mod name>":` and the row:
+  - an `[[art]]` `index` below the row count of the list file the VFS serves for its category: `[[art]] <category> row <index> is inside art/<category>/<category>.lst's <count> rows`;
+  - a `[[protos]]` `index` at or below the served prototype list's entry count: `[[protos]] <category> prototype <index> is at or inside proto/<category>/<category>.lst's <count> entries`, or a `file` the VFS does not serve: `... <path> is not served`;
+  - a `[[tile_remap]]` whose map or sidecar the VFS does not serve, or whose sidecar breaks SPEC-007 section 2.1.2: `[[tile_remap]] of map <map>: ...`.
+- An `[[art]]` `file` that no layer serves is **not** refused: the row has a name and no file, and an object with that art is logged and not drawn (Decision D-44).
 
 ### 2.3 Replays
 
@@ -380,10 +439,10 @@ So two runs of one log, with the same layers, give identical checkpoint streams 
 | `0x8300..=0x83FF` | **This spec** | New |
 | `0x8400` and up | None | Bits 10 to 14 set: refused at load unless a slot-1 push (SPEC-004 section 2.5), unchanged |
 
-It collides with neither spec: SPEC-017 stops at `0x82FF`, and `sfall-opcodes.tsv` stops at `0x8281`. The words dispatch on the low ten bits, as SPEC-004 section 3.8 requires, as indices 768 to 777.
+It collides with neither spec: SPEC-017 stops at `0x82FF`, and `sfall-opcodes.tsv` stops at `0x8281`. The words dispatch on the low ten bits, as SPEC-004 section 3.8 requires, as indices 768 to 778.
 
-- `0x8300..=0x8309` are in the set only with manifest scripting on, under either profile and with sfall mode on or off. Otherwise a program containing one is refused at load, as today. `[Must-match]`
-- `0x830A..=0x83FF` are refused at load in every session. A script using a word this engine does not have takes the mod-script check's refused path, rather than failing partway through. `[Safe rule]`
+- `0x8300..=0x830A` are in the set only with manifest scripting on, under either profile and with sfall mode on or off. Otherwise a program containing one is refused at load, as today. A layer with only section 2.4's rows is not scripted, so these words are not in its set. `[Must-match]`
+- `0x830B..=0x83FF` are refused at load in every session. A script using a word this engine does not have takes the mod-script check's refused path, rather than failing partway through. `[Safe rule]`
 - `opcode_exists` gives 0 for these words, because it reports P1 rows of SPEC-024b only. `[Safe rule]`
 - `engine_api_version` (`0x8200`) stays as it is. This range has its own version. `[Safe rule]`
 
@@ -409,6 +468,9 @@ Numbers, pop order, and pushes are `[Must-match]`. Pop order is first popped to 
 | `0x8307` | `mod_set_hook_arg` | value A, index I | none | As `set_sfall_arg`. Ignored out of range or outside a chain |
 | `0x8308` | `mod_set_hook_return` | value A, index I | none | Sets return `index`, converted by the point's return type. Ignored out of range or outside a chain |
 | `0x8309` | `mod_game_mode` | none | I | The bit set of SPEC-024b section 4.4 |
+| `0x830A` | `mod_art_fid` | row I, category I | I | Revision 5. The canonical art identifier (SPEC-007 section 2.1.1 item 5) of row `row` of art category `category`'s resolved list: the plain identifier below 4096, the extended one above. -1 when no identifier addresses the row: a category outside 0 to 10, a negative row, a `critters` or `heads` row above 4095, or a row at or past the resolved list's end |
+
+`mod_art_fid` lets a script carry an art identifier as a plain integer, as `obj_art_fid` returns it, without assembling bit 31 by hand. `[Safe rule]`
 
 The words give a manifest mod what `get_sfall_arg_at`, `set_sfall_arg`, `set_sfall_return`, and `get_game_mode` give an sfall script, because those do not exist with sfall mode off. Under `fallout1`, the bits for screens that profile lacks are never set. `[Safe rule]`
 
@@ -585,6 +647,11 @@ Run each with N1's mod loaded and `ap_cost` at 1, unless a row says otherwise. S
 | W20 | `I:0, "Old"`, in O14's chain | `0x8308` | empty | ret0 is `"Old"`, by class `S` |
 | W21 | `I:0, I:7`, in O14's chain, after W20 | `0x8308` | empty | ret0 stays `"Old"`, with a diagnostic |
 | W22 | empty, in O12's chain | `0x8305` | `I:26` | The innermost chain's hook ID |
+| W23 | `I:0, I:4100`, over SPEC-007 Fixture K vector C | `0x830A` | `I:0x80001004` | A registered row past 4095: its extended identifier |
+| W24 | `I:0, I:2`, over vector C | `0x830A` | `I:0x00000002` | A row below 4096: the plain identifier |
+| W25 | `I:0, I:4101`, over vector C | `0x830A` | `I:-1` | Past the resolved list |
+| W26 | `I:1, I:4096`, over vector C | `0x830A` | `I:-1` | Critters stay capped |
+| W27 | `I:11, I:0` | `0x830A` | `I:-1` | No such category |
 
 **Load-time vectors.** Build minimal programs as SPEC-017 section 7.1 does.
 
@@ -592,7 +659,8 @@ Run each with N1's mod loaded and `ap_cost` at 1, unless a row says otherwise. S
 | --- | --- | --- | --- |
 | `0x8300` | Refused at load | Loads | Loads |
 | `0x8309` | Refused at load | Loads | Loads |
-| `0x830A` | Refused at load | Refused at load | Refused at load |
+| `0x830A` | Refused at load | Loads | Loads |
+| `0x830B` | Refused at load | Refused at load | Refused at load |
 | `0x83FF` | Refused at load | Refused at load | Refused at load |
 | `0x8281` | As SPEC-017 Vector P | As SPEC-017 Vector P | Loads |
 
@@ -634,6 +702,7 @@ The `mod_stack` record of N1 is section 2.3's example: `EE7C38513A262548` is the
 13. Re-entry, membership, and error rules of sections 5.3 and 5.4, including a member that registers another member during a chain.
 14. `hook-points.tsv` has every row of `sfall-hooks.tsv`, with the same IDs, names, and types, and its `fires` column is `yes` exactly for tier P1.
 15. With sfall mode off, Esc stops a rest at once with no `HOOK_RESTTIMER` member, and at the next step with one. Under `fallout1`, a row on `HOOK_CARTRAVEL` or `HOOK_ENCOUNTER` runs nothing.
+16. Revision 5: vectors W23 to W27; every refusal of section 2.4; a registered art row and prototype resolving from the layer, through a map, a slot save and a load of a load with the identifier kept bit for bit; the same save in a session without the layer; and a session with none of section 2.4's rows unchanged.
 
 ## 11. Decisions
 
@@ -675,6 +744,17 @@ Each decision is marked as an owner instruction or a Team A default.
 | D-32 | A host call's instruction budget is 1,000,000, and running out of it is a VM error | Owner instruction (brief of 2026-10-31) | The brief gives this as the engine's normal per-call budget. Team A did not measure it. `docs/REFERENCE.md` gives a 100,000-instruction hard limit for a critical invocation, which Revision 2 cited here, and a host call is not necessarily critical |
 | D-33 | A `[[hooks]]` row whose procedure is absent stays inert until the next setup, and `mod_register_hook` does not revive it | Owner instruction (brief of 2026-10-31), from the implementer's reading | Vector N14 says nothing runs, although the fixture's `start` registers on that point |
 | D-34 | `hook-points.tsv` moves to `oracle/SPEC-024/hook-points.tsv`. Team A wrote it and it stays synthetic, so `oracle/`'s rule that it holds research-side vectors has this one exception | Owner instruction (brief for Phase B, 2026-11-01) | The engine's build reads this table, and a build must not depend on `tests/fixtures/`. It sits beside `sfall-hooks.tsv`, whose rows it repeats |
+| D-35 | `mod_art_fid` is word `0x830A`, pushes the canonical identifier or -1, and like `0x8300..=0x8309` is in the set only with manifest scripting on. The refused range becomes `0x830B..=0x83FF`, and the load-time vectors' refused example moves to `0x830B` | Owner decision (2026-11-27, brief `docs/extended-art-namespaces.md`, question 7) | The next free number. Scripts never assemble extended identifiers by hand |
+| D-36 | Extended identifiers use bit 31 plus bits 12-23 as a 24-bit row, session-wide (the brief's option D) | Owner decision (2026-11-27, question 1) | No layout changes anywhere, and one meaning per session |
+| D-37 | Bit 31 counts only when the category's resolved list has more than 4,096 rows | Owner decision (2026-11-27, question 2) | No existing data changes meaning in an ordinary session |
+| D-38 | Critter and head lists stay capped at 4,096 addressable rows | Owner decision (2026-11-27, question 3) | Their bits 12-23 are taken, and there is no known need |
+| D-39 | `index` is required on `[[art]]` and `[[protos]]`; there is no implicit numbering | Owner decision (2026-11-27, question 4) | A mod's own maps stay valid when other mods are added, as for `[[scripts]]` |
+| D-40 | No published index ranges per mod | Owner decision (2026-11-27, question 5) | A conflict is already a launch error naming both mods |
+| D-41 | `[[protos]]` registers no name or description messages; message files stay whole-file layer data | Owner decision (2026-11-27, question 6) | Keeps this revision to rows |
+| D-42 | `asset-audit --validate-art-ids` reports unreachable rows without changing its exit status | Owner decision (2026-11-27, question 8) | A report, not a gate |
+| D-43 | `metarule3` rule 107 takes an extended identifier's full row for a non-player, non-critter object, under exactly SPEC-007 section 2.1.1 item 1, and every other call keeps its low-12-bit result (SPEC-017 Decision 52) | Owner decision (2026-11-27, question 9) | Every existing call keeps its `[Must-match]` result |
+| D-44 | A registered `[[art]]` file that no layer serves is not a launch error: the row has a name and no file, and its objects are logged and not drawn | Owner decision (2026-11-27), overriding the brief's section 4 item 1 | The brief's own edge case of a higher layer deleting the file, and art can be added later without breaking a launch |
+| D-45 | The checks against served files run when the session's resources are built and stop the launch with `mod registration: "<mod name>":` and the row, as the existing script-index check does. A `[[protos]]` file the VFS does not serve is refused (the brief's section 4 item 3). The resolved art lists' diagnostics are logged once by the shell, never as a world effect. `mod_art_fid` gives -1 for a row below 4096 that is past the resolved list | Implementing-side default | The manifest-only checks keep `mod_list:`; a served-file check needs the mounted layers, where the existing `mod registration` check already runs. -1 marks every row no file can answer |
 
 ## 12. Clean-Room Verification Checklist
 
@@ -690,4 +770,5 @@ Each decision is marked as an owner instruction or a Team A default.
 - [x] `hook-order.tsv` was computed by a small model of section 5 and checked by hand
 - [x] Revision 3: the ingestion patterns were rechecked by search, and no fixture file changed
 - [x] Revision 4: `cargo xtask clean-room-check` finds no source path and no 40-character hexadecimal string. Engine Rust code was read for this revision only to find where the table is used
+- [x] Revision 5: written by the implementing side from the owner's decisions and the engine it builds. Vectors W23 to W27 are the engine's `mod_art_fid` test. No source path and no 40-character hexadecimal string was added
 - [ ] The research linter was not run: Team A has no access to it

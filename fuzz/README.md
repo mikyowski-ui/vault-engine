@@ -23,6 +23,8 @@ parsers. This crate is excluded from the main workspace (it has its own
 | `gcd` | `GcdFile::parse` |
 | `gam` | `GamFile::parse` as the campaign file and as a map file |
 | `rix` | `rix::Splash::parse` |
+| `backdrop` | `BackdropIndex::parse`, then `BackdropChunk::parse` against a fixed valid index (the first input byte picks stored or zlib) |
+| `tile_remap` | `TileRemap::parse`, then `to_bytes` must equal the input |
 | `sve` | `sve::parse` |
 | `moviefx` | `moviefx::parse`, then a `FadeHook` over 256 frames |
 | `ai` | `ai::Config::parse` and `ai::Packets::parse`, then `resolve` |

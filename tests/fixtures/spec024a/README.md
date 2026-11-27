@@ -21,7 +21,9 @@ Text formats: TSV files have one header row. A `-` means "not used".
 - `hook-order-rev4.tsv` (Revision 2): vectors O12 to O15 of section 9.2, on points
   SPEC-024b Revision 4 added, with a `hook` column and no arg3 columns.
 - `mod-words.tsv`: the words of section 7.3, with the `pops` and `push` columns
-  the stack model reads and the operand classes of SPEC-024b section 4.1.
+  the stack model reads and the operand classes of SPEC-024b section 4.1. Revision 5
+  (written by the implementing side on the owner's decisions of 2026-11-27) adds
+  the eleventh row, `0x830A` `mod_art_fid`.
 - `hook-points.tsv` is now `oracle/SPEC-024/hook-points.tsv`, because `vault-formats`
   compiles it in and a crate should not read a test directory. Team A wrote it the
   same way as the files here, and its bytes did not change in the move. It is the

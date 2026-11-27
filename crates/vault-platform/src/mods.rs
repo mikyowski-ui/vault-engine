@@ -139,8 +139,13 @@ pub struct ManifestLayer {
 
 /// The manifests of the enabled `dirs`, lowest first, under SPEC-024a §2.2's
 /// rules that reach past one manifest: each script is in its own layer's
-/// `scripts/`, and two layers share no `id` and no script. The error names
-/// the folder, and both folders for a conflict.
+/// `scripts/`, and two layers share no `id` and no script. The extended-art
+/// rows (`docs/extended-art-namespaces.md` §4 items 1, 3, 4 and 5) follow
+/// the same rules: each `[[art]]` file is in its layer's
+/// `art/<category>/`, each `[[protos]]` file in its `proto/<category>/`,
+/// each `[[tile_remap]]` map and sidecar in the layer, and two layers
+/// share no (category, index) and no remapped map. The error names the
+/// folder, and both folders for a conflict.
 pub fn manifest_layers(dirs: &[PathBuf]) -> Result<Vec<ManifestLayer>, String> {
     let mut layers: Vec<ManifestLayer> = Vec::new();
     for dir in dirs {
@@ -148,8 +153,12 @@ pub fn manifest_layers(dirs: &[PathBuf]) -> Result<Vec<ManifestLayer>, String> {
             continue;
         };
         let scripts = script_files(&manifest);
-        for file in &scripts {
-            let path = format!("scripts/{file}");
+        let held = layer_files(&manifest);
+        for path in scripts
+            .iter()
+            .map(|file| format!("scripts/{file}"))
+            .chain(held)
+        {
             if crate::launcher::validate::find_loose(dir, &path).is_none() {
                 return Err(format!("{}: {path} is not in this layer", dir.display()));
             }
@@ -172,6 +181,17 @@ pub fn manifest_layers(dirs: &[PathBuf]) -> Result<Vec<ManifestLayer>, String> {
                     dir.display()
                 ));
             }
+            let theirs = registered_rows(&other.manifest);
+            if let Some(row) = registered_rows(&manifest)
+                .into_iter()
+                .find(|row| theirs.contains(row))
+            {
+                return Err(format!(
+                    "{} and {} both register {row}",
+                    other.dir.display(),
+                    dir.display()
+                ));
+            }
         }
         layers.push(ManifestLayer {
             dir: dir.clone(),
@@ -180,6 +200,57 @@ pub fn manifest_layers(dirs: &[PathBuf]) -> Result<Vec<ManifestLayer>, String> {
         });
     }
     Ok(layers)
+}
+
+/// The layer files `manifest`'s extended-art rows name, as layer paths:
+/// each `[[art]]` file under `art/<category>/`, each `[[protos]]` file
+/// under `proto/<category>/`, and each `[[tile_remap]]` map under `maps/`
+/// and its sidecar.
+fn layer_files(manifest: &ModManifest) -> Vec<String> {
+    let art = manifest.art.iter().map(|row| {
+        let directory = vault_formats::fid::ART_DIRECTORIES
+            .get(usize::from(row.category))
+            .copied()
+            .unwrap_or("?");
+        format!("art/{directory}/{}", row.file)
+    });
+    let protos = manifest.protos.iter().map(|row| {
+        let directory = mod_manifest::PROTO_CATEGORIES
+            .get(usize::from(row.category))
+            .copied()
+            .unwrap_or("?");
+        format!("proto/{directory}/{}", row.file)
+    });
+    let remaps = manifest
+        .tile_remaps
+        .iter()
+        .flat_map(|row| [format!("maps/{}", row.map), row.file.clone()]);
+    art.chain(protos).chain(remaps).collect()
+}
+
+/// What `manifest`'s extended-art rows register, as a conflict names it:
+/// each art row and prototype entry by category and index, and each
+/// remapped map.
+fn registered_rows(manifest: &ModManifest) -> Vec<String> {
+    let art = manifest.art.iter().map(|row| {
+        let directory = vault_formats::fid::ART_DIRECTORIES
+            .get(usize::from(row.category))
+            .copied()
+            .unwrap_or("?");
+        format!("{directory} art row {}", row.index)
+    });
+    let protos = manifest.protos.iter().map(|row| {
+        let directory = mod_manifest::PROTO_CATEGORIES
+            .get(usize::from(row.category))
+            .copied()
+            .unwrap_or("?");
+        format!("{directory} prototype {}", row.index)
+    });
+    let remaps = manifest
+        .tile_remaps
+        .iter()
+        .map(|row| format!("a tile remap of map {}", row.map.to_ascii_lowercase()));
+    art.chain(protos).chain(remaps).collect()
 }
 
 /// The scripts `manifest`'s rows name, lowercased.
@@ -503,6 +574,9 @@ pub fn write_setup(
     manifest.scripts = setup.scripts.into_values().collect();
     manifest.maps = setup.maps.into_values().collect();
     manifest.patches = setup.patches;
+    manifest.art = setup.art.into_values().collect();
+    manifest.protos = setup.protos.into_values().collect();
+    manifest.tile_remaps = setup.tile_remaps.into_values().collect();
     let files: Vec<(String, Vec<u8>)> = setup.files.into_iter().collect();
     mod_manifest::write_mod_folder(output, &manifest, &files)
         .map_err(|error| format!("{}: {error}", output.display()))?;
@@ -891,6 +965,159 @@ mod tests {
             crate::launcher::validate::mods(dir.path(), &entries, LoadOrderPolicy::default());
         assert!(checked.layers[0].is_ok());
         assert!(!checked.layers[1].is_ok());
+    }
+
+    /// `docs/extended-art-namespaces.md` §4 items 1, 3 and 5: each
+    /// extended-art row's file is in its own layer, or the launch stops
+    /// naming the layer's folder and the path, as a script row does.
+    #[test]
+    fn extended_art_rows_need_their_files_in_their_own_layer() {
+        use vault_fixtures::art::manifest as rows;
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let refused = |text: &str, path: &str| {
+            manifest(&a, text);
+            let error = manifest_layers(std::slice::from_ref(&a)).err().unwrap();
+            assert_eq!(
+                error,
+                format!("{}: {path} is not in this layer", a.display())
+            );
+        };
+        let touch = |path: &str| {
+            let path = a.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"").unwrap();
+        };
+        let art = rows("a", &[("scenery", "tc_rock.frm", 5000)], &[], &[]);
+        refused(&art, "art/scenery/tc_rock.frm");
+        touch("art/scenery/TC_ROCK.FRM");
+        assert_eq!(manifest_layers(std::slice::from_ref(&a)).unwrap().len(), 1);
+        let protos = rows("a", &[], &[("items", "00005000.pro", 5000)], &[]);
+        refused(&protos, "proto/items/00005000.pro");
+        touch("proto/items/00005000.pro");
+        assert!(manifest_layers(std::slice::from_ref(&a)).is_ok());
+        let remap = rows("a", &[], &[], &[("tc_hall.map", "maps/tc_hall.tlx")]);
+        refused(&remap, "maps/tc_hall.map");
+        touch("maps/tc_hall.map");
+        refused(&remap, "maps/tc_hall.tlx");
+        touch("maps/tc_hall.tlx");
+        assert!(manifest_layers(std::slice::from_ref(&a)).is_ok());
+    }
+
+    /// §4 items 4 and 5: two layers registering one (category, index), or
+    /// remapping one map, is a conflict naming both folders, as two layers
+    /// naming one script are.
+    #[test]
+    fn two_layers_registering_one_art_row_or_remap_conflict() {
+        use vault_fixtures::art::manifest as rows;
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        for (text, conflict) in [
+            (
+                rows("x", &[("scenery", "r.frm", 5000)], &[], &[]),
+                "scenery art row 5000",
+            ),
+            (
+                rows("x", &[], &[("misc", "00000009.pro", 9)], &[]),
+                "misc prototype 9",
+            ),
+            (
+                rows("x", &[], &[], &[("tc.map", "maps/tc.tlx")]),
+                "a tile remap of map tc.map",
+            ),
+        ] {
+            for layer in [&a, &b] {
+                let _ = std::fs::remove_dir_all(layer);
+                manifest(layer, &text);
+                for path in [
+                    "art/scenery/r.frm",
+                    "proto/misc/00000009.pro",
+                    "maps/tc.map",
+                    "maps/tc.tlx",
+                ] {
+                    let path = layer.join(path);
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(path, b"").unwrap();
+                }
+            }
+            let error = manifest_layers(&[a.clone(), b.clone()]).err().unwrap();
+            assert_eq!(
+                error,
+                format!(
+                    "{} and {} both register {conflict}",
+                    a.display(),
+                    b.display()
+                )
+            );
+        }
+    }
+
+    /// A refused layer stops the launch with `mod_list:` and the layer.
+    #[test]
+    fn a_refused_art_row_stops_the_launch_with_mod_list() {
+        let corpus = crate::map_preview::test_support::synthetic_corpus();
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("tc");
+        manifest(
+            &a,
+            &vault_fixtures::art::manifest("tc", &[("scenery", "gone.frm", 5000)], &[], &[]),
+        );
+        let args = crate::preview::PreviewArgs {
+            corpus_dir: Some(corpus.path().to_path_buf()),
+            preview_map: Some("maps/synthetic.map".into()),
+            player_gcd: Some("premade/synthetic.gcd".into()),
+            mods: Some(ModList::Paths(vec![a.clone()])),
+            headless: true,
+            ..Default::default()
+        };
+        let error = args.load().err().unwrap().to_string();
+        assert_eq!(
+            error,
+            format!(
+                "mod_list: {}: art/scenery/gone.frm is not in this layer",
+                a.display()
+            )
+        );
+    }
+
+    /// The export carries the setup's `[[art]]`, `[[protos]]` and
+    /// `[[tile_remap]]` rows into its manifest.
+    #[test]
+    fn an_export_keeps_the_extended_art_rows() {
+        use vault_formats::mod_manifest::{
+            ArtRegistration, ProtoRegistration, TileRemapRegistration,
+        };
+        let art = ArtRegistration {
+            category: 2,
+            file: "tc_rock.frm".into(),
+            index: 5000,
+        };
+        let proto = ProtoRegistration {
+            category: 0,
+            file: "00005000.pro".into(),
+            index: 5000,
+        };
+        let remap = TileRemapRegistration {
+            map: "tc_hall.map".into(),
+            file: "maps/tc_hall.tlx".into(),
+        };
+        let mut setup = Setup::default();
+        setup.art.insert((2, 5000), art.clone());
+        setup.protos.insert((0, 5000), proto.clone());
+        setup
+            .tile_remaps
+            .insert("tc_hall.map".into(), remap.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("export");
+        let name = ModManifest {
+            name: "tc".into(),
+            ..ModManifest::default()
+        };
+        write_setup(&output, name, setup).unwrap();
+        let written = read_manifest(&output).unwrap().unwrap();
+        assert_eq!(written.art, [art]);
+        assert_eq!(written.protos, [proto]);
+        assert_eq!(written.tile_remaps, [remap]);
     }
 
     /// §2.3's text of each type of setting.

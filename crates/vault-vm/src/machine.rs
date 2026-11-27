@@ -616,7 +616,9 @@ impl Vm {
             // exactly as SPEC-004 requires for any undefined word.
             0x8200..=0x82ff if host.enhanced_opcodes() => host.enhanced_extension(word, self)?,
             // SPEC-024a §7.1: in the set only with manifest scripting on.
-            0x8300..=0x8309 if self.program.words().mods => host.extension(word, self)?,
+            word if crate::extensions::MOD_WORDS.contains(&word) && self.program.words().mods => {
+                host.extension(word, self)?
+            }
             _ => return Err(VmError::Opcode(word)),
         }
         Ok(())

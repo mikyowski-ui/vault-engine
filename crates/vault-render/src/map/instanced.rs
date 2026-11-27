@@ -10,17 +10,19 @@
 //! canvas is drawn as separate views.
 use super::{
     Cutout, FloorLight, ListIndexes, MapArt, MapLight, MapRenderError, MapScene, MapView,
-    TRANSLUCENT, TileLight, check_floor_view, cursor_visited, cutout_parts, draw_sequence,
+    TRANSLUCENT, TileLight,
+    backdrop::{Fade, Layout, Shade, Suppress, floor_level},
+    check_floor_view, cursor_visited, cutout_parts, draw_sequence_with,
     enhanced::{self, RoofPeekParams},
-    floor_squares, frame_rect, overscan_hexes, placement, render_map_scene, roof_squares,
+    floor_squares, frame_rect, overscan_hexes_with, placement, render_map_scene, roof_squares,
     translucent_row,
 };
 use crate::{
     IndexedImage,
     layers::{
-        BatchPlan, CanvasView, CutoutPlace, DrawMode, EXEMPT, FrameCounts, FrameInputs, FrameLayer,
-        HexLightBuffer, InstanceError, LayerUniforms, LightSource, LookupTables, PEEK, RenderPath,
-        SortKey, SpriteImage, SpriteInstance, execute_plan,
+        BACKDROP_FLOOR_PRIMARY, BatchPlan, CanvasView, CutoutPlace, DrawMode, EXEMPT, FrameCounts,
+        FrameInputs, FrameLayer, HexLightBuffer, InstanceError, LayerUniforms, LightSource,
+        LookupTables, PEEK, RenderPath, SELECT, SortKey, SpriteImage, SpriteInstance, execute_plan,
         gpu::{GpuDevice, GpuExecutor},
     },
     outline::{OutlineInk, opaque_paint, ring},
@@ -54,10 +56,29 @@ impl DrawRecord {
             part,
         }
     }
+    /// The list index of a backdrop group's record: no list index reaches
+    /// it (they are below 2^29).
+    pub const BACKDROP_INDEX: u32 = u32::MAX;
+    /// A pre-rendered backdrop's floor pass: layer 0 after every square.
+    pub fn backdrop_floor() -> Self {
+        Self::new(FrameLayer::Floor, BACKDROP_FLOOR_PRIMARY, 0, 0)
+    }
+    /// A pre-rendered backdrop's group of hex `hex`, in the upright layer
+    /// after the objects of that hex.
+    pub fn backdrop_group(hex: u32) -> Self {
+        Self::new(FrameLayer::Upright, hex, Self::BACKDROP_INDEX, 0)
+    }
+    /// Whether this is a backdrop group's record.
+    pub fn is_backdrop_group(&self) -> bool {
+        self.layer == FrameLayer::Upright && self.index == Self::BACKDROP_INDEX
+    }
     /// The record a sort key stands for.
     pub fn of_key(key: SortKey) -> Result<Self, InstanceError> {
         let layer = FrameLayer::from_index(key.layer())?;
         let (primary, secondary) = (key.primary(), key.secondary());
+        if key.is_backdrop_group() {
+            return Ok(Self::backdrop_group(primary));
+        }
         Ok(match layer {
             FrameLayer::Floor | FrameLayer::Roof => Self::new(layer, primary, 0, secondary as u8),
             FrameLayer::Flat | FrameLayer::Upright | FrameLayer::Outline => {
@@ -208,6 +229,13 @@ impl<'a> Builder<'a> {
             last.aux = aux;
         }
     }
+    /// The last instance's level image (a [`SELECT`] selector), read from
+    /// its pixel (0, 0) at the instance's corner.
+    fn set_selector(&mut self, image: usize) {
+        if let Some(last) = self.instances.last_mut() {
+            last.level = Some((image, [0, 0]));
+        }
+    }
 }
 
 /// An instance's light, before it is encoded.
@@ -338,6 +366,49 @@ pub fn gather_map_frame<'a, A: MapArt>(
         }
     }
 
+    // Layer 0, after every square: the backdrop's floor pass, each pixel
+    // lit at the level of the hex under it.
+    let backdrop = scene
+        .backdrop
+        .and_then(|backdrop| Layout::of(backdrop, view));
+    if let Some(floor) = backdrop.as_ref().and_then(|layout| layout.floor.as_ref()) {
+        let [width, height] = floor.size();
+        let corner = [i64::from(floor.rect[0]), i64::from(floor.rect[1])];
+        let rect = floor.rect.map(i64::from);
+        let image = builder.owned(SpriteImage::new(
+            width,
+            height,
+            floor.image(|pixel| pixel.colour),
+        ));
+        let key = SortKey::backdrop_floor();
+        if lit {
+            let levels =
+                floor.image(|pixel| floor_level(scene.light, view.grid, [pixel.x, pixel.y]));
+            let levels = builder.owned(SpriteImage::new(width, height, levels));
+            builder.push(
+                key,
+                image,
+                corner,
+                rect,
+                DrawMode::FloorMap,
+                EXEMPT,
+                Light::Level(levels),
+                clip,
+            );
+        } else {
+            builder.push(
+                key,
+                image,
+                corner,
+                rect,
+                DrawMode::Plain,
+                0,
+                Light::None,
+                clip,
+            );
+        }
+    }
+
     // Layers 1 and 2: the flat and upright passes.
     let elevation = &objects.elevations[view.elevation as usize];
     let cutout = scene.cutout.and_then(|cut| Some((cut, cut.origin(view)?)));
@@ -353,15 +424,16 @@ pub fn gather_map_frame<'a, A: MapArt>(
         };
         Ok(Some((frame, placement(view, frame, shift, object)?.0)))
     };
+    let suppress = Suppress::of(scene.backdrop, view);
     let extra = if scene.overscan {
-        overscan_hexes(view, elevation, art)
+        overscan_hexes_with(view, elevation, art, suppress.as_ref())
     } else {
         Vec::new()
     };
     let cursor = scene
         .cursor
         .filter(|cursor| cursor_visited(view, cursor.hex, &extra));
-    let (placed, hexless) = draw_sequence(view, elevation, &extra);
+    let (placed, hexless) = draw_sequence_with(view, elevation, &extra, suppress.as_ref());
     let lists = ListIndexes::new(elevation);
     let mut outlines: Vec<(&FrmFrame, [i64; 2], OutlineInk)> = Vec::new();
     let mut highlights = Vec::new();
@@ -427,6 +499,56 @@ pub fn gather_map_frame<'a, A: MapArt>(
             && let Some(ink) = scene.outlines.and_then(|inks| inks.ink(word))
         {
             highlights.push((frame, origin, ink));
+        }
+    }
+
+    // Layer 2: the backdrop groups, each keyed after its hex's objects. The
+    // cursor fade's removed pixels are left out of the image; the player
+    // fade's pixels are selected for the masked blend.
+    if let Some(layout) = &backdrop {
+        let fade = Fade::new(view, &scene);
+        for (hex, group) in &layout.groups {
+            let shade = |pixel: &super::backdrop::Pixel| {
+                fade.shade(*hex, pixel.fade, [pixel.x, pixel.y].map(i64::from))
+            };
+            let [width, height] = group.size();
+            let corner = [i64::from(group.rect[0]), i64::from(group.rect[1])];
+            let rect = group.rect.map(i64::from);
+            let colour = group.image(|pixel| match shade(pixel) {
+                Shade::Removed => 0,
+                _ => pixel.colour,
+            });
+            let masked = group
+                .pixels
+                .iter()
+                .any(|pixel| matches!(shade(pixel), Shade::Masked(_)));
+            let image = builder.owned(SpriteImage::new(width, height, colour));
+            let key = SortKey::backdrop_group(u32::from(*hex))?;
+            let light = if lit {
+                hex_light(i32::from(*hex))
+            } else {
+                Light::None
+            };
+            if masked {
+                let selector =
+                    group.image(|pixel| u8::from(matches!(shade(pixel), Shade::Masked(_))));
+                let selector = builder.owned(SpriteImage::new(width, height, selector));
+                builder.push(
+                    key,
+                    image,
+                    corner,
+                    rect,
+                    DrawMode::Egg,
+                    EXEMPT | SELECT,
+                    light,
+                    clip,
+                );
+                builder.set_selector(selector);
+            } else if lit {
+                builder.push(key, image, corner, rect, DrawMode::Lit, EXEMPT, light, clip);
+            } else {
+                builder.push(key, image, corner, rect, DrawMode::Plain, 0, light, clip);
+            }
         }
     }
 
@@ -1082,6 +1204,7 @@ mod tests {
             shroud: None,
             overscan: false,
             highlight: None,
+            backdrop: None,
         }
     }
 

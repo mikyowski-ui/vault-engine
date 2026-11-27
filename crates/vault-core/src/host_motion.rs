@@ -1168,8 +1168,16 @@ impl<A: WorldAssets> WorldHost<A> {
         let Some(art) = self.world.get(item).map(|object| Fid(object.raw.art_id)) else {
             return Vec::new();
         };
-        self.assets
-            .art_token(art.category(), art.base())
+        // SPEC-007 §2.1.1: an extended identifier names its wide row.
+        let token = if matches!(art.category(), 1 | 8) {
+            self.assets.art_token(art.category(), art.base())
+        } else if self.assets.art_extended(art.0) {
+            self.assets.art_row_token(art.category(), art.wide_base())
+        } else {
+            self.assets
+                .art_row_token(art.category(), u32::from(art.base()))
+        };
+        token
             .map(|name| {
                 let stem = name
                     .iter()

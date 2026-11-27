@@ -382,6 +382,16 @@ impl<A: WorldAssets> WorldHost<A> {
                 None
             }
             0x8309 => Some(SfallValue::Int(self.sfall_mode_bits() as i32)),
+            // Revision 5: `mod_art_fid(category, row)`, the canonical FID of
+            // a resolved list row (SPEC-007 §2.1.1), or -1 when no
+            // identifier addresses it.
+            0x830a => {
+                let fid = u8::try_from(int(0))
+                    .ok()
+                    .zip(u32::try_from(int(1)).ok())
+                    .and_then(|(category, row)| self.assets.art_fid(category, row));
+                Some(SfallValue::Int(fid.map_or(-1, |fid| fid as i32)))
+            }
             _ => None,
         }
     }

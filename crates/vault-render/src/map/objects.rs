@@ -1,7 +1,9 @@
 #[cfg(doc)]
 use super::MapScene;
 use super::{
-    MapArt, MapView, enhanced,
+    MapArt, MapView,
+    backdrop::{BackdropView, Suppress},
+    enhanced,
     lighting::{NO_TRANSLUCENCY, TRANSLUCENCY},
     roof::{Cutout, RoofCutaway},
 };
@@ -99,15 +101,30 @@ pub(super) fn visited_hexes(view: MapView) -> impl Iterator<Item = i32> {
 /// hexes are not drawn. The second list holds the objects without a hex,
 /// drawn last. The `extra` hexes ([`overscan_hexes`], empty in Vanilla)
 /// are visited too, merged into the ascending order.
+#[cfg(test)]
 pub(super) fn draw_sequence(
     view: MapView,
     objects: &[MapObject],
     extra: &[i32],
 ) -> (Vec<usize>, Vec<usize>) {
+    draw_sequence_with(view, objects, extra, None)
+}
+
+/// [`draw_sequence`] skipping, as it skips hidden objects, the objects a
+/// backdrop suppresses: they are not drawn, outlined or picked, and keep
+/// their list positions ([`ListIndexes`] counts them).
+pub(super) fn draw_sequence_with(
+    view: MapView,
+    objects: &[MapObject],
+    extra: &[i32],
+    suppress: Option<&Suppress>,
+) -> (Vec<usize>, Vec<usize>) {
     let mut placed: Vec<(i32, bool, usize)> = Vec::new();
     let mut hexless = Vec::new();
     for (index, object) in objects.iter().enumerate() {
-        if object.flags.contains(BasicFlags::HIDDEN) {
+        if object.flags.contains(BasicFlags::HIDDEN)
+            || suppress.is_some_and(|suppress| suppress.hides(object))
+        {
             continue;
         }
         match object.hex {
@@ -150,11 +167,24 @@ pub(super) fn cursor_visited(view: MapView, hex: i32, extra: &[i32]) -> bool {
 /// window's margins (320 pixels each side, 240 above and below): the
 /// margin is each sprite's own extent, so no sprite is cut at a seam. The
 /// global ascending hex order keeps the tiles' overlaps consistent.
+#[cfg(test)]
 pub(super) fn overscan_hexes(view: MapView, objects: &[MapObject], art: &impl MapArt) -> Vec<i32> {
+    overscan_hexes_with(view, objects, art, None)
+}
+
+/// [`overscan_hexes`] without the objects a backdrop suppresses (they are
+/// not drawn, as hidden objects are not).
+pub(super) fn overscan_hexes_with(
+    view: MapView,
+    objects: &[MapObject],
+    art: &impl MapArt,
+    suppress: Option<&Suppress>,
+) -> Vec<i32> {
     let (width, height) = (i64::from(view.width), i64::from(view.height));
     objects
         .iter()
         .filter(|object| !object.flags.contains(BasicFlags::HIDDEN))
+        .filter(|object| suppress.is_none_or(|suppress| !suppress.hides(object)))
         .filter_map(|object| {
             let hex = object.hex?;
             let category = Category::from_pid(object.pid).ok()?;
@@ -299,7 +329,47 @@ pub fn pick_candidates(
     point: [i32; 2],
     cutout: Option<&Cutout>,
 ) -> Option<Vec<(u32, bool)>> {
-    pick_with(map, objects, view, art, point, cutout, None, false)
+    pick_with(map, objects, view, art, point, cutout, None, false, None)
+}
+
+/// [`pick_candidates`] over a scene with a pre-rendered `backdrop` (brief
+/// §3.8.5-6): an object the backdrop suppresses is never a candidate, and
+/// a sprite pixel is not a hit where the backdrop draws a group pixel
+/// (colour not 0, depth at least 1) that is drawn after the object: a
+/// group of hex B covers an upright object on hex h when B ≥ h (ties
+/// covering, as a group draws after its hex's objects) and every flat
+/// object (the flat pass draws before every group). Fading never
+/// uncovers a pixel. Without a backdrop this is [`pick_candidates`].
+pub fn pick_candidates_backdrop(
+    map: &MapFile,
+    objects: &MapObjects,
+    view: MapView,
+    art: &impl MapArt,
+    point: [i32; 2],
+    cutout: Option<&Cutout>,
+    backdrop: Option<&BackdropView>,
+) -> Option<Vec<(u32, bool)>> {
+    pick_with(
+        map, objects, view, art, point, cutout, None, false, backdrop,
+    )
+}
+
+/// [`pick_candidates_cut`] over a scene with a pre-rendered `backdrop`, as
+/// [`pick_candidates_backdrop`] picks.
+#[allow(clippy::too_many_arguments)]
+pub fn pick_candidates_cut_backdrop(
+    map: &MapFile,
+    objects: &MapObjects,
+    view: MapView,
+    art: &impl MapArt,
+    point: [i32; 2],
+    cutout: Option<&Cutout>,
+    cutaway: Option<RoofCutaway>,
+    backdrop: Option<&BackdropView>,
+) -> Option<Vec<(u32, bool)>> {
+    pick_with(
+        map, objects, view, art, point, cutout, cutaway, true, backdrop,
+    )
 }
 
 /// [`pick_candidates`] with the `enhanced` roof cutaway: a roof pixel the
@@ -316,7 +386,7 @@ pub fn pick_candidates_cut(
     cutout: Option<&Cutout>,
     cutaway: Option<RoofCutaway>,
 ) -> Option<Vec<(u32, bool)>> {
-    pick_with(map, objects, view, art, point, cutout, cutaway, true)
+    pick_with(map, objects, view, art, point, cutout, cutaway, true, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -329,6 +399,7 @@ fn pick_with(
     cutout: Option<&Cutout>,
     cutaway: Option<RoofCutaway>,
     overscan: bool,
+    backdrop: Option<&BackdropView>,
 ) -> Option<Vec<(u32, bool)>> {
     if view.elevation > 2 {
         return None;
@@ -345,12 +416,15 @@ fn pick_with(
     }
     let mut hits = Vec::new();
     let objects = &objects.elevations[view.elevation as usize];
+    let suppress = Suppress::of(backdrop, view);
     let extra = if overscan {
-        overscan_hexes(view, objects, art)
+        overscan_hexes_with(view, objects, art, suppress.as_ref())
     } else {
         Vec::new()
     };
-    let (placed, hexless) = draw_sequence(view, objects, &extra);
+    let (placed, hexless) = draw_sequence_with(view, objects, &extra, suppress.as_ref());
+    // The backdrop group drawn at the point, if any.
+    let covering = backdrop.and_then(|backdrop| backdrop.group_at(view, point));
     // Frontmost first: the reverse of the drawing order.
     for index in placed.into_iter().chain(hexless).rev() {
         let object = &objects[index];
@@ -368,6 +442,11 @@ fn pick_with(
             continue;
         };
         if sample(frame, origin) {
+            if let (Some(group), Some(hex)) = (covering, object.hex)
+                && (object.flags.contains(BasicFlags::FLAT) || i32::from(group) >= hex)
+            {
+                continue;
+            }
             let bits = object.flags.0 & TRANSLUCENCY;
             let translucent = bits != 0 && bits != NO_TRANSLUCENCY;
             let inside = in_mask

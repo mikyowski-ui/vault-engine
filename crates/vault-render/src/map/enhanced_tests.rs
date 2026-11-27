@@ -207,6 +207,7 @@ fn render_with(
         shroud,
         overscan: false,
         highlight: None,
+        backdrop: None,
     };
     draw_map_scene(&mut image, &map, &objects, view, &art, layers).unwrap();
     image

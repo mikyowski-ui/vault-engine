@@ -11,13 +11,18 @@ use vault_formats::{
     pro::{BasicFlags, Category},
 };
 
+mod backdrop;
 mod enhanced;
 mod instanced;
 mod lighting;
 mod objects;
 mod roof;
 mod tiles;
-use crate::layers::{FrameLayer, SHROUD_PRIMARY, SortKey};
+use crate::layers::{BACKDROP_FLOOR_PRIMARY, FrameLayer, SHROUD_PRIMARY, SortKey};
+pub use backdrop::{
+    BACKDROP_DEPTH_MAX, BackdropTile, BackdropView, backdrop_chunks, backdrop_rect,
+};
+use backdrop::{Fade, Layout, Suppress, draw_floor, draw_group};
 pub use enhanced::{
     BAYER, RoofPeekParams, ShroudCell, ShroudField, ShroudRecording, Vignette, bayer, draw_shroud,
     draw_vignette, record_shroud, roof_hides, shroud_dark,
@@ -26,10 +31,12 @@ pub use instanced::{DrawRecord, MapFrame, RefreshReport, SceneRenderer, gather_m
 pub use lighting::MapLight;
 use lighting::{FloorLight, Pens, TRANSLUCENT, TileLight, translucent_row};
 pub(crate) use objects::ListIndexes;
-use objects::{cursor_visited, draw_sequence, overscan_hexes, placement};
+use objects::{cursor_visited, draw_sequence_with, overscan_hexes_with, placement};
+#[cfg(test)]
+use objects::{draw_sequence, overscan_hexes};
 pub use objects::{
-    object_sprite, pick_candidates, pick_candidates_cut, pick_object, pick_objects,
-    pick_objects_with,
+    object_sprite, pick_candidates, pick_candidates_backdrop, pick_candidates_cut,
+    pick_candidates_cut_backdrop, pick_object, pick_objects, pick_objects_with,
 };
 pub(crate) use roof::cutout_parts;
 use roof::roof_squares;
@@ -145,6 +152,12 @@ pub struct MapScene<'a> {
     /// word, after the outlines and outside their list of 100, so the
     /// Vanilla outlines never change. `None` in Vanilla.
     pub highlight: Option<u32>,
+    /// The pre-rendered backdrop under this refresh, for the view's
+    /// elevation (`None`: none, and the refresh is drawn as without the
+    /// field). Its depth-0 pixels draw at the end of the floor, each group
+    /// in the upright pass after its hex's objects; it suppresses the
+    /// objects it lists.
+    pub backdrop: Option<&'a BackdropView<'a>>,
 }
 
 /// The `enhanced` preset's shroud: view pixels over hexes outside the
@@ -286,15 +299,16 @@ fn draw_map_scene_recorded(
         };
         Ok(Some((frame, placement(view, frame, shift, object)?.0)))
     };
+    let suppress = Suppress::of(scene.backdrop, view);
     let extra = if scene.overscan {
-        overscan_hexes(view, objects, art)
+        overscan_hexes_with(view, objects, art, suppress.as_ref())
     } else {
         Vec::new()
     };
     let cursor = scene
         .cursor
         .filter(|cursor| cursor_visited(view, cursor.hex, &extra));
-    let (placed, hexless) = draw_sequence(view, objects, &extra);
+    let (placed, hexless) = draw_sequence_with(view, objects, &extra, suppress.as_ref());
     // The list indexes, only when recording.
     let lists = record.is_some().then(|| ListIndexes::new(objects));
     let canvas = [0, 0, i64::from(image.width()), i64::from(image.height())];
@@ -303,10 +317,38 @@ fn draw_map_scene_recorded(
             record(DrawRecord::new(layer, primary as u32, index, part));
         }
     };
+    // The backdrop: its floor pass ends the floor layer, and its groups
+    // join the upright pass, each after the objects of its hex.
+    let backdrop = scene
+        .backdrop
+        .and_then(|backdrop| Layout::of(backdrop, view));
+    let fade = Fade::new(view, &scene);
+    if let Some(floor) = backdrop.as_ref().and_then(|layout| layout.floor.as_ref()) {
+        draw_floor(image, floor, &pens, scene.light, view.grid);
+        log(FrameLayer::Floor, BACKDROP_FLOOR_PRIMARY.into(), 0, 0);
+    }
+    let mut groups = backdrop
+        .as_ref()
+        .map(|layout| layout.groups.iter().peekable());
     let mut outlines = Vec::new();
     let mut highlights = Vec::new();
     for index in placed {
         let object = &objects[index];
+        // Every group of a lower hex draws before an upright object.
+        if !object.flags.contains(BasicFlags::FLAT)
+            && let Some(groups) = groups.as_mut()
+        {
+            let hex = object.hex.unwrap_or_default();
+            while let Some((group_hex, group)) = groups.next_if(|(at, _)| i32::from(**at) < hex) {
+                draw_group(image, *group_hex, group, &pens, scene.light, &fade);
+                log(
+                    FrameLayer::Upright,
+                    (*group_hex).into(),
+                    DrawRecord::BACKDROP_INDEX,
+                    0,
+                );
+            }
+        }
         let Some((frame, origin)) = sprite(object)? else {
             continue;
         };
@@ -350,6 +392,17 @@ fn draw_map_scene_recorded(
         {
             highlights.push((frame, origin, ink));
         }
+    }
+    // The groups after the last upright object, and those of hexes the
+    // pass did not visit, before the roofs.
+    for (group_hex, group) in groups.into_iter().flatten() {
+        draw_group(image, *group_hex, group, &pens, scene.light, &fade);
+        log(
+            FrameLayer::Upright,
+            (*group_hex).into(),
+            DrawRecord::BACKDROP_INDEX,
+            0,
+        );
     }
     if view.roofs {
         let ambient = scene
@@ -471,6 +524,8 @@ use tiles::square_order;
 use vault_fixtures::world as fixture;
 #[cfg(test)]
 use vault_formats::Palette;
+#[cfg(test)]
+mod backdrop_tests;
 #[cfg(test)]
 mod enhanced_tests;
 #[cfg(test)]

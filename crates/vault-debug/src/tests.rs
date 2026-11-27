@@ -1080,6 +1080,7 @@ fn spec024a_mod_words_decode_with_their_names() {
         (0x8307, "mod_set_hook_arg"),
         (0x8308, "mod_set_hook_return"),
         (0x8309, "mod_game_mode"),
+        (0x830a, "mod_art_fid"),
     ] {
         assert_eq!(classify_in(&words, word), Some(OpcodeClass::Game));
         assert_eq!(classify_in(&WordSet::FALLOUT2, word), None, "{word:#06x}");
@@ -1089,7 +1090,7 @@ fn spec024a_mod_words_decode_with_their_names() {
         assert_eq!(instruction.mnemonic(), name);
         assert_eq!(instruction.text(), format!("{name} {word:#06x}"));
     }
-    for word in [0x82ff, 0x830a] {
+    for word in [0x82ff, 0x830b] {
         assert_eq!(classify_in(&words, word), None, "{word:#06x}");
         assert_eq!(
             decode_in(&op(word), 0, &words),
@@ -1102,7 +1103,7 @@ fn spec024a_mod_words_decode_with_their_names() {
     // A word in no catalog keeps its old rendering.
     let bogus = Instruction {
         address: 0,
-        word: 0x830a,
+        word: 0x830b,
         immediate: None,
         mode: None,
     };
@@ -1228,7 +1229,7 @@ fn the_session_decides_what_a_word_means() {
     assert_eq!(mnemonic_with(sfall, 0xc001), "push.int");
 }
 
-/// SPEC-024a §7.1: `0x8300`-`0x8309` under manifest scripting, in either
+/// SPEC-024a §7.1: `0x8300`-`0x830A` under manifest scripting, in either
 /// profile and with or without sfall mode, and the rest of the range never.
 #[test]
 fn mod_words_follow_manifest_scripting_in_every_mode() {
@@ -1244,7 +1245,7 @@ fn mod_words_follow_manifest_scripting_in_every_mode() {
             let first = decode_with(&op(0x8300), 0, mode).unwrap();
             assert_eq!(first.text(), "mod_api_version 0x8300");
             assert_eq!(first.class(), OpcodeClass::Game);
-            for word in [0x830a, 0x83ff] {
+            for word in [0x830b, 0x83ff] {
                 assert_eq!(classify_with(mode, word), None, "{word:#06x}");
             }
         }

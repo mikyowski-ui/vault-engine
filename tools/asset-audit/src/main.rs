@@ -25,8 +25,8 @@ use vault_core::{
     worldmap,
 };
 use vault_formats::{
-    ArtCatalog, Fid, LocalDirProvider, LocalPrototypeCatalog, MAX_ASSET_BYTES, MapFile, MsgCatalog,
-    Prototype, Vfs, VfsPath,
+    ArtCatalog, Fid, FidError, LocalDirProvider, LocalPrototypeCatalog, MAX_ASSET_BYTES, MapFile,
+    MsgCatalog, Prototype, Vfs, VfsPath,
     map::MapObject,
     pro::{BasicFlags, ItemData, PrototypeData},
     savegame::SaveGame,
@@ -100,7 +100,11 @@ struct Args {
     /// Resolve every PRO/MAP art identifier through the SPEC-007 filename
     /// codec. Identifiers whose file is absent are reported as `MISSING`
     /// (not fatal); identifiers the codec rejects and PRO/MAP files that
-    /// cannot be read or parsed fail.
+    /// cannot be read or parsed fail. Extended identifiers (bit 31, lists
+    /// past 4,096 rows) resolve against the lists as served; one past its
+    /// list is `MISSING`. Each list past 4,096 rows is reported with its
+    /// first unreachable row, which does not change the exit status. Only
+    /// `--corpus-dir` is mounted, with no mod layers or manifests.
     #[arg(long)]
     validate_art_ids: bool,
     /// Re-serialize every PRO and MAP through the SPEC-003 writers.
@@ -430,11 +434,15 @@ fn map_art(object: &MapObject, art: &mut Vec<(&'static str, u32)>) {
     }
 }
 
+/// Counts per source, and the long-list diagnostics.
+type ArtIdAudit = ([[u64; 4]; 2], Vec<String>);
+
 /// Per source (`.pro`, `.map`): identifiers whose decoded file exists, whose
 /// decoded file is absent from this corpus, that the codec rejects, and
 /// source files that cannot be read or parsed (each reported, and the
-/// audit continues with the next file).
-fn audit_art_ids(vfs: &LocalDirProvider) -> Result<[[u64; 4]; 2], Box<dyn Error>> {
+/// audit continues with the next file). Also returns the catalog's
+/// diagnostics: one line per list with more than 4,096 rows.
+fn audit_art_ids(vfs: &LocalDirProvider) -> Result<ArtIdAudit, Box<dyn Error>> {
     let catalog = ArtCatalog::load(vfs)?;
     let prototypes = LocalPrototypeCatalog::new(vfs);
     let files: BTreeSet<&str> = vfs.files().map(VfsPath::as_str).collect();
@@ -471,8 +479,15 @@ fn audit_art_ids(vfs: &LocalDirProvider) -> Result<[[u64; 4]; 2], Box<dyn Error>
             }
         };
         for (field, fid) in art {
-            match catalog
-                .path(Fid(fid))
+            let resolved = catalog.path(Fid(fid));
+            // An extended identifier past its list (or on an empty gap row)
+            // has no filename: missing art, not an invalid identifier.
+            if let Err(error @ FidError::MissingRow { .. }) = &resolved {
+                counts[source][1] += 1;
+                eprintln!("MISSING {path}: {field} {fid:#010x}: {error}");
+                continue;
+            }
+            match resolved
                 .map_err(|error| error.to_string())
                 .and_then(|art| VfsPath::new(&art).map_err(|error| error.to_string()))
             {
@@ -488,7 +503,7 @@ fn audit_art_ids(vfs: &LocalDirProvider) -> Result<[[u64; 4]; 2], Box<dyn Error>
             }
         }
     }
-    Ok(counts)
+    Ok((counts, catalog.diagnostics().to_vec()))
 }
 
 /// SPEC-008 corpus checks. Returns maps entered, working `.SAV` files that
@@ -1304,7 +1319,11 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
     }
     if args.validate_art_ids {
         failures.run("Art identifiers", "art identifier check(s)", || {
-            let counts = audit_art_ids(&vfs)?;
+            let (counts, long_lists) = audit_art_ids(&vfs)?;
+            // Report only (owner decision): these lines never fail the audit.
+            for line in &long_lists {
+                println!("Art list: {line}");
+            }
             println!("art-id source\tresolved\tmissing\tinvalid\tunreadable");
             for (source, [resolved, missing, invalid, unreadable]) in
                 ["pro", "map"].iter().zip(counts)
@@ -1315,6 +1334,9 @@ fn audit(args: Args) -> Result<(), Box<dyn Error>> {
                 std::array::from_fn(|column| counts[0][column] + counts[1][column]);
             println!("Art identifiers: {resolved} resolved, {missing} missing, {invalid} invalid");
             println!("Art-id source files: {unreadable} unreadable");
+            if !long_lists.is_empty() {
+                println!("Art lists past 4,096 rows: {}", long_lists.len());
+            }
             // Missing files are reported, not failed: the reference
             // guarantees no fallback resource.
             Ok(invalid + unreadable)

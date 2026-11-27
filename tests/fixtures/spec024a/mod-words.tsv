@@ -9,3 +9,4 @@ word	mnemonic	pops	push	arg_classes	ret_class	pop_order
 0x8307	mod_set_hook_arg	2	0	I,A	-	value,index
 0x8308	mod_set_hook_return	2	0	I,A	-	value,index
 0x8309	mod_game_mode	0	1	-	I	none
+0x830A	mod_art_fid	2	1	I,I	I	row,category

@@ -575,6 +575,11 @@ pub struct Config {
     /// a rewrite keeps the file's own line, and nothing the engine chose
     /// (such as `--render-path`) is ever written here, logged or saved.
     pub render_path: Option<RenderPath>,
+    /// `backdrop_cache_mib`: the decoded pre-rendered backdrop chunks a
+    /// world keeps, in MiB, a whole number from 1 to 1024 (default 64,
+    /// `docs/prerendered-backdrop-cutaway.md` §3.10). It changes no output,
+    /// so a replay ignores it like every setting.
+    pub backdrop_cache_mib: Option<u32>,
     /// The active scope's `sfall` (SPEC-024b §3.1), like [`Self::mod_list`].
     pub sfall: Option<bool>,
     /// SPEC-020 §2.4: the edition a player last chose, kept as written, so
@@ -1094,6 +1099,23 @@ impl Config {
                     format!("`render_path` is \"reference\" or \"instanced\", not \"{text}\"")
                 })?);
             }
+            "backdrop_cache_mib" => {
+                let range = crate::map_preview::BACKDROP_CACHE_MIB_RANGE;
+                let expects = format!(
+                    "`backdrop_cache_mib` is a whole number from {} to {}",
+                    range.start(),
+                    range.end()
+                );
+                let Value::Integer(mib) = value else {
+                    return Err(expects);
+                };
+                self.backdrop_cache_mib = Some(
+                    u32::try_from(mib)
+                        .ok()
+                        .filter(|mib| range.contains(mib))
+                        .ok_or_else(|| format!("{expects}, not {mib}"))?,
+                );
+            }
             "last_played" => match value {
                 Value::String(text) => self.last_played = Some(text),
                 other => self.unknown.push((key.to_owned(), other)),
@@ -1246,6 +1268,9 @@ impl Config {
         }
         if let Some(path) = self.render_path {
             line("render_path", quote(path.name()));
+        }
+        if let Some(mib) = self.backdrop_cache_mib {
+            line("backdrop_cache_mib", mib.to_string());
         }
         if let Some(text) = &self.last_played {
             line("last_played", quote(text));
@@ -1985,7 +2010,7 @@ impl SettingsLines {
     }
 }
 
-const KNOWN: [&str; 24] = [
+const KNOWN: [&str; 25] = [
     "master_dat",
     "critter_dat",
     "data_root",
@@ -2007,6 +2032,7 @@ const KNOWN: [&str; 24] = [
     "camera_follow",
     "camera_recenter_margin",
     "render_path",
+    "backdrop_cache_mib",
     "load_order",
     "last_played",
     "hotkey_hints",
@@ -2949,6 +2975,51 @@ future_float = 5e-1
             let error = Config::parse(&format!("audio = true\n{text}")).unwrap_err();
             assert_eq!(error.line, 2, "{text}");
             assert!(error.to_string().contains(message), "{text}: {error}");
+        }
+    }
+
+    /// `backdrop_cache_mib` (`docs/prerendered-backdrop-cutaway.md`
+    /// §3.10, question 8): a whole number from 1 to 1024 parses and
+    /// survives a rewrite, a file without one gets none, and anything else
+    /// names its line.
+    #[test]
+    fn the_backdrop_cache_budget_parses_round_trips_and_names_bad_values() {
+        assert_eq!(Config::default().backdrop_cache_mib, None);
+        for mib in [1, 64, 1024] {
+            let text = format!("backdrop_cache_mib = {mib}");
+            let config = Config::parse(&text).unwrap();
+            assert_eq!(config.backdrop_cache_mib, Some(mib), "{text}");
+            assert!(config.unknown.is_empty());
+            let written = config.to_toml().unwrap();
+            assert!(
+                written.contains(&format!("backdrop_cache_mib = {mib}\n")),
+                "{written}"
+            );
+            assert_eq!(Config::parse(&written).unwrap(), config);
+        }
+        let written = Config::parse("audio = true\n").unwrap().to_toml().unwrap();
+        assert!(!written.contains("backdrop_cache_mib"), "{written}");
+        assert_eq!(
+            Config::parse("backdrop_cache_mib = 8\nbackdrop_cache_mib = 9")
+                .unwrap_err()
+                .to_string(),
+            "line 2: duplicate key `backdrop_cache_mib`"
+        );
+        for text in [
+            "backdrop_cache_mib = 0",
+            "backdrop_cache_mib = 1025",
+            "backdrop_cache_mib = -4",
+            "backdrop_cache_mib = 9.5",
+            "backdrop_cache_mib = \"64\"",
+        ] {
+            let error = Config::parse(&format!("audio = true\n{text}")).unwrap_err();
+            assert_eq!(error.line, 2, "{text}");
+            assert!(
+                error
+                    .to_string()
+                    .contains("`backdrop_cache_mib` is a whole number from 1 to 1024"),
+                "{text}: {error}"
+            );
         }
     }
 

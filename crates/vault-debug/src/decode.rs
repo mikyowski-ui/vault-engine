@@ -61,7 +61,7 @@ pub enum OpcodeClass {
     Library,
     /// `0x80A1`-`0x8155`, game-specific extensions (to `0x8183` in a
     /// Fallout 2 program, SPEC-017 §2.1), and SPEC-024a §7.3's
-    /// `0x8300`-`0x8309` under manifest scripting.
+    /// `0x8300`-`0x830A` under manifest scripting.
     Game,
     /// `0x8200`-`0x82FF` with the enhanced range on, the words sfall mode
     /// leaves to it included (SPEC-017 §2.2, SPEC-024b §3.2). Sfall mode's
@@ -141,7 +141,7 @@ pub fn classify_in(words: &WordSet, word: u16) -> Option<OpcodeClass> {
     }
 }
 /// [`classify_in`] for a session: its word set first, as the VM dispatches
-/// (SPEC-024b §3.2), then the enhanced range. `0x830A` and up stay refused in
+/// (SPEC-024b §3.2), then the enhanced range. `0x830B` and up stay refused in
 /// every session (SPEC-024a §7.1).
 pub fn classify_with(mode: DecodeMode, word: u16) -> Option<OpcodeClass> {
     classify_in(&mode.words(), word).or_else(|| {

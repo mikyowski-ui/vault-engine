@@ -41,6 +41,25 @@
 //! file = "data/mymod/towns.patch.txt"
 //! ```
 //!
+//! Art and prototype rows past the base list files, and a map's tile remap
+//! sidecar (`docs/extended-art-namespaces.md` §2.2):
+//!
+//! ```toml
+//! [[art]]
+//! category = "scenery"      # an ART_DIRECTORIES name
+//! file = "tc_rock1.frm"    # a list name, under art/scenery/
+//! index = 5000              # the list row; past the base list, unique across mods
+//!
+//! [[protos]]
+//! category = "items"        # a SPEC-003 §2.1 prototype category name
+//! file = "00005000.pro"     # under proto/items/
+//! index = 5000              # the one-based entry number
+//!
+//! [[tile_remap]]
+//! map = "tc_hall.map"       # under maps/
+//! file = "maps/tc_hall.tlx" # the VTLX sidecar (crate::tile_remap)
+//! ```
+//!
 //! And it may attach `.INT` scripts to the engine's hook points (SPEC-024a
 //! §2.2), which turns manifest scripting on:
 //!
@@ -95,6 +114,29 @@ pub const MAX_LOCALS: u32 = 1_000_000;
 /// A registered map's `number` range: past SPEC-008 §3.10's table of 66
 /// maps, within a save's 16-bit map number.
 pub const MAP_NUMBERS: std::ops::RangeInclusive<u32> = 66..=0xffff;
+/// A registered art row's `index` range (an extended identifier's 24-bit
+/// row).
+pub const ART_INDEXES: std::ops::RangeInclusive<u32> = 0..=0x00ff_ffff;
+/// The art `index` range for critters and heads, which stay capped at the
+/// 4,096 rows plain identifiers address.
+pub const CAPPED_ART_INDEXES: std::ops::RangeInclusive<u32> = 0..=4095;
+/// A registered prototype's `index` range (a PID's one-based entry number).
+pub const PROTO_INDEXES: std::ops::RangeInclusive<u32> = 1..=0x00ff_ffff;
+/// SPEC-003 §2.1's prototype category names, in category order (the
+/// `proto/` directories).
+pub const PROTO_CATEGORIES: [&str; 6] = ["items", "critters", "scenery", "walls", "tiles", "misc"];
+
+/// A single art list name as an `[[art]]` `file` holds it: 1 to 12 ASCII
+/// bytes, no space, comma, semicolon, TAB or other control character, no
+/// folder, and a valid VFS path component.
+pub fn is_list_name(name: &str) -> bool {
+    (1..=12).contains(&name.len())
+        && name.is_ascii()
+        && !name
+            .bytes()
+            .any(|byte| b" ,;/\\".contains(&byte) || byte.is_ascii_control())
+        && VfsPath::new(name).is_ok()
+}
 /// The largest manifest read from a layer.
 const MANIFEST_BYTES: usize = 1 << 20;
 /// SPEC-024a §7.1: the word API this engine has, and the most `api` asks.
@@ -130,6 +172,9 @@ enum Section {
     Settings,
     GlobalScript,
     Hook,
+    Art,
+    Proto,
+    TileRemap,
 }
 
 /// One `[settings]` value (SPEC-024a §7.4). Its type never changes.
@@ -249,6 +294,43 @@ pub struct PatchRegistration {
     pub file: String,
 }
 
+/// An `[[art]]` entry: `art/<category directory>/<file>` is row `index` of
+/// that category's resolved art list (`docs/extended-art-namespaces.md`
+/// §3.4), which the served list file must not have.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArtRegistration {
+    /// An art category 0-10 ([`crate::fid::ART_DIRECTORIES`]).
+    pub category: u8,
+    /// The list name, lowercase ([`is_list_name`]).
+    pub file: String,
+    /// The list row: [`ART_INDEXES`], and [`CAPPED_ART_INDEXES`] for
+    /// critters (1) and heads (8).
+    pub index: u32,
+}
+
+/// A `[[protos]]` entry: `proto/<category directory>/<file>` is the
+/// prototype of entry number `index` (one-based) in that category, past the
+/// served prototype list.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProtoRegistration {
+    /// A SPEC-003 §2.1 prototype category number 0-5 ([`PROTO_CATEGORIES`]).
+    pub category: u8,
+    /// The `.pro` file name, lowercase.
+    pub file: String,
+    /// The one-based entry number: [`PROTO_INDEXES`].
+    pub index: u32,
+}
+
+/// A `[[tile_remap]]` entry: `file` (a layer-relative path) is the `VTLX`
+/// sidecar ([`crate::tile_remap::TileRemap`]) of map `maps/<map>`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TileRemapRegistration {
+    /// The map's file name under `maps/`, lowercase.
+    pub map: String,
+    /// A normalized VFS path.
+    pub file: String,
+}
+
 /// A parsed `vault-mod.toml`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ModManifest {
@@ -272,6 +354,12 @@ pub struct ModManifest {
     pub settings: BTreeMap<String, ModSetting>,
     pub global_scripts: Vec<GlobalScriptRegistration>,
     pub hooks: Vec<HookRegistration>,
+    /// `[[art]]` rows, in manifest order.
+    pub art: Vec<ArtRegistration>,
+    /// `[[protos]]` rows, in manifest order.
+    pub protos: Vec<ProtoRegistration>,
+    /// `[[tile_remap]]` rows, in manifest order.
+    pub tile_remaps: Vec<TileRemapRegistration>,
 }
 
 /// The `[enhanced]` table: launch settings, each validated against its
@@ -312,6 +400,15 @@ impl fmt::Display for ManifestError {
 }
 
 impl std::error::Error for ManifestError {}
+
+/// The position of `name`, which `one_of` checked, in `names`.
+fn category_number(names: &[&str], name: &str) -> u8 {
+    names
+        .iter()
+        .position(|candidate| *candidate == name)
+        .and_then(|number| u8::try_from(number).ok())
+        .expect("a checked category name")
+}
 
 /// One value of the subset.
 enum Value {
@@ -360,6 +457,9 @@ impl ModManifest {
         let mut has_settings = false;
         // Where the current array entry began, for its missing-key error.
         let mut entry_line = 0;
+        // Where each `[[art]]`, `[[protos]]` and `[[tile_remap]]` entry
+        // began, for the checks that span rows.
+        let mut row_lines: [Vec<usize>; 3] = Default::default();
         for (index, raw) in text.lines().enumerate() {
             let line = index + 1;
             let error = |message: String| ManifestError { line, message };
@@ -408,10 +508,26 @@ impl ModManifest {
                             });
                             Section::Hook
                         }
+                        "art" => {
+                            manifest.art.push(ArtRegistration::default());
+                            row_lines[0].push(line);
+                            Section::Art
+                        }
+                        "protos" => {
+                            manifest.protos.push(ProtoRegistration::default());
+                            row_lines[1].push(line);
+                            Section::Proto
+                        }
+                        "tile_remap" => {
+                            manifest.tile_remaps.push(TileRemapRegistration::default());
+                            row_lines[2].push(line);
+                            Section::TileRemap
+                        }
                         _ => {
                             return Err(error(format!(
                                 "unknown table `[[{name}]]` (`[[scripts]]`, `[[maps]]`, \
-                                 `[[patches]]`, `[[global_scripts]]` or `[[hooks]]`)"
+                                 `[[patches]]`, `[[global_scripts]]`, `[[hooks]]`, `[[art]]`, \
+                                 `[[protos]]` or `[[tile_remap]]`)"
                             )));
                         }
                     };
@@ -693,6 +809,63 @@ impl ModManifest {
                         _ => return Err(error(format!("unknown key `{key}` in `[[hooks]]`"))),
                     }
                 }
+                Section::Art => {
+                    let art = manifest.art.last_mut().expect("the entry exists");
+                    match key {
+                        "category" => {
+                            let name = one_of(value, &crate::fid::ART_DIRECTORIES)?;
+                            art.category = category_number(&crate::fid::ART_DIRECTORIES, &name);
+                        }
+                        "file" => {
+                            let name = string(value)?;
+                            if !is_list_name(&name) {
+                                return Err(error(format!(
+                                    "`file` is a single list name of 1-12 bytes without space, \
+                                     comma, semicolon, TAB or folder, not \"{name}\""
+                                )));
+                            }
+                            art.file = name.to_ascii_lowercase();
+                        }
+                        "index" => art.index = decimal(value, ART_INDEXES)?,
+                        _ => return Err(error(format!("unknown key `{key}` in `[[art]]`"))),
+                    }
+                }
+                Section::Proto => {
+                    let proto = manifest.protos.last_mut().expect("the entry exists");
+                    match key {
+                        "category" => {
+                            let name = one_of(value, &PROTO_CATEGORIES)?;
+                            proto.category = category_number(&PROTO_CATEGORIES, &name);
+                        }
+                        "file" => {
+                            let name = file_name(value, ".pro")?;
+                            if name.contains(' ') {
+                                return Err(error(format!(
+                                    "`file` is a .pro file name without a space, not \"{name}\""
+                                )));
+                            }
+                            proto.file = name;
+                        }
+                        "index" => proto.index = decimal(value, PROTO_INDEXES)?,
+                        _ => return Err(error(format!("unknown key `{key}` in `[[protos]]`"))),
+                    }
+                }
+                Section::TileRemap => {
+                    let remap = manifest.tile_remaps.last_mut().expect("the entry exists");
+                    match key {
+                        "map" => remap.map = file_name(value, ".map")?,
+                        "file" => {
+                            let file = string(value)?;
+                            let path = VfsPath::new(&file).map_err(|reason| {
+                                error(format!("`file` is a layer-relative path: {reason}"))
+                            })?;
+                            remap.file = path.as_str().to_owned();
+                        }
+                        _ => {
+                            return Err(error(format!("unknown key `{key}` in `[[tile_remap]]`")));
+                        }
+                    }
+                }
                 Section::Top => match key {
                     "name" => {
                         let name = string(value)?;
@@ -741,7 +914,69 @@ impl ModManifest {
             });
         }
         manifest.check_scripting()?;
+        manifest.check_rows(&row_lines)?;
         Ok(manifest)
+    }
+    /// `docs/extended-art-namespaces.md` §4 items 2, 4 and 5 within one
+    /// manifest: the critter and head index cap, a (category, index)
+    /// registered twice, and a second remap for one map. `lines` are where
+    /// each `[[art]]`, `[[protos]]` and `[[tile_remap]]` entry began.
+    fn check_rows(&self, lines: &[Vec<usize>; 3]) -> Result<(), ManifestError> {
+        let at = |line: usize, message: String| Err(ManifestError { line, message });
+        for (row, art) in self.art.iter().enumerate() {
+            let line = lines[0][row];
+            let directory = crate::fid::ART_DIRECTORIES[usize::from(art.category)];
+            if matches!(
+                art.category,
+                crate::fid::CRITTER_CATEGORY | crate::fid::HEAD_CATEGORY
+            ) && !CAPPED_ART_INDEXES.contains(&art.index)
+            {
+                return at(
+                    line,
+                    format!(
+                        "`[[art]]` `index` is a whole number from 0 to 4095 for {directory}, \
+                         not {}",
+                        art.index
+                    ),
+                );
+            }
+            if self.art[..row]
+                .iter()
+                .any(|other| (other.category, other.index) == (art.category, art.index))
+            {
+                return at(
+                    line,
+                    format!("two `[[art]]` register {directory} row {}", art.index),
+                );
+            }
+        }
+        for (row, proto) in self.protos.iter().enumerate() {
+            if self.protos[..row]
+                .iter()
+                .any(|other| (other.category, other.index) == (proto.category, proto.index))
+            {
+                return at(
+                    lines[1][row],
+                    format!(
+                        "two `[[protos]]` register {} prototype {}",
+                        PROTO_CATEGORIES[usize::from(proto.category)],
+                        proto.index
+                    ),
+                );
+            }
+        }
+        for (row, remap) in self.tile_remaps.iter().enumerate() {
+            if self.tile_remaps[..row]
+                .iter()
+                .any(|other| other.map == remap.map)
+            {
+                return at(
+                    lines[2][row],
+                    format!("two `[[tile_remap]]` name map {}", remap.map),
+                );
+            }
+        }
+        Ok(())
     }
     /// Whether this manifest makes its layer scripted (SPEC-024a §2.1).
     pub fn scripted(&self) -> bool {
@@ -790,6 +1025,9 @@ impl ModManifest {
             Section::Patch => ("patches", &["table", "file"]),
             Section::GlobalScript => ("global_scripts", &["file"]),
             Section::Hook => ("hooks", &["point", "file"]),
+            Section::Art => ("art", &["category", "file", "index"]),
+            Section::Proto => ("protos", &["category", "file", "index"]),
+            Section::TileRemap => ("tile_remap", &["map", "file"]),
             Section::Top | Section::Enhanced | Section::Scripting | Section::Settings => {
                 return Ok(());
             }
@@ -892,6 +1130,34 @@ impl ModManifest {
             text += &quote("table", &patch.table)?;
             text += &quote("file", &patch.file)?;
         }
+        for art in &self.art {
+            let category = crate::fid::ART_DIRECTORIES
+                .get(usize::from(art.category))
+                .ok_or_else(|| bad(format!("art category {} cannot be written", art.category)))?;
+            text += "\n[[art]]\n";
+            text += &quote("category", category)?;
+            text += &quote("file", &art.file)?;
+            text += &format!("index = {}\n", art.index);
+        }
+        for proto in &self.protos {
+            let category = PROTO_CATEGORIES
+                .get(usize::from(proto.category))
+                .ok_or_else(|| {
+                    bad(format!(
+                        "prototype category {} cannot be written",
+                        proto.category
+                    ))
+                })?;
+            text += "\n[[protos]]\n";
+            text += &quote("category", category)?;
+            text += &quote("file", &proto.file)?;
+            text += &format!("index = {}\n", proto.index);
+        }
+        for remap in &self.tile_remaps {
+            text += "\n[[tile_remap]]\n";
+            text += &quote("map", &remap.map)?;
+            text += &quote("file", &remap.file)?;
+        }
         if !self.settings.is_empty() {
             text += "\n[settings]\n";
             for (key, setting) in &self.settings {
@@ -966,7 +1232,13 @@ impl ModManifest {
                 text += &format!("  {file}\n");
             }
         }
-        if !self.scripts.is_empty() || !self.maps.is_empty() || !self.patches.is_empty() {
+        if !self.scripts.is_empty()
+            || !self.maps.is_empty()
+            || !self.patches.is_empty()
+            || !self.art.is_empty()
+            || !self.protos.is_empty()
+            || !self.tile_remaps.is_empty()
+        {
             text += "\nIt registers, without replacing scripts.lst or whole tables:\n";
             for script in &self.scripts {
                 text += &format!("  script row {}: scripts/{}\n", script.index, script.file);
@@ -976,6 +1248,33 @@ impl ModManifest {
             }
             for patch in &self.patches {
                 text += &format!("  {} table patch: {}\n", patch.table, patch.file);
+            }
+            for art in &self.art {
+                let directory = crate::fid::ART_DIRECTORIES
+                    .get(usize::from(art.category))
+                    .copied()
+                    .unwrap_or("?");
+                text += &format!(
+                    "  {directory} art row {}: art/{directory}/{}\n",
+                    art.index, art.file
+                );
+            }
+            for proto in &self.protos {
+                let directory = PROTO_CATEGORIES
+                    .get(usize::from(proto.category))
+                    .copied()
+                    .unwrap_or("?");
+                text += &format!(
+                    "  {directory} prototype {}: proto/{directory}/{}\n",
+                    proto.index, proto.file
+                );
+            }
+            for remap in &self.tile_remaps {
+                text += &format!("  tile remap of maps/{}: {}\n", remap.map, remap.file);
+            }
+            if !self.art.is_empty() || !self.protos.is_empty() {
+                text += "  (art and prototype rows add to the art and proto lists without \
+                         replacing them)\n";
             }
         }
         let registered = |file: &String| {
@@ -1013,6 +1312,12 @@ pub struct ModRegistry {
     pub maps: BTreeMap<u32, MapRegistration>,
     /// Lowest layer first: a later patch wins a record.
     pub patches: Vec<PatchRegistration>,
+    /// `[[art]]` rows by (category, index).
+    pub art: BTreeMap<(u8, u32), ArtRegistration>,
+    /// `[[protos]]` rows by (category, index).
+    pub protos: BTreeMap<(u8, u32), ProtoRegistration>,
+    /// `[[tile_remap]]` rows by map file name (lowercase).
+    pub tile_remaps: BTreeMap<String, TileRemapRegistration>,
 }
 
 impl ModRegistry {
@@ -1024,6 +1329,9 @@ impl ModRegistry {
         let mut script_owner: BTreeMap<u32, &str> = BTreeMap::new();
         let mut map_owner: BTreeMap<u32, &str> = BTreeMap::new();
         let mut map_files: BTreeMap<&str, &str> = BTreeMap::new();
+        let mut art_owner: BTreeMap<(u8, u32), &str> = BTreeMap::new();
+        let mut proto_owner: BTreeMap<(u8, u32), &str> = BTreeMap::new();
+        let mut remap_owner: BTreeMap<String, &str> = BTreeMap::new();
         for manifest in mods {
             let name = manifest.name.as_str();
             for script in &manifest.scripts {
@@ -1051,8 +1359,65 @@ impl ModRegistry {
                 registry.maps.insert(map.number, map.clone());
             }
             registry.patches.extend(manifest.patches.iter().cloned());
+            for art in &manifest.art {
+                let key = (art.category, art.index);
+                if let Some(other) = art_owner.insert(key, name) {
+                    let directory = crate::fid::ART_DIRECTORIES
+                        .get(usize::from(art.category))
+                        .copied()
+                        .unwrap_or("?");
+                    return Err(format!(
+                        "{directory} art row {} is registered by both \"{other}\" and \"{name}\"",
+                        art.index
+                    ));
+                }
+                registry.art.insert(key, art.clone());
+            }
+            for proto in &manifest.protos {
+                let key = (proto.category, proto.index);
+                if let Some(other) = proto_owner.insert(key, name) {
+                    let directory = PROTO_CATEGORIES
+                        .get(usize::from(proto.category))
+                        .copied()
+                        .unwrap_or("?");
+                    return Err(format!(
+                        "{directory} prototype {} is registered by both \"{other}\" and \
+                         \"{name}\"",
+                        proto.index
+                    ));
+                }
+                registry.protos.insert(key, proto.clone());
+            }
+            for remap in &manifest.tile_remaps {
+                let map = remap.map.to_ascii_lowercase();
+                if let Some(other) = remap_owner.insert(map.clone(), name) {
+                    return Err(format!(
+                        "tile remap of map {map} is registered by both \"{other}\" and \"{name}\""
+                    ));
+                }
+                registry.tile_remaps.insert(map, remap.clone());
+            }
         }
         Ok(registry)
+    }
+    /// The `[[art]]` rows, ascending by (category, index).
+    pub fn art(&self) -> impl Iterator<Item = &ArtRegistration> {
+        self.art.values()
+    }
+    /// The `[[art]]` rows of `category`, ascending by index.
+    pub fn art_rows(&self, category: u8) -> impl Iterator<Item = &ArtRegistration> {
+        self.art
+            .range((category, 0)..=(category, u32::MAX))
+            .map(|(_, row)| row)
+    }
+    /// The `[[protos]]` rows, ascending by (category, index).
+    pub fn protos(&self) -> impl Iterator<Item = &ProtoRegistration> {
+        self.protos.values()
+    }
+    /// The `[[tile_remap]]` row of map file name `map`, compared without
+    /// ASCII case.
+    pub fn tile_remap(&self, map: &str) -> Option<&TileRemapRegistration> {
+        self.tile_remaps.get(&map.to_ascii_lowercase())
     }
     /// The registrations of the manifests `vfs`'s mod layers carry
     /// ([`Vfs::layer_manifests`]). A malformed manifest or a conflict is an
@@ -1079,7 +1444,12 @@ impl ModRegistry {
         }
     }
     pub fn is_empty(&self) -> bool {
-        self.scripts.is_empty() && self.maps.is_empty() && self.patches.is_empty()
+        self.scripts.is_empty()
+            && self.maps.is_empty()
+            && self.patches.is_empty()
+            && self.art.is_empty()
+            && self.protos.is_empty()
+            && self.tile_remaps.is_empty()
     }
     /// The registered map a `load_map` name names: the name uppercased with
     /// its first `.SAV` replaced by `.MAP` (SPEC-008 §3.10's normalization),
@@ -1744,5 +2114,309 @@ mod tests {
         assert_eq!(hook_point("HOOK_TOHIT"), Some(0));
         assert_eq!(hook_point("HOOK_BUILDSFXWEAPON"), Some(61));
         assert_eq!(hook_point("-"), None);
+    }
+}
+
+/// `docs/extended-art-namespaces.md` §2.2 and §4 items 1-5: the `[[art]]`,
+/// `[[protos]]` and `[[tile_remap]]` rows a manifest alone decides.
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+
+    const ROWS: &str = "name = \"Total conversion\"\n\
+                        [[art]]\ncategory = \"scenery\"\nfile = \"TC_Rock1.frm\"\nindex = 5000\n\
+                        [[art]] # a critter row stays below 4096\ncategory = \"critters\"\n\
+                        file = \"tcmutn\"\nindex = 4095\n\
+                        [[protos]]\ncategory = \"items\"\nfile = \"00005000.PRO\"\nindex = 5000\n\
+                        [[protos]]\nindex = 16777215\ncategory = \"misc\"\nfile = \"last.pro\"\n\
+                        [[tile_remap]]\nmap = \"TC_Hall.map\"\nfile = \"Maps\\\\tc_hall.tlx\"\n";
+
+    #[test]
+    fn extended_rows_parse_write_back_and_list_in_the_readme() {
+        let manifest = ModManifest::parse(ROWS).unwrap();
+        assert_eq!(
+            manifest.art,
+            [
+                ArtRegistration {
+                    category: 2,
+                    file: "tc_rock1.frm".into(),
+                    index: 5000
+                },
+                ArtRegistration {
+                    category: 1,
+                    file: "tcmutn".into(),
+                    index: 4095
+                },
+            ]
+        );
+        assert_eq!(
+            manifest.protos,
+            [
+                ProtoRegistration {
+                    category: 0,
+                    file: "00005000.pro".into(),
+                    index: 5000
+                },
+                ProtoRegistration {
+                    category: 5,
+                    file: "last.pro".into(),
+                    index: 0x00ff_ffff
+                },
+            ]
+        );
+        assert_eq!(
+            manifest.tile_remaps,
+            [TileRemapRegistration {
+                map: "tc_hall.map".into(),
+                file: "maps/tc_hall.tlx".into()
+            }]
+        );
+        let written = manifest.to_toml().unwrap();
+        assert!(
+            written.contains("[[art]]\ncategory = \"scenery\"\n"),
+            "{written}"
+        );
+        assert!(
+            written.contains("[[tile_remap]]\nmap = \"tc_hall.map\"\n"),
+            "{written}"
+        );
+        assert_eq!(ModManifest::parse(&written).unwrap(), manifest, "{written}");
+        let readme = manifest.readme(&[]);
+        for needle in [
+            "scenery art row 5000: art/scenery/tc_rock1.frm",
+            "critters art row 4095: art/critters/tcmutn",
+            "items prototype 5000: proto/items/00005000.pro",
+            "tile remap of maps/tc_hall.map: maps/tc_hall.tlx",
+        ] {
+            assert!(readme.contains(needle), "{needle}: {readme}");
+        }
+        // Every art category name, and both index limits.
+        for (number, name) in crate::fid::ART_DIRECTORIES.iter().enumerate() {
+            let index = if matches!(number, 1 | 8) {
+                4095
+            } else {
+                0x00ff_ffff
+            };
+            let text = format!(
+                "name = \"a\"\n[[art]]\ncategory = \"{name}\"\nfile = \"x\"\nindex = {index}\n\
+                 [[art]]\ncategory = \"{name}\"\nfile = \"y\"\nindex = 0"
+            );
+            let manifest = ModManifest::parse(&text).unwrap();
+            assert_eq!(usize::from(manifest.art[0].category), number);
+            assert_eq!(manifest.art[0].index, index);
+            let again = ModManifest::parse(&manifest.to_toml().unwrap()).unwrap();
+            assert_eq!(again, manifest);
+        }
+        // The writer refuses a category that has no name.
+        let mut bad = manifest.clone();
+        bad.art[0].category = 11;
+        assert!(bad.to_toml().is_err());
+        let mut bad = manifest.clone();
+        bad.protos[0].category = 6;
+        assert!(bad.to_toml().is_err());
+        let mut bad = manifest;
+        bad.art[0].file = "two words".into();
+        assert!(bad.to_toml().is_err());
+    }
+
+    #[test]
+    fn extended_rows_refuse_malformed_entries_naming_the_line() {
+        let art = |body: &str| format!("name = \"a\"\n[[art]]\n{body}");
+        let proto = |body: &str| format!("name = \"a\"\n[[protos]]\n{body}");
+        let remap = |body: &str| format!("name = \"a\"\n[[tile_remap]]\n{body}");
+        let art_row = "category = \"scenery\"\nfile = \"a.frm\"\nindex = 5000\n";
+        let proto_row = "category = \"items\"\nfile = \"a.pro\"\nindex = 5000\n";
+        let remap_row = "map = \"a.map\"\nfile = \"maps/a.tlx\"\n";
+        for (text, line, needle) in [
+            (
+                art("category = \"scenery\"\nfile = \"a.frm\""),
+                2,
+                "needs `index`",
+            ),
+            (art("file = \"a.frm\"\nindex = 1"), 2, "needs `category`"),
+            (art("category = \"items\"\nindex = 1"), 2, "needs `file`"),
+            (art("category = \"walls2\""), 3, "`category` is one of"),
+            (art("category = 2"), 3, "expects a string"),
+            (art("file = \"two words\""), 3, "single list name"),
+            (art("file = \"a,b\""), 3, "single list name"),
+            (art("file = \"a;b\""), 3, "single list name"),
+            (art("file = \"a\tb\""), 3, "single list name"),
+            (art("file = \"\""), 3, "single list name"),
+            (art("file = \"thirteen.frmx\""), 3, "single list name"),
+            (art("file = \"scenery/a.frm\""), 3, "single list name"),
+            (art("index = 16777216"), 3, "from 0 to 16777215"),
+            (art("index = -1"), 3, "from 0 to 16777215"),
+            (art("index = 5000.5"), 3, "decimal integer"),
+            (art("other = 1"), 3, "unknown key `other` in `[[art]]`"),
+            // Vector D: critters (and heads) stop at 4095.
+            (
+                art("category = \"critters\"\nfile = \"a\"\nindex = 4096"),
+                2,
+                "from 0 to 4095 for critters",
+            ),
+            (
+                art("index = 9999\nfile = \"a\"\ncategory = \"heads\""),
+                2,
+                "from 0 to 4095 for heads",
+            ),
+            (
+                format!("{}[[art]]\n{art_row}", art(art_row)),
+                6,
+                "two `[[art]]` register scenery row 5000",
+            ),
+            // Vector D: `[[protos]] index = 0`.
+            (proto("index = 0"), 3, "from 1 to 16777215, not 0"),
+            (proto("index = 16777216"), 3, "from 1 to 16777215"),
+            (
+                proto("category = \"scenery\"\nfile = \"a.pro\""),
+                2,
+                "needs `index`",
+            ),
+            (proto("file = \"a.pro\"\nindex = 1"), 2, "needs `category`"),
+            (proto("category = \"heads\""), 3, "`category` is one of"),
+            (proto("file = \"a.frm\""), 3, ".pro file name"),
+            (proto("file = \"items/a.pro\""), 3, ".pro file name"),
+            (proto("file = \"a b.pro\""), 3, "without a space"),
+            (
+                proto("procedure = 1"),
+                3,
+                "unknown key `procedure` in `[[protos]]`",
+            ),
+            (
+                format!("{}[[protos]]\n{proto_row}", proto(proto_row)),
+                6,
+                "two `[[protos]]` register items prototype 5000",
+            ),
+            (remap("map = \"a.map\""), 2, "needs `file`"),
+            (remap("file = \"maps/a.tlx\""), 2, "needs `map`"),
+            (
+                remap("map = \"maps/a.map\""),
+                3,
+                ".map file name with no folder",
+            ),
+            (remap("map = \"a.sav\""), 3, ".map file name"),
+            (remap("file = \"../a.tlx\""), 3, "layer-relative path"),
+            (remap("file = \"/a.tlx\""), 3, "layer-relative path"),
+            (
+                remap("index = 1"),
+                3,
+                "unknown key `index` in `[[tile_remap]]`",
+            ),
+            (
+                format!(
+                    "{}[[tile_remap]]\nmap = \"A.MAP\"\nfile = \"maps/b.tlx\"\n",
+                    remap(remap_row)
+                ),
+                5,
+                "two `[[tile_remap]]` name map a.map",
+            ),
+            (
+                "name = \"a\"\n[[tile_remaps]]".to_owned(),
+                2,
+                "`[[tile_remap]]`",
+            ),
+        ] {
+            let error = ModManifest::parse(&text).unwrap_err();
+            assert_eq!(error.line, line, "{text}: {error}");
+            assert!(error.message.contains(needle), "{text}: {error}");
+        }
+        // One (category, index) in two categories, and one index in art and
+        // prototypes, are not duplicates.
+        ModManifest::parse(&format!(
+            "{}[[art]]\ncategory = \"walls\"\nfile = \"a.frm\"\nindex = 5000\n\
+             [[protos]]\n{proto_row}[[protos]]\ncategory = \"walls\"\nfile = \"a.pro\"\nindex = 5000\n",
+            art(art_row)
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn extended_registries_merge_and_refuse_cross_mod_conflicts() {
+        let manifest = |name: &str, text: &str| {
+            ModManifest::parse(&format!("name = \"{name}\"\n{text}")).unwrap()
+        };
+        let one = manifest(
+            "One",
+            "[[art]]\ncategory = \"scenery\"\nfile = \"one.frm\"\nindex = 5000\n\
+             [[art]]\ncategory = \"items\"\nfile = \"one.frm\"\nindex = 4100\n\
+             [[protos]]\ncategory = \"items\"\nfile = \"one.pro\"\nindex = 5000\n\
+             [[tile_remap]]\nmap = \"one.map\"\nfile = \"maps/one.tlx\"\n",
+        );
+        let two = manifest(
+            "Two",
+            "[[art]]\ncategory = \"scenery\"\nfile = \"two.frm\"\nindex = 5001\n\
+             [[art]]\ncategory = \"items\"\nfile = \"two.frm\"\nindex = 5000\n\
+             [[protos]]\ncategory = \"scenery\"\nfile = \"two.pro\"\nindex = 5000\n\
+             [[tile_remap]]\nmap = \"two.map\"\nfile = \"maps/two.tlx\"\n",
+        );
+        let registry = ModRegistry::build([&one, &two]).unwrap();
+        assert!(!registry.is_empty());
+        assert_eq!(
+            registry
+                .art()
+                .map(|row| (row.category, row.index, row.file.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (0, 4100, "one.frm"),
+                (0, 5000, "two.frm"),
+                (2, 5000, "one.frm"),
+                (2, 5001, "two.frm")
+            ]
+        );
+        assert_eq!(
+            registry
+                .art_rows(2)
+                .map(|row| row.index)
+                .collect::<Vec<_>>(),
+            [5000, 5001]
+        );
+        assert_eq!(
+            registry
+                .protos()
+                .map(|row| (row.category, row.index))
+                .collect::<Vec<_>>(),
+            [(0, 5000), (2, 5000)]
+        );
+        assert_eq!(
+            registry.tile_remap("ONE.MAP").map(|row| row.file.as_str()),
+            Some("maps/one.tlx")
+        );
+        assert_eq!(registry.tile_remap("three.map"), None);
+        // Vector D: two layers both registering scenery 5000.
+        for (text, needle) in [
+            (
+                "[[art]]\ncategory = \"scenery\"\nfile = \"x.frm\"\nindex = 5000",
+                "scenery art row 5000 is registered by both",
+            ),
+            (
+                "[[protos]]\ncategory = \"items\"\nfile = \"x.pro\"\nindex = 5000",
+                "items prototype 5000 is registered by both",
+            ),
+            (
+                "[[tile_remap]]\nmap = \"one.map\"\nfile = \"maps/x.tlx\"",
+                "tile remap of map one.map is registered by both",
+            ),
+        ] {
+            let three = manifest("Three", text);
+            let error = ModRegistry::build([&one, &three]).unwrap_err();
+            assert!(
+                error.contains(needle) && error.contains("\"One\" and \"Three\""),
+                "{error}"
+            );
+        }
+        // Each kind alone makes the registry non-empty.
+        for text in [
+            "[[art]]\ncategory = \"misc\"\nfile = \"x\"\nindex = 1",
+            "[[protos]]\ncategory = \"misc\"\nfile = \"x.pro\"\nindex = 1",
+            "[[tile_remap]]\nmap = \"x.map\"\nfile = \"x.tlx\"",
+        ] {
+            let only = manifest("Only", text);
+            assert!(!ModRegistry::build([&only]).unwrap().is_empty(), "{text}");
+        }
+        assert!(
+            ModRegistry::build([&manifest("None", "")])
+                .unwrap()
+                .is_empty()
+        );
     }
 }

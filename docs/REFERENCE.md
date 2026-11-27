@@ -2767,6 +2767,51 @@ Where SPEC-010 leaves details open, this engine makes these choices:
 
 </details>
 
+### Extended art identifiers and added rows (SPEC-007 section 2.1.1, SPEC-024a section 2.4)
+
+A plain art identifier holds a 12-bit row, so it reaches rows 0 to 4095 of a
+category's list. A mod that needs more uses the extended form.
+
+- **Extended identifier.** `0x80000000 | category << 24 | row`, with a 24-bit row:
+  bits 12-23 hold the row's high part and bits 0-11 its low part. Bit 31 counts only
+  when the category is not critters (1) or heads (8) and its resolved list has more
+  than 4,096 rows. In every other session it is ignored, as it always was, so stock
+  data reads exactly as before. Critter and head lists stay capped at 4,096 rows.
+- **No silent wrap.** A row that does not fit a plain identifier is refused where the
+  engine builds one, with a diagnostic, and no longer wraps to row `row mod 4096`.
+- **Added rows.** A layer's `vault-mod.toml` adds rows without replacing a list file:
+
+  ```toml
+  [[art]]
+  category = "scenery"       # an art directory name
+  file = "tc_rock1.frm"      # a list name of at most 12 bytes, under art/scenery/
+  index = 5000               # the row; at or past the served list's length
+
+  [[protos]]
+  category = "scenery"       # items, critters, scenery, walls, tiles or misc
+  file = "00005000.pro"      # under proto/scenery/
+  index = 5000               # the one-based entry number; past the served list
+
+  [[tile_remap]]
+  map = "tc_hall.map"        # under maps/, in this layer
+  file = "maps/tc_hall.tlx"  # the remap sidecar
+  ```
+
+  Rows between a list file's end and an added row are empty. Each index is explicit and
+  unique across enabled layers; a clash, an index inside the served list, or a file
+  missing from the layer stops the launch and names the layer.
+- **Tile remap.** Map tile words keep their 12-bit indexes. A `.tlx` sidecar maps a
+  map's local indexes to rows of the tile list: magic `VTLX`, version 1 (2 bytes),
+  count N (2 bytes, at most 4096), then N entries of local index (2 bytes, 0-4095, not
+  1) and row (4 bytes), ascending, all big-endian.
+- **Scripts.** `mod_art_fid(category, row)` (`0x830A`) gives the right identifier for a
+  row, or -1. `obj_art_fid` returns an extended identifier unchanged, and `metarule3`
+  rule 107 takes an extended identifier's whole row for an object that is not a critter.
+- **Saves.** No layout changes. A save that holds an extended identifier loads without
+  the layer that registered the row; that object is logged and not drawn.
+- **`asset-audit --validate-art-ids`** resolves extended identifiers and reports each
+  list past 4,096 rows. It reads the corpus folder only, not mod layers.
+
 ## Items, drugs, barter, and progression (SPEC-011)
 
 <details>
@@ -3157,6 +3202,48 @@ These close behaviors that the earlier phases left open:
   restored roof reappears.
 
 </details>
+
+## Pre-rendered map backdrops (SPEC-022 section 3.17)
+
+A map may ship one painted image per elevation in place of floor tiles and wall
+sprites. A mod layer puts the files beside its map:
+
+```text
+maps/<map>.bkd                    the index
+maps/<map>/e<E>/<CX>_<CY>.bkc     one chunk of elevation E, column CX, row CY
+```
+
+SPEC-022 section 3.17 has the byte layout. In short: the index names a chunk size
+(64, 128, 256 or 512), stored or zlib chunks, the hash of the palette file the colours
+were made for, and for each elevation the image size, the hex and image pixel that
+place it on the map, which chunks exist, and which objects it replaces. A chunk holds
+a colour plane of palette indexes (0 is transparent), an optional depth plane of
+16-bit values and an optional fade plane of one bit per pixel.
+
+- **Depth.** 0 is floor. A value D from 1 to 40000 puts the pixel in the group of hex
+  D - 1: it draws after everything upright on hexes up to that one and before
+  everything on later hexes, so critters, items and doors pass in front of and behind
+  painted walls as they do with wall sprites. Give a painted wall the hex of its own
+  blocking wall object.
+- **Fade.** A pixel with its fade bit set, in a group past the player's hex, is drawn
+  through the player's see-through mask, so a front wall never hides the player. With
+  the roof peek on (`roof_peek = "cursor_xray"`, or Alt held), such pixels past the
+  hex under the cursor dissolve inside the peek's disc too.
+- **Suppression.** An elevation may hide its wall-category objects, a list of PIDs, or
+  both. A hidden object still blocks, stops sight, is saved and is seen by scripts; it
+  is not drawn, outlined or picked. A door in the list is ignored and still draws.
+- **Blocking and roofs** come from map objects and roof tiles as always. A backdrop
+  holds no roofs.
+- **Both presets** draw backdrops, at every zoom and view size, on both render paths
+  with the same pixels. A map without a `.bkd` draws exactly as before.
+- **Errors.** A malformed index or a palette that does not match is one log line and
+  the map draws without the backdrop. A chunk that is missing or malformed turns that
+  elevation's backdrop off for the session.
+- **Memory.** Chunks are decoded as the view needs them and kept in a cache of
+  `backdrop_cache_mib` mebibytes (`vault-engine.toml`, top level, 1 to 1024,
+  default 64).
+- A backdrop changes no save, no state hash and no replay log. A replay's frame digest
+  changes only for maps that ship one.
 
 ## Renderer notes for SPEC-022 revision 2
 
@@ -3970,8 +4057,8 @@ Setup runs after a new game or a load, before the first Simulation phase: sfall'
 `hs_` scripts and `gl*` scripts, then for each scripted layer, lowest first, its rows
 attach, its global scripts load, and its other scripts load. Registration is not saved.
 
-**Words.** `0x8300..=0x83FF` is reserved. These ten are in the set only with manifest
-scripting on. `0x830A` and up are refused at load, so a script needing a word this
+**Words.** `0x8300..=0x83FF` is reserved. These eleven are in the set only with manifest
+scripting on. `0x830B` and up are refused at load, so a script needing a word this
 engine lacks takes the refused path rather than failing partway. Operands follow
 sfall's value model, with sfall mode on or off: a failed operand pops them all, has no
 effect, writes a diagnostic, and the word pushes its default. The F9 trace shows these
@@ -3989,6 +4076,7 @@ words by mnemonic in a program with manifest scripting on.
 | `0x8307` | `mod_set_hook_arg` | value, index | none | As `set_sfall_arg` |
 | `0x8308` | `mod_set_hook_return` | value, index | none | Sets that return, by the point's type. A value that cannot convert leaves it |
 | `0x8309` | `mod_game_mode` | none | I | `get_game_mode`'s bits |
+| `0x830A` | `mod_art_fid` | row, category | I | The canonical art identifier of that row of that art category's resolved list, plain below row 4096 and extended above, or -1 for a row that cannot be addressed |
 
 `mod_register_hook` needs a program a manifest declares. `opcode_exists` gives 0 for
 these words, and `engine_api_version` keeps its own number.

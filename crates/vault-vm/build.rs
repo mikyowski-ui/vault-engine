@@ -251,7 +251,7 @@ fn mod_words() -> Result<(Vec<String>, Vec<String>), String> {
             if row.flag("push")? { "Value" } else { "None" },
         ));
     }
-    table.expect_rows(10)?;
+    table.expect_rows(11)?;
     Ok((rows, specs))
 }
 /// SPEC-024b section 3: the oracle table, compiled in and counted, so a word

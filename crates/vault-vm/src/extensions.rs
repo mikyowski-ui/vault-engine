@@ -120,8 +120,9 @@ pub fn opcode_in(words: &crate::WordSet, word: u16) -> Option<&'static OpcodeSpe
     }
     opcode(word)
 }
-/// SPEC-024a §7.1: the defined words of the reserved `0x8300..=0x83FF`.
-pub const MOD_WORDS: std::ops::RangeInclusive<u16> = 0x8300..=0x8309;
+/// SPEC-024a §7.1: the defined words of the reserved `0x8300..=0x83FF`
+/// (Revision 5 adds `0x830A`, `mod_art_fid`).
+pub const MOD_WORDS: std::ops::RangeInclusive<u16> = 0x8300..=0x830a;
 /// What `mod_api_version` gives, and the most a manifest's `api` can ask.
 pub const MOD_API_VERSION: i32 = 1;
 /// The versioned "enhanced" opcode range. These words are not part of

@@ -1,6 +1,6 @@
 //! SPEC-007 section 4.1 (Fixture A) and FID codec domain checks.
 use crate::{
-    ArtCatalog, Fid, FidError, LstKind, LstTable,
+    ArtCatalog, ArtRegistration, Fid, FidError, LstKind, LstTable,
     fid::{critter_suffix, head_suffix},
 };
 use std::collections::BTreeSet;
@@ -292,5 +292,475 @@ fn spec014_called_shot_picture_and_labels_follow_the_critter_alias() {
     assert_eq!(
         catalog.filename(Fid::new(1, 2, 64, 0, 0)).as_deref(),
         Ok("hmjmpsna.frm")
+    );
+}
+
+// `docs/extended-art-namespaces.md`: explicit wrap, extended identifiers and
+// registered rows. Every list here is synthetic, generated as text.
+
+/// `rows` art list lines `<prefix>0000.frm` onward, one per line.
+fn generated(prefix: &str, rows: u32) -> LstTable {
+    let text: String = (0..rows)
+        .map(|row| format!("{prefix}{row:04}.frm\n"))
+        .collect();
+    LstTable::parse(text.as_bytes(), LstKind::Art).unwrap()
+}
+
+/// Vector A: a 4,100-row scenery list.
+fn vector_a() -> ArtCatalog {
+    let mut catalog = ArtCatalog::default();
+    catalog.insert(2, generated("s", 4100));
+    catalog
+}
+
+fn art(category: u8, file: &str, index: u32) -> ArtRegistration {
+    ArtRegistration {
+        category,
+        file: file.into(),
+        index,
+    }
+}
+
+#[test]
+fn extended_vector_a_resolves_plain_and_extended_rows() {
+    let catalog = vector_a();
+    assert_eq!(catalog.list_len(2), 4100);
+    for (row, plain, extended, resolves) in [
+        (0, Some(0x0200_0000), 0x8200_0000, Some("s0000.frm")),
+        (5, Some(0x0200_0005), 0x8200_0005, Some("s0005.frm")),
+        (4095, Some(0x0200_0FFF), 0x8200_0FFF, Some("s4095.frm")),
+        (4096, None, 0x8200_1000, Some("s4096.frm")),
+        (4099, None, 0x8200_1003, Some("s4099.frm")),
+        (4100, None, 0x8200_1004, None),
+    ] {
+        assert_eq!(Fid::extended(2, row), Ok(Fid(extended)), "row {row}");
+        assert_eq!(
+            Fid::try_new(2, row, 0, 0, 0).ok(),
+            plain.map(Fid),
+            "row {row}"
+        );
+        assert!(catalog.is_extended(Fid(extended)), "row {row}");
+        assert_eq!(Fid(extended).row(&catalog), Some(row));
+        match resolves {
+            Some(name) => {
+                assert_eq!(catalog.filename(Fid(extended)).as_deref(), Ok(name));
+                assert_eq!(
+                    catalog.path(Fid(extended)),
+                    Ok(format!("art/scenery/{name}"))
+                );
+                assert_eq!(catalog.row_path(2, row), Ok(format!("art/scenery/{name}")));
+                assert_eq!(catalog.row_name(2, row), Some(name));
+                if let Some(plain) = plain {
+                    assert_eq!(catalog.filename(Fid(plain)).as_deref(), Ok(name));
+                    assert_eq!(catalog.canonical_fid(2, row), Some(Fid(plain)));
+                } else {
+                    assert_eq!(catalog.canonical_fid(2, row), Some(Fid(extended)));
+                }
+            }
+            None => {
+                assert_eq!(
+                    catalog.filename(Fid(extended)),
+                    Err(FidError::MissingRow {
+                        category: 2,
+                        row: 4100
+                    })
+                );
+                assert_eq!(
+                    catalog.row_path(2, row),
+                    Err(FidError::MissingRow {
+                        category: 2,
+                        row: 4100
+                    })
+                );
+                assert_eq!(catalog.row_name(2, row), None);
+                assert_eq!(catalog.canonical_fid(2, row), None);
+            }
+        }
+    }
+    assert_eq!(
+        Fid::try_new(2, 4096, 0, 0, 0),
+        Err(FidError::BaseRange {
+            category: 2,
+            index: 4096
+        })
+    );
+    assert_eq!(Fid::new(2, 4096, 0, 0, 0), Fid(0x0200_0000));
+    // Bits 12-15 with bit 31 clear: row 0, as today.
+    assert!(!catalog.is_extended(Fid(0x0200_1000)));
+    assert_eq!(Fid(0x0200_1000).row(&catalog), Some(0));
+    assert_eq!(
+        catalog.filename(Fid(0x0200_1000)).as_deref(),
+        Ok("s0000.frm")
+    );
+    let [line] = catalog.diagnostics() else {
+        panic!("one diagnostic: {:?}", catalog.diagnostics());
+    };
+    for needle in [
+        "art/scenery/scenery.lst",
+        "4,100 rows",
+        "first unreachable row 4096",
+        "extended identifiers",
+    ] {
+        assert!(line.contains(needle), "{needle}: {line}");
+    }
+}
+
+#[test]
+fn extended_vector_b_a_list_of_exactly_4096_rows_ignores_bit_31() {
+    let mut catalog = ArtCatalog::default();
+    catalog.insert(2, generated("s", 4096));
+    assert!(catalog.diagnostics().is_empty());
+    assert!(!catalog.is_extended(Fid(0x8200_1000)));
+    assert_eq!(Fid(0x8200_1000).row(&catalog), Some(0));
+    assert_eq!(
+        catalog.filename(Fid(0x8200_1000)).as_deref(),
+        Ok("s0000.frm")
+    );
+    assert_eq!(
+        catalog.filename(Fid(0x8200_0005)).as_deref(),
+        Ok("s0005.frm")
+    );
+    // No row past 4095 exists, so none has a canonical identifier.
+    assert_eq!(catalog.canonical_fid(2, 4096), None);
+    assert_eq!(catalog.canonical_fid(2, 4095), Some(Fid(0x0200_0FFF)));
+}
+
+#[test]
+fn extended_edge_cases_4097_rows_short_lists_and_capped_categories() {
+    // 4,097 rows: row 4096 is reachable only as an extended FID.
+    let mut catalog = ArtCatalog::default();
+    catalog.insert(5, generated("m", 4097));
+    assert_eq!(catalog.diagnostics().len(), 1);
+    assert!(catalog.diagnostics()[0].contains("art/misc/misc.lst: 4,097 rows"));
+    assert_eq!(
+        catalog.filename(Fid(0x8500_1000)).as_deref(),
+        Ok("m4096.frm")
+    );
+    for plain in [0x0500_0000, 0x0500_1000, 0x05FF_F000, 0x7500_0000] {
+        assert_eq!(
+            catalog.filename(Fid(plain)).as_deref(),
+            Ok("m0000.frm"),
+            "{plain:#010x}"
+        );
+    }
+    // Bit 31 under a short list keeps today's meaning: bit ignored.
+    let short = catalog_with(0, b"knife.frm\nspear.frm\n");
+    assert!(!short.is_extended(Fid(0x8000_1001)));
+    assert_eq!(short.filename(Fid(0x8000_1001)).as_deref(), Ok("spear.frm"));
+    assert_eq!(short.filename(Fid(0x8000_0001)).as_deref(), Ok("spear.frm"));
+    assert_eq!(Fid(0x8000_1001).row(&short), Some(1));
+    assert!(short.diagnostics().is_empty());
+    // Critters and heads stay capped: bit 31 never counts, every row from
+    // 4096 is unreachable, and the diagnostic says so.
+    let mut capped = ArtCatalog::default();
+    let critters: String = (0..4100).map(|row| format!("c{row:04}\n")).collect();
+    capped.insert(
+        1,
+        LstTable::parse(critters.as_bytes(), LstKind::Art).unwrap(),
+    );
+    capped.insert(8, generated("h", 4097));
+    assert!(!capped.is_extended(Fid(0x8100_1000)));
+    assert_eq!(Fid(0x8100_1000).row(&capped), Some(0));
+    assert_eq!(
+        capped.filename(Fid(0x8100_1000)).as_deref(),
+        Ok("c0000da.frm"),
+        "weapon code 1 as today"
+    );
+    assert_eq!(capped.canonical_fid(1, 4096), None);
+    assert_eq!(capped.canonical_fid(1, 7), Some(Fid(0x0100_0007)));
+    assert_eq!(capped.row_path(1, 0), Err(FidError::RowCategory(1)));
+    assert_eq!(capped.diagnostics().len(), 2);
+    assert!(capped.diagnostics()[0].starts_with("art/critters/critters.lst: 4,100 rows"));
+    assert!(capped.diagnostics()[1].starts_with("art/heads/heads.lst: 4,097 rows"));
+    for line in capped.diagnostics() {
+        assert!(line.contains("first unreachable row 4096"), "{line}");
+        assert!(line.contains("never drawn"), "{line}");
+    }
+    // 0xFFFFFFFF (category 15) keeps its meaning: no directory.
+    assert!(!vector_a().is_extended(Fid(u32::MAX)));
+    assert_eq!(Fid(u32::MAX).row(&vector_a()), None);
+    assert_eq!(
+        vector_a().filename(Fid(u32::MAX)),
+        Err(FidError::Category(15))
+    );
+}
+
+fn catalog_with(category: u8, text: &[u8]) -> ArtCatalog {
+    let mut catalog = ArtCatalog::default();
+    catalog.insert(category, LstTable::parse(text, LstKind::Art).unwrap());
+    catalog
+}
+
+#[test]
+fn extended_constructors_refuse_what_does_not_fit() {
+    assert_eq!(Fid::try_new(1, 0, 20, 5, 3), Ok(Fid::new(1, 0, 20, 5, 3)));
+    assert_eq!(Fid::try_new(10, 4095, 0, 0, 0), Ok(Fid(0x0A00_0FFF)));
+    assert_eq!(
+        Fid::try_new(11, 0, 0, 0, 0),
+        Err(FidError::CategoryRange(11))
+    );
+    assert_eq!(
+        Fid::try_new(16, 0, 0, 0, 0),
+        Err(FidError::CategoryRange(16))
+    );
+    assert_eq!(
+        Fid::try_new(0, u32::MAX, 0, 0, 0),
+        Err(FidError::BaseRange {
+            category: 0,
+            index: u32::MAX
+        })
+    );
+    assert_eq!(Fid::extended(1, 5), Err(FidError::RowCategory(1)));
+    assert_eq!(Fid::extended(8, 5), Err(FidError::RowCategory(8)));
+    assert_eq!(Fid::extended(11, 5), Err(FidError::CategoryRange(11)));
+    assert_eq!(
+        Fid::extended(4, 0x0100_0000),
+        Err(FidError::BaseRange {
+            category: 4,
+            index: 0x0100_0000
+        })
+    );
+    assert_eq!(Fid::extended(10, 0x00ff_ffff), Ok(Fid(0x8AFF_FFFF)));
+    assert_eq!(
+        FidError::BaseRange {
+            category: 2,
+            index: 4096
+        }
+        .to_string(),
+        "art base index 4096 does not fit category 2's identifier"
+    );
+    assert_eq!(
+        FidError::CategoryRange(12).to_string(),
+        "art category 12 is outside 0..=10"
+    );
+}
+
+#[test]
+fn extended_vector_c_registered_rows_extend_the_resolved_list() {
+    let mut catalog = catalog_with(0, b"knife.frm\nspear.frm\nrock.frm\n");
+    catalog.register(&[art(0, "tc_a.frm", 4100)]).unwrap();
+    assert_eq!(catalog.list_len(0), 4101);
+    for row in 3..4100 {
+        assert_eq!(catalog.row_name(0, row), None, "gap row {row}");
+    }
+    assert_eq!(catalog.row_name(0, 2), Some("rock.frm"));
+    assert_eq!(catalog.row_name(0, 4100), Some("tc_a.frm"));
+    assert_eq!(catalog.row_name(0, 4101), None);
+    assert_eq!(catalog.canonical_fid(0, 4100), Some(Fid(0x8000_1004)));
+    assert_eq!(catalog.canonical_fid(0, 4101), None);
+    assert_eq!(
+        catalog.path(Fid(0x8000_1004)).as_deref(),
+        Ok("art/items/tc_a.frm")
+    );
+    assert_eq!(
+        catalog.row_path(0, 4100).as_deref(),
+        Ok("art/items/tc_a.frm")
+    );
+    assert_eq!(catalog.row_token(0, 4100), Some(&b"tc_a.frm"[..]));
+    assert_eq!(catalog.last_row_wide(0, b"TC_A.FRM"), Some(4100));
+    assert_eq!(catalog.last_row(0, b"tc_a.frm"), Some(4100));
+    // Gap rows have no filename, plain or extended.
+    assert_eq!(
+        catalog.filename(Fid(0x8000_0005)),
+        Err(FidError::MissingRow {
+            category: 0,
+            row: 5
+        })
+    );
+    assert_eq!(
+        catalog.filename(Fid(0x0000_0005)),
+        Err(FidError::MissingEntry {
+            category: 0,
+            index: 5
+        })
+    );
+    // Rows of the file keep both forms.
+    assert_eq!(
+        catalog.filename(Fid(0x8000_0001)).as_deref(),
+        Ok("spear.frm")
+    );
+    assert_eq!(
+        catalog.filename(Fid(0x0000_0001)).as_deref(),
+        Ok("spear.frm")
+    );
+    let [line] = catalog.diagnostics() else {
+        panic!("{:?}", catalog.diagnostics());
+    };
+    assert!(
+        line.starts_with("art/items/items.lst: 4,101 rows (3 from the file"),
+        "{line}"
+    );
+}
+
+#[test]
+fn extended_registered_rows_below_4096_answer_plain_identifiers() {
+    let mut catalog = catalog_with(0, b"knife.frm\n");
+    catalog.insert(1, LstTable::parse(b"ranger,1\n", LstKind::Art).unwrap());
+    catalog
+        .register(&[art(0, "tc_b.frm", 10), art(1, "tcmutn", 4)])
+        .unwrap();
+    assert!(catalog.diagnostics().is_empty());
+    assert_eq!(catalog.list_len(0), 11);
+    assert_eq!(
+        catalog.filename(Fid(0x0000_000A)).as_deref(),
+        Ok("tc_b.frm")
+    );
+    assert_eq!(catalog.canonical_fid(0, 10), Some(Fid(0x0000_000A)));
+    // A registered critter row takes suffixes and the default alias.
+    assert_eq!(
+        catalog.filename(Fid::new(1, 4, 0, 0, 0)).as_deref(),
+        Ok("tcmutnaa.frm")
+    );
+    assert_eq!(
+        catalog.filename(Fid::new(1, 4, 20, 5, 3)).as_deref(),
+        Ok("tcmutnba.fr2")
+    );
+    assert_eq!(catalog.critter_alias(4), Some(0));
+    assert_eq!(catalog.base_token(1, 4), Some(&b"tcmutn"[..]));
+    assert_eq!(catalog.last_row(1, b"tcmutn"), Some(4));
+    assert_eq!(
+        catalog.filename(Fid::new(1, 2, 0, 0, 0)),
+        Err(FidError::MissingEntry {
+            category: 1,
+            index: 2
+        })
+    );
+    // A category with no list file holds only its registered rows.
+    catalog.register(&[art(6, "tc_icon.frm", 1)]).unwrap();
+    assert_eq!(catalog.list_len(6), 2);
+    assert_eq!(
+        catalog.filename(Fid(0x0600_0001)).as_deref(),
+        Ok("tc_icon.frm")
+    );
+    assert_eq!(
+        catalog.filename(Fid(0x0600_0000)),
+        Err(FidError::MissingEntry {
+            category: 6,
+            index: 0
+        })
+    );
+    assert_eq!(catalog.list_len(7), 0);
+    assert_eq!(
+        catalog.filename(Fid(0x0700_0000)),
+        Err(FidError::MissingList(7))
+    );
+}
+
+#[test]
+fn extended_vector_d_register_refusals_name_category_and_index() {
+    let base = || catalog_with(2, b"a.frm\nb.frm\nc.frm\n");
+    for (rows, needles) in [
+        (
+            vec![art(2, "x.frm", 2)],
+            &["row 2", "scenery", "3 rows"][..],
+        ),
+        (
+            vec![art(1, "crit", 4096)],
+            &["row 4096", "critters", "4095"],
+        ),
+        (vec![art(8, "head", 5000)], &["row 5000", "heads"]),
+        (vec![art(11, "x.frm", 9)], &["category 11", "row 9"]),
+        (
+            vec![art(2, "x.frm", 0x0100_0000)],
+            &["row 16777216", "scenery"],
+        ),
+        (
+            vec![art(2, "x.frm", 5000), art(2, "y.frm", 5000)],
+            &["row 5000", "scenery", "twice"],
+        ),
+        (vec![art(2, "two words", 9)], &["row 9", "list name"]),
+        (vec![art(2, "", 9)], &["row 9", "list name"]),
+        (vec![art(2, "thirteen.frmx", 9)], &["list name"]),
+    ] {
+        let mut catalog = base();
+        let error = catalog.register(&rows).unwrap_err();
+        for needle in needles {
+            assert!(error.contains(needle), "{needle}: {error}");
+        }
+        // Nothing is registered after a refusal.
+        assert_eq!(catalog.list_len(2), 3, "{error}");
+        assert_eq!(catalog.list_len(1), 0, "{error}");
+    }
+    // An index at the list's length is the first free row; registering it
+    // twice across calls is refused.
+    let mut catalog = base();
+    catalog.register(&[art(2, "d.frm", 3)]).unwrap();
+    assert_eq!(catalog.row_name(2, 3), Some("d.frm"));
+    let error = catalog.register(&[art(2, "e.frm", 3)]).unwrap_err();
+    assert!(
+        error.contains("row 3") && error.contains("twice"),
+        "{error}"
+    );
+    // Critter and head row 4095 is the last allowed.
+    catalog.register(&[art(1, "crit", 4095)]).unwrap();
+    assert_eq!(catalog.base_token(1, 4095), Some(&b"crit"[..]));
+}
+
+/// §5.4: `Fid::extended(c, r)?.row(catalog) == Some(r)` for every row the
+/// list holds, and the canonical FID of a row below 4096 is the plain one.
+#[test]
+fn extended_round_trip_over_a_spread_of_rows() {
+    let mut catalog = ArtCatalog::default();
+    for category in [0, 2, 3, 4, 5, 6, 7, 9, 10] {
+        catalog.insert(category, generated("r", 4100));
+        catalog
+            .register(&[art(category, "far.frm", 70_000)])
+            .unwrap();
+    }
+    for category in [0, 2, 3, 4, 5, 6, 7, 9, 10] {
+        assert_eq!(catalog.list_len(category), 70_001);
+        for row in [
+            0, 1, 2, 4094, 4095, 4096, 4097, 4099, 8191, 8192, 65535, 65536, 69_999, 70_000,
+        ] {
+            let extended = Fid::extended(category, row).unwrap();
+            assert_eq!(extended.row(&catalog), Some(row), "{category} {row}");
+            let canonical = catalog.canonical_fid(category, row).unwrap();
+            assert_eq!(canonical.row(&catalog), Some(row), "{category} {row}");
+            if row < 4096 {
+                assert_eq!(canonical, Fid::try_new(category, row, 0, 0, 0).unwrap());
+                assert_eq!(catalog.filename(canonical), catalog.filename(extended));
+            } else {
+                assert_eq!(canonical, extended);
+            }
+        }
+        assert_eq!(catalog.canonical_fid(category, 70_001), None);
+        assert_eq!(
+            catalog
+                .filename(Fid::extended(category, 70_000).unwrap())
+                .as_deref(),
+            Ok("far.frm")
+        );
+    }
+    assert_eq!(catalog.diagnostics().len(), 9);
+}
+
+#[test]
+fn extended_catalog_load_records_the_diagnostic() {
+    let mut scenery: String = (0..4100).map(|row| format!("s{row:04}.frm\n")).collect();
+    scenery.push_str("tail.frm\n");
+    let dir = crate::MemoryDir::new([
+        (
+            "art/scenery/scenery.lst",
+            crate::ByteSource::new(scenery.into_bytes()).unwrap(),
+        ),
+        (
+            "art/items/items.lst",
+            crate::ByteSource::new(b"knife.frm\n".to_vec()).unwrap(),
+        ),
+    ])
+    .unwrap();
+    let catalog = ArtCatalog::load(&dir).unwrap();
+    assert_eq!(catalog.list_len(2), 4101);
+    assert_eq!(catalog.list_len(0), 1);
+    assert_eq!(
+        catalog.diagnostics(),
+        [
+            "art/scenery/scenery.lst: 4,101 rows; first unreachable row 4096: plain identifiers \
+          address rows 0-4095, so rows from 4096 need extended identifiers"
+        ]
+    );
+    assert_eq!(
+        catalog.filename(Fid(0x8200_1004)).as_deref(),
+        Ok("tail.frm")
     );
 }

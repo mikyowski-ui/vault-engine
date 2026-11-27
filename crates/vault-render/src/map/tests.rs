@@ -878,6 +878,7 @@ fn spec014_cutout_relights_inside_the_mask() {
             shroud: None,
             overscan: false,
             highlight: None,
+            backdrop: None,
         };
         draw_map_scene(&mut image, &map, &scene(vec![wall]), view, &art, scene_cut).unwrap();
         let [x, y] = view.grid.hex_center(20300).unwrap();

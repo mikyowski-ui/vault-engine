@@ -708,7 +708,7 @@ impl<A: WorldAssets> WorldHost<A> {
             }
             107 => {
                 if let Some(object) = self.live("metarule3 107", p1 as u32) {
-                    self.set_base_art(object, (p2 as u32 & 0xfff) as u16);
+                    self.change_art_number(object, p2 as u32);
                 }
                 0
             }
@@ -758,6 +758,42 @@ impl<A: WorldAssets> WorldHost<A> {
                 critters.find(|(reference, _)| *reference == previous)?;
                 critters.next().map(|(reference, _)| reference)
             }
+        }
+    }
+    /// §5.2 sub-function 107 with argument `number`. An extended
+    /// identifier (SPEC-007 §2.1.1) gives a non-player, non-critter object
+    /// the row it addresses: the canonical identifier of that row in the
+    /// object's art category, or no change (with a diagnostic) when that
+    /// list has no such row. Every other call takes the low 12 bits, as
+    /// before.
+    fn change_art_number(&mut self, object: ObjectRef, number: u32) {
+        let extended = object != self.world.player
+            && self
+                .world
+                .get(object)
+                .is_some_and(|target| target.category() != Category::Critter)
+            && self.assets.art_extended(number);
+        if !extended {
+            self.set_base_art(object, (number & 0xfff) as u16);
+            return;
+        }
+        let Some(category) = self
+            .world
+            .get(object)
+            .map(|target| vault_formats::Fid(target.raw.art_id).category())
+        else {
+            return;
+        };
+        let row = vault_formats::Fid(number).wide_base();
+        match self.assets.art_fid(category, row) {
+            Some(fid) => {
+                if let Some(target) = self.world.get_mut(object) {
+                    target.raw.art_id = fid;
+                }
+            }
+            None => self.world.diagnostic(format!(
+                "metarule3 107: art category {category} has no row {row}; the art stays"
+            )),
         }
     }
     /// §5.2 sub-function 107: base `base` for `object`'s art at once,

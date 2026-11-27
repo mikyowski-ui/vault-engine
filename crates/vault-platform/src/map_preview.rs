@@ -41,6 +41,8 @@ const EGG_ART: u32 = 0x0600_0002;
 
 mod automap;
 mod autoplay_hud;
+mod backdrop;
+pub(crate) use backdrop::CACHE_MIB_RANGE as BACKDROP_CACHE_MIB_RANGE;
 mod barter;
 pub(crate) mod bot;
 mod called;
@@ -301,6 +303,10 @@ pub struct MapPreview {
     scene_renderer: SharedRenderer,
     /// How the last frame's refreshes were drawn (the F9 renderer page).
     render_frame: vault_debug::FrameRender,
+    /// The bound map's pre-rendered backdrop and its chunk cache (owner
+    /// brief `docs/prerendered-backdrop-cutaway.md`); behind a cell so the
+    /// object pick (`&self`) decodes the chunks it reads.
+    backdrops: std::cell::RefCell<backdrop::Backdrops>,
 }
 
 /// The map's sprites by tile index or object art. Each art file is read and
@@ -314,8 +320,13 @@ struct MapSprites {
     tile_art: Vec<Option<Arc<FrmArchive>>>,
     /// Object art that is missing or unreadable; it is not drawn.
     missing: BTreeSet<(Category, u32, u8)>,
-    /// The map whose tiles are bound (its header name and number).
-    tiles: Option<([u8; 16], i32)>,
+    /// The map whose tiles are bound: its header name and number, and the
+    /// file name it was opened under.
+    tiles: Option<([u8; 16], i32, Option<String>)>,
+    /// The bound map's tile remap (`[[tile_remap]]`, owner brief
+    /// `docs/extended-art-namespaces.md` §3.5): a listed local tile index
+    /// draws the row it names. `tile_art` stays indexed by local index.
+    remap: Option<vault_formats::TileRemap>,
     /// A fingerprint of the drawn objects' art when everything they need
     /// was last bound: an unchanged scene skips the per-object lookups
     /// (P-02).
@@ -382,20 +393,41 @@ impl MapSprites {
     /// Bind the art `map` and `objects` draw that is not bound yet: every
     /// tile of a map not seen before, and each new object art. The objects
     /// are passed apart from the map so a live world binds its current
-    /// objects without cloning the map file (P-02).
+    /// objects without cloning the map file (P-02). `map_file` is the
+    /// map's file name under `maps/` (its tile remap's key), when known.
     fn bind(
         &mut self,
         assets: &VfsWorldAssets,
         map: &MapFile,
         objects: &MapObjects,
+        map_file: Option<&str>,
     ) -> AppResult<()> {
-        let identity = (map.header.name, map.header.map_number);
+        let identity = (
+            map.header.name,
+            map.header.map_number,
+            map_file.map(str::to_owned),
+        );
         let fingerprint = Self::object_fingerprint(objects);
-        if self.tiles == Some(identity) && self.objects == Some(fingerprint) {
+        if self.tiles.as_ref() == Some(&identity) && self.objects == Some(fingerprint) {
             return Ok(());
         }
         let mut needed = self.unbound_objects(objects)?;
-        if self.tiles != Some(identity) {
+        if self.tiles.as_ref() != Some(&identity) {
+            let remap = match map_file {
+                Some(file) => assets
+                    .tile_remap(file)
+                    .map_err(|error| format!("tile remap of {file}: {error}"))?,
+                None => None,
+            };
+            if remap != self.remap {
+                // Another remap changes what a local index draws.
+                self.bindings
+                    .retain(|(category, ..), _| *category != Category::Tile);
+                self.missing
+                    .retain(|(category, ..)| *category != Category::Tile);
+                self.tile_art.clear();
+                self.remap = remap;
+            }
             for tiles in map.tiles.iter().flatten() {
                 for tile in tiles {
                     // S-19 / SPEC-014 §3.36: every roof but the blank index 1
@@ -420,16 +452,48 @@ impl MapSprites {
         }
         let catalog = assets.art_catalog()?;
         for key @ (category, id, _) in needed {
-            // Tile squares store a bare list index; objects store a complete FID,
-            // whose own category bits select the art directory and codec.
-            let fid = if category == Category::Tile {
-                Fid::new(4, id as u16, 0, 0, 0)
-            } else {
-                Fid(id)
+            // A remapped tile index names a row of the resolved tile list,
+            // which may lie past 4095 (brief §3.5); the row's file, or no
+            // file, is the safe rule's "not drawn".
+            let remapped = (category == Category::Tile)
+                .then(|| self.remap.as_ref().map(|remap| remap.row(id as u16)))
+                .flatten()
+                .filter(|row| *row != id);
+            let resolved = match remapped {
+                Some(row) => match assets.tile_row_path(row) {
+                    Some(path) => path,
+                    None => {
+                        tracing::warn!(tile = id, row, "remapped tile row has no art; not drawn");
+                        self.missing.insert(key);
+                        continue;
+                    }
+                },
+                None => {
+                    // Tile squares store a bare list index (12 bits, so it
+                    // always fits); objects store a complete FID, whose own
+                    // category bits select the art directory and codec.
+                    let fid = if category == Category::Tile {
+                        Fid::try_new(4, id, 0, 0, 0)
+                            .map_err(|error| format!("tile index {id}: {error}"))?
+                    } else {
+                        Fid(id)
+                    };
+                    match catalog.path(fid) {
+                        Ok(path) => path,
+                        // SPEC-007 §2.1's "no filename" (an extended
+                        // identifier whose row a session lacks, brief
+                        // §3.6.1): the object is logged and not drawn.
+                        Err(error) if category != Category::Tile => {
+                            tracing::warn!(art_id = id, %error, "object art has no file; not drawn");
+                            self.missing.insert(key);
+                            continue;
+                        }
+                        Err(error) => {
+                            return Err(format!("art identifier {:#010x}: {error}", fid.0).into());
+                        }
+                    }
+                }
             };
-            let resolved = catalog
-                .path(fid)
-                .map_err(|error| format!("art identifier {:#010x}: {error}", fid.0))?;
             let resolved = VfsPath::new(&resolved)?.to_string();
             match assets.frame(&resolved) {
                 Ok(archive) => {
@@ -444,7 +508,11 @@ impl MapSprites {
                 }
                 // The reference has no guaranteed final fallback resource.
                 Err(error) if category != Category::Tile => {
-                    tracing::warn!(art_id = fid.0, sprite = %resolved, %error, "object art is missing; not drawn");
+                    tracing::warn!(art_id = id, sprite = %resolved, %error, "object art is missing; not drawn");
+                    self.missing.insert(key);
+                }
+                Err(error) if remapped.is_some() => {
+                    tracing::warn!(tile = id, sprite = %resolved, %error, "remapped tile art is missing; not drawn");
                     self.missing.insert(key);
                 }
                 Err(error) => return Err(format!("{resolved}: {error}").into()),
@@ -468,6 +536,15 @@ impl MapSprites {
         }
         Ok(())
     }
+}
+
+/// The file name under `maps/` the current map was opened under,
+/// lowercase (`synth.map` for the working `SYNTH.SAV`): the key of its tile
+/// remap.
+fn map_file_name(world: &WorldState) -> Option<String> {
+    let name = world.current_map_name()?;
+    let stem = name.split_once('.').map_or(name.as_str(), |(stem, _)| stem);
+    (!stem.is_empty()).then(|| format!("{}.map", stem.to_ascii_lowercase()))
 }
 
 /// SPEC-010 §3.11 an effect owner's screen rectangle, as inclusive corners
@@ -569,7 +646,10 @@ impl MapPreview {
         setup: impl FnOnce(&mut WorldHost<VfsWorldAssets>),
     ) -> AppResult<Self> {
         let path = VfsPath::new(path)?;
-        let palette = Palette::parse(&assets.vfs.read_bounded("color.pal", MAX_ASSET_BYTES)?)?;
+        let palette_bytes = assets.vfs.read_bounded("color.pal", MAX_ASSET_BYTES)?;
+        let palette = Palette::parse(&palette_bytes)?;
+        // A backdrop is checked against the raw bytes of this palette file.
+        let backdrops = backdrop::Backdrops::new(&palette_bytes);
         let font = assets.font().ok();
         let mut host = WorldHost::new(WorldState::new(character, seed)?, assets);
         host.set_preset(preset);
@@ -593,9 +673,15 @@ impl MapPreview {
             tracing::warn!(%error, "combat AI unavailable");
         }
         host.load_map(path.as_str())?;
+        // Extended art (`docs/extended-art-namespaces.md` §3.1 item 3): each
+        // resolved list past 4,096 rows is reported once, in the log only.
+        for line in host.assets.take_art_diagnostics() {
+            tracing::warn!(diagnostic = %line, "art list");
+        }
         let objects = host.world.render_objects();
         let mut art = MapSprites::default();
-        art.bind(&host.assets, &host.world.map, &objects)?;
+        let map_file = map_file_name(&host.world);
+        art.bind(&host.assets, &host.world.map, &objects, map_file.as_deref())?;
         let mut view = MapView::new(&host.world.map, 640, 380)?;
         view.grid = HexGrid::centered(host.world.camera_hex, 640, 380)?;
         view.elevation = host.world.elevation;
@@ -664,6 +750,7 @@ impl MapPreview {
             qol_state: qol::Qol::default(),
             scene_renderer: SharedRenderer::default(),
             render_frame: Default::default(),
+            backdrops: std::cell::RefCell::new(backdrops),
         })
     }
     /// SPEC-014 §3.19 the `/` and `?` date line, "December: 5/2161 7:21":
@@ -880,7 +967,9 @@ impl MapPreview {
         let egg = self.egg_mask();
         let objects = self.host.world.render_objects();
         let map = &self.host.world.map;
-        self.art.bind(&self.host.assets, map, &objects)?;
+        let map_file = map_file_name(&self.host.world);
+        self.art
+            .bind(&self.host.assets, map, &objects, map_file.as_deref())?;
         let ambient = self.host.world.ambient;
         // SPEC-001 §3.7: every palette file load, `loadpalettetable` among
         // them, replaces the intensity, mix and blend tables. Fades and
@@ -909,7 +998,19 @@ impl MapPreview {
         shared.lock().renderer.begin_frame();
         let mut refreshes = scene_render::FrameRefreshes::new(&shared);
         let mut images = Vec::with_capacity(views.len());
+        // The bound map's backdrop, under every refresh of its elevation
+        // under either preset (brief §3.5 and question 7).
+        self.backdrops.borrow_mut().sync(&self.host);
         for &(view, [ox, oy]) in views {
+            let prepared = self
+                .backdrops
+                .borrow_mut()
+                .prepare(&*self.host.assets.vfs, &view);
+            let tiles = prepared
+                .as_ref()
+                .map(backdrop::Prepared::tiles)
+                .unwrap_or_default();
+            let backdrop = prepared.as_ref().map(|prepared| prepared.view(&tiles));
             // SPEC-014 §3.44: floor tiles are lit per pixel from ten hex
             // lights around each tile; objects take their hex's light and
             // roofs the ambient.
@@ -952,6 +1053,7 @@ impl MapPreview {
                 shroud,
                 overscan,
                 highlight,
+                backdrop: backdrop.as_ref(),
             };
             // The floor, lit per pixel, then the scene's layers.
             images.push(refreshes.render(map, &objects, view, &self.art, scene)?);
@@ -1000,6 +1102,8 @@ impl MapPreview {
 
 #[cfg(test)]
 mod corpus_tests;
+#[cfg(test)]
+mod extended_art_tests;
 #[cfg(test)]
 mod fallout2_combat_tests;
 #[cfg(test)]

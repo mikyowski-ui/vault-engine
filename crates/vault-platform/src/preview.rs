@@ -52,6 +52,10 @@ pub struct PreviewArgs {
     /// It changes no output, and is neither logged nor saved.
     #[arg(skip)]
     pub render_path: vault_render::RenderPath,
+    /// The worlds' pre-rendered backdrop chunk cache, in MiB (the settings'
+    /// `backdrop_cache_mib`; `None`: 64). It changes no output.
+    #[arg(skip)]
+    pub backdrop_cache_mib: Option<u32>,
     /// SPEC-024b §3.1: opt-in sfall mode, under `fallout2` only. It wins over
     /// the settings file and mod manifests, and a replay needs it, as a
     /// replay reads neither.
@@ -834,7 +838,8 @@ impl PreviewArgs {
         let language = self.language.as_deref().unwrap_or("english");
         let save_root = self.save_dir.clone().unwrap_or_else(|| PathBuf::from("."));
         // One world-canvas renderer for the session's worlds.
-        let renderer = crate::map_preview::SharedRenderer::new(self.render_path);
+        let renderer = crate::map_preview::SharedRenderer::new(self.render_path)
+            .with_backdrop_cache_mib(self.backdrop_cache_mib);
         if self.game {
             let source = self.source()?;
             let startup = self.startup(source.as_ref());

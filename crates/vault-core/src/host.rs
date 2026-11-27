@@ -286,6 +286,15 @@ impl<T: WorldAssets + ?Sized> WorldAssets for Box<T> {
     fn critter_alias(&self, index: u16) -> Option<i32> {
         (**self).critter_alias(index)
     }
+    fn art_fid(&self, category: u8, row: u32) -> Option<u32> {
+        (**self).art_fid(category, row)
+    }
+    fn art_extended(&self, fid: u32) -> bool {
+        (**self).art_extended(fid)
+    }
+    fn art_row_token(&self, category: u8, row: u32) -> Option<Vec<u8>> {
+        (**self).art_row_token(category, row)
+    }
     fn object_art(
         &self,
         fid: u32,

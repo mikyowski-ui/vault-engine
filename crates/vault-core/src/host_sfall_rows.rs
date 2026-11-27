@@ -222,6 +222,17 @@ impl<A: WorldAssets> WorldHost<A> {
             return;
         };
         let row = self.assets.art_row(1, name.as_bytes());
+        // SPEC-007 §2.1.1 `[May-improve]`: a critter row past the 4,096 rows
+        // a critter identifier addresses is refused, not ORed past the base.
+        if let Some(row) = row
+            && u32::from(row) >= vault_formats::fid::PLAIN_ROWS
+        {
+            self.world.diagnostic(format!(
+                "start model: critter row {row} of {name} does not fit a critter identifier; the \
+                 art stays"
+            ));
+            return;
+        }
         if let (Some(row), Some(object)) = (row, self.world.get_mut(player)) {
             object.raw.art_id = (object.raw.art_id & !0xfff) | u32::from(row);
         }

@@ -176,6 +176,20 @@ decisions recorded at the end of each. Its tests use synthetic fixtures only.
 No spec changed for the elevation fix: SPEC-003 section 2.10 already gives a held object
 the elevation of the tree it is in, and the live world now agrees with a load.
 
+Engine Wave 2A, of 2026-11-27, was built the same way, from the owner's briefs
+`docs/prerendered-backdrop-cutaway.md` and `docs/extended-art-namespaces.md`. The
+owner took each brief's recommended answer to its open questions; where a brief left a
+gap, the implementing side chose a default and marked it as one in the Decisions.
+The new file formats (`.bkd`, `.bkc`, `.tlx`) are this project's own, and their tests
+and fuzz seeds are synthetic.
+
+| Spec | Revision | What it records | Decisions |
+| --- | --- | --- | --- |
+| SPEC-022 | 5 | Pre-rendered map backdrops: the index and chunk files, the depth and fade planes, two added sort keys, the foreground fade, suppression, picking and errors (section 3.17) | D-45 to D-58 |
+| SPEC-007 | R1-rev11 | Extended art identifiers and resolved art lists (section 2.1.1), the `VTLX` tile remap sidecar (section 2.1.2), and Fixture K | In the sections |
+| SPEC-024a | 5 | The `[[art]]`, `[[protos]]` and `[[tile_remap]]` manifest rows (section 2.4) and the word `mod_art_fid`, `0x830A` | D-35 to D-45 |
+| SPEC-017 | 7 | `metarule3` rule 107 with an extended identifier (section 5.2) | 52 |
+
 A later research-vault revision of any of these specs supersedes these changes, as it
 does Team A's.
 

@@ -83,6 +83,13 @@ pub const HEXES: u32 = 40000;
 pub const SQUARES: u32 = 10000;
 /// The roof layer's primary after every square rank: the enhanced shroud.
 pub const SHROUD_PRIMARY: u32 = SQUARES;
+/// The floor layer's primary after every square rank: a pre-rendered
+/// backdrop's floor pass (its depth-0 pixels), with secondary 0.
+pub const BACKDROP_FLOOR_PRIMARY: u32 = SQUARES;
+/// The upright layer's secondary of a pre-rendered backdrop group: after
+/// every object of its hex (a list index is below 2^29 and a part below 5,
+/// so no object key reaches it).
+pub const BACKDROP_SECONDARY: u32 = u32::MAX;
 
 /// SPEC-022 §2.1 the 64-bit sort key: layer in bits 61-63, primary in
 /// bits 32-60, secondary in bits 0-31. Instances draw in ascending key
@@ -121,7 +128,8 @@ impl SortKey {
         let part = secondary & 7;
         match layer {
             FrameLayer::Floor => {
-                if primary >= SQUARES {
+                // The square ranks, and the backdrop floor pass after them.
+                if primary > BACKDROP_FLOOR_PRIMARY {
                     return domain("square rank", u64::from(primary));
                 }
                 if secondary != 0 {
@@ -132,7 +140,9 @@ impl SortKey {
                 if primary >= HEXES {
                     return domain("hex", u64::from(primary));
                 }
-                if part > 4 {
+                // A backdrop group: exactly secondary 0xFFFFFFFF, upright.
+                let group = layer == FrameLayer::Upright && secondary == BACKDROP_SECONDARY;
+                if part > 4 && !group {
                     return domain("part", u64::from(part));
                 }
             }
@@ -172,7 +182,28 @@ impl SortKey {
     }
     /// A floor square of rank `rank` (part 0).
     pub fn floor(rank: u32) -> Result<Self, InstanceError> {
+        if rank >= SQUARES {
+            return Err(InstanceError::Domain {
+                field: "square rank",
+                value: u64::from(rank),
+            });
+        }
         Self::new(FrameLayer::Floor as u8, rank, 0)
+    }
+    /// A pre-rendered backdrop's floor pass: after every floor square,
+    /// before every flat object (`(0, 10000, 0)`).
+    pub fn backdrop_floor() -> Self {
+        Self(u64::from(BACKDROP_FLOOR_PRIMARY) << 32)
+    }
+    /// A pre-rendered backdrop's group of hex `hex`: after every object of
+    /// that hex and before every object of the next
+    /// (`(2, hex, 0xFFFFFFFF)`).
+    pub fn backdrop_group(hex: u32) -> Result<Self, InstanceError> {
+        Self::new(FrameLayer::Upright as u8, hex, BACKDROP_SECONDARY)
+    }
+    /// Whether this is a backdrop group's key.
+    pub fn is_backdrop_group(self) -> bool {
+        self.layer() == FrameLayer::Upright as u8 && self.secondary() == BACKDROP_SECONDARY
     }
     /// An object of the flat or upright pass: its hex, its list index and
     /// its part (0 to 4).
@@ -186,6 +217,14 @@ impl SortKey {
             return Err(InstanceError::Domain {
                 field: "object layer",
                 value: layer as u64,
+            });
+        }
+        // Parts 0-4: list index 2^29 - 1 with part 7 would be the backdrop
+        // group's secondary.
+        if part > 4 {
+            return Err(InstanceError::Domain {
+                field: "part",
+                value: u64::from(part),
             });
         }
         Self::new(layer as u8, hex, Self::list_secondary(list_index, part)?)
@@ -332,6 +371,12 @@ impl LightSource {
 pub const EXEMPT: u8 = 1;
 /// Instance flag bit 1: the roof peek test applies.
 pub const PEEK: u8 = 2;
+/// Instance flag bit 2, in [`DrawMode::Egg`] only: the level image selects
+/// the pixels drawn through the mask. A pixel whose selector is 0 is the
+/// lit draw (with [`EXEMPT`] as set); a pixel whose selector is not 0 is
+/// the masked blend with no exemption (a pre-rendered backdrop group's
+/// faded pixels, SPEC-014 §3.37's masked draw).
+pub const SELECT: u8 = 4;
 
 /// SPEC-022 §3.12 why the instanced path refuses a refresh. Every cause
 /// is a typed error; the refresh is then drawn by the reference path.
@@ -905,6 +950,12 @@ impl FrameInputs<'_> {
             if !fits(image, instance.src) {
                 return Err(InstanceError::SourceRange);
             }
+            if instance.mode == DrawMode::Egg && instance.flags & SELECT != 0 {
+                let (selector, at) = instance.level.ok_or(InstanceError::SourceRange)?;
+                if !fits(self.image(selector)?, at) {
+                    return Err(InstanceError::SourceRange);
+                }
+            }
             if instance.mode == DrawMode::FloorMap {
                 let (level, at) = instance.level.ok_or(InstanceError::SourceRange)?;
                 let levels = self.image(level)?;
@@ -1027,8 +1078,22 @@ fn shade(
             let blended = tables.blends[t][usize::from(gray)][usize::from(destination())];
             tables.intensity(blended, level)
         }
+        DrawMode::Egg
+            if instance.flags & SELECT != 0 && {
+                let (selector, at) = instance.level.expect("validated");
+                inputs.images[selector].at(at[0] + u, at[1] + v) == 0
+            } =>
+        {
+            // An unselected pixel: the lit draw.
+            lit(s, level)
+        }
         DrawMode::Egg => {
-            let s1 = lit(s, level);
+            // A selected pixel is relit with no exemption (the masked draw).
+            let s1 = if instance.flags & SELECT != 0 && instance.light != LightSource::None {
+                tables.intensity(s, level)
+            } else {
+                lit(s, level)
+            };
             let weight = inputs
                 .uniforms
                 .cutout

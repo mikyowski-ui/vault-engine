@@ -176,8 +176,13 @@ impl<A: WorldAssets> WorldHost<A> {
                 .art_id,
         );
         let orientation = self.world.get(object).map_or(0, |o| o.raw.orientation);
+        // SPEC-007 §2.1.1: an extended identifier's bits 12-23 are its row,
+        // not an animation, so it keeps its art.
+        let extended = self.assets.art_extended(art.0);
         let fid = |host: &Self, animation: u8| {
-            if art.category() == 1 {
+            if extended {
+                art.0
+            } else if art.category() == 1 {
                 host.assets.construct_fid(
                     1,
                     art.base(),
@@ -2064,13 +2069,19 @@ impl<A: WorldAssets> WorldHost<A> {
                     // Weapon animation zero; the raw orientation (not orientation
                     // plus one) is the constructor's requested selector.
                     let art = vault_formats::Fid(object.raw.art_id);
-                    let fid = self.assets.construct_fid(
-                        art.category(),
-                        art.base(),
-                        call.uint(0) as u8,
-                        0,
-                        object.raw.orientation,
-                    );
+                    // SPEC-007 §2.1.1: an extended identifier has no
+                    // animation bits, so its own art answers.
+                    let fid = if self.assets.art_extended(art.0) {
+                        art.0
+                    } else {
+                        self.assets.construct_fid(
+                            art.category(),
+                            art.base(),
+                            call.uint(0) as u8,
+                            0,
+                            object.raw.orientation,
+                        )
+                    };
                     integer(
                         self.assets
                             .object_art(fid)

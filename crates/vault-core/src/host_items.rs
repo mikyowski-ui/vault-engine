@@ -190,6 +190,15 @@ impl<A: WorldAssets> WorldHost<A> {
             .as_ref()
             .map_or(JUMPSUITS[gender], |name| name.as_bytes());
         let default = self.assets.art_row(1, name).unwrap_or(0);
+        // SPEC-007 §2.1.1 `[May-improve]`: a critter row past the 4,096
+        // rows a critter identifier addresses is refused, not wrapped.
+        if Fid::try_new(1, u32::from(default), 0, 0, 0).is_err() {
+            self.world.diagnostic(format!(
+                "player art: critter row {default} does not fit a critter identifier; the art \
+                 stays"
+            ));
+            return;
+        }
         self.world.default_player_art = default;
         if self.worn_armor(player).is_some() {
             return;
@@ -207,7 +216,9 @@ impl<A: WorldAssets> WorldHost<A> {
             } else {
                 0
             };
-            object.raw.art_id = Fid::new(1, default, 0, weapon, 0).0;
+            if let Ok(fid) = Fid::try_new(1, u32::from(default), 0, weapon, 0) {
+                object.raw.art_id = fid.0;
+            }
         }
     }
     /// SPEC-014 §3.34 the inventory windows' rotating figure: `owner`'s art,
@@ -262,6 +273,13 @@ impl<A: WorldAssets> WorldHost<A> {
             return;
         }
         let base = u32::from(self.world.default_player_art);
+        // SPEC-007 §2.1.1: never OR a row past the 12-bit base field.
+        if base >= vault_formats::fid::PLAIN_ROWS {
+            self.world.diagnostic(format!(
+                "player art: critter row {base} does not fit a critter identifier; the art stays"
+            ));
+            return;
+        }
         if let Some(object) = self.world.get_mut(owner) {
             object.raw.art_id = (object.raw.art_id & !0xfff) | base;
         }

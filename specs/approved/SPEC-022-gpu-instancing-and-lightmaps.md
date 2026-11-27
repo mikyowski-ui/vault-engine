@@ -1,6 +1,6 @@
 # SPEC-022: GPU-Instanced Sprite Batching and Hex Lightmaps
 
-**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revision 3 (Team A, 2026-10-30); see "Revision history". Revision 4 (Team A, 2026-11-01) adds the cursor layer.
+**Status:** approved by the Spec-Author sub-agent (Team A), 2026-10-27, under AGENTS.md "Spec Authoring (Team A)". Revision 3 (Team A, 2026-10-30); see "Revision history". Revision 4 (Team A, 2026-11-01) adds the cursor layer. Revision 5 (implementing side, 2026-11-27, on the owner's brief `docs/prerendered-backdrop-cutaway.md`) adds pre-rendered map backdrops (section 3.17).
 
 **Provenance.** Author: the Spec-Author sub-agent (Team A), 2026-10-27.
 Sources:
@@ -152,6 +152,15 @@ alone (section 7).
   the form of every key of layers 0 to 6 are unchanged, though an object after the
   cursor on its hex takes a list index two lower. New vectors are in
   `tests/fixtures/spec022/rev4/`.
+
+- **Revision 5 (2026-11-27).** On the owner's brief
+  `docs/prerendered-backdrop-cutaway.md`, written by the implementing side after
+  the Team A/B split ended (`PROVENANCE.md`). A map may ship a pre-rendered
+  backdrop: an index file and chunk files holding a colour plane, an optional
+  16-bit depth plane and an optional 1-bit fade plane (section 3.17). Two sort
+  keys are added, one in layer 0 and one form in layer 2; every existing key, its
+  form and its order are unchanged, and a refresh without a backdrop is byte for
+  byte what it was (D-45 to D-58). Vectors are in section 3.17.9.
 
 ## Clean-Room Rules for Research Agents
 - Document ONLY binary layouts (byte offsets, endianness, data types), mathematical formulas, state transitions, and observable behavior.
@@ -1223,6 +1232,219 @@ behavior to make the test pass. The reference path wins, the refusal stays for
 that state, and the difference is reported for a revision (sections 3.2 and
 3.10). `[Safe rule]`
 
+### 3.17 Pre-rendered Map Backdrops (Revision 5)
+
+A map elevation may be drawn from one painted image in place of floor tiles and
+wall sprites. Objects pass in front of and behind the painted walls in the
+painter's order of SPEC-014 §3.44, and the player is never hidden behind a
+front wall. Without the index file nothing in this section applies and every
+canvas byte is as before. `[Must-match]`
+
+All multi-byte numbers are big-endian, as in SPEC-003.
+
+#### 3.17.1 Files
+
+```text
+maps/<map>.bkd                    index: header, elevation records, presence tables, suppression lists
+maps/<map>/e<E>/<CX>_<CY>.bkc     one chunk: colour, depth and fade planes
+```
+
+`<map>` is the map's file stem in lower case, `<E>` is 0 to 2, and `<CX>` and
+`<CY>` are the chunk column and row in decimal without padding. The files are
+read through the layered file system like any map file, so a mod layer ships
+them beside its map. `[Must-match]`
+
+#### 3.17.2 The index (`.bkd`)
+
+Header, 24 bytes:
+
+| Offset | Bytes | Field |
+| --- | ---: | --- |
+| `0x00` | 4 | Magic `56 42 4B 44` (`VBKD`) |
+| `0x04` | 2 | Version, 1 |
+| `0x06` | 1 | Elevation mask, bits 0-2; at least one bit set; bits 3-7 clear |
+| `0x07` | 1 | Compression of the chunk files: 0 stored, 1 zlib (RFC 1950) |
+| `0x08` | 2 | Chunk size S: 64, 128, 256 or 512 |
+| `0x0A` | 2 | Reserved, 0 |
+| `0x0C` | 4 | Reserved, 0 |
+| `0x10` | 8 | The SPEC-021 §2.1 64-bit hash of the bytes of the palette file the colour indexes were made for (`color.pal` as the map loads it) |
+
+Then one elevation record of 32 bytes per set mask bit, ascending:
+
+| Offset | Bytes | Field |
+| --- | ---: | --- |
+| `+0x00` | 1 | Elevation, equal to the mask bit |
+| `+0x01` | 1 | Planes: bit 0 colour (must be set), bit 1 depth, bit 2 fade; bits 3-7 clear |
+| `+0x02` | 1 | Suppression: 0 none, 1 wall-category objects, 2 listed PIDs, 3 both |
+| `+0x03` | 1 | Reserved, 0 |
+| `+0x04` | 4 | Origin hex, 0-39999 |
+| `+0x08` | 4 | Origin X: image column of the origin hex's reference corner (signed) |
+| `+0x0C` | 4 | Origin Y: image row of that corner (signed) |
+| `+0x10` | 4 | Width W, 1-16384 |
+| `+0x14` | 4 | Height H, 1-16384 |
+| `+0x18` | 2 | Chunk columns, `ceil(W / S)` |
+| `+0x1A` | 2 | Chunk rows, `ceil(H / S)` |
+| `+0x1C` | 4 | Suppressed PID count N, 0-4096; 0 unless the suppression code is 2 or 3 |
+
+After **all** the elevation records, per elevation in the same order: the
+presence table, one byte per chunk (0 absent, 1 present), row-major, columns ×
+rows bytes; then N PIDs of 4 bytes. Nothing follows the last list.
+`[Must-match]`
+
+**Placement.** Image pixel (x, y) lies at world reference point
+`R(origin hex) + (x - origin X, y - origin Y)`, where R is the SPEC-003 §3.6
+reference corner of a hex. So the image moves with the view like every hex and
+tile, at every zoom and view size. `[Must-match]`
+
+#### 3.17.3 A chunk (`.bkc`)
+
+| Offset | Bytes | Field |
+| --- | ---: | --- |
+| `0x00` | 4 | Magic `56 42 4B 43` (`VBKC`) |
+| `0x04` | 2 | Version, 1 |
+| `0x06` | 1 | Elevation |
+| `0x07` | 1 | Planes, equal to the elevation record's |
+| `0x08` | 2 | Chunk column |
+| `0x0A` | 2 | Chunk row |
+| `0x0C` | 4 | Payload length after decoding |
+| `0x10` | ... | Payload, stored or one zlib stream, per the index |
+
+Chunk width `w = min(S, W - S × column)`, and height `h` likewise. The decoded
+payload is, in order: `w × h` colour bytes (palette indexes; 0 is transparent);
+with the depth plane, `w × h` depth values of 2 bytes; with the fade plane,
+`h × ceil(w / 8)` bytes, one bit per pixel, bit 7 of each byte first, each row
+padded to a whole byte. All planes are row-major. The payload length must equal
+the header's, and nothing follows the payload or the zlib stream.
+`[Must-match]`
+
+#### 3.17.4 Depth
+
+| D | Meaning |
+| --- | --- |
+| 0 | Floor: drawn at the end of the Floor layer, behind every flat and upright object |
+| 1-40000 | Group hex `B = D - 1`: drawn after every upright object on hexes up to and including B, and before every upright object on hexes above B |
+| 40001-65535 | Invalid; the chunk is refused |
+
+Without a depth plane every pixel has D = 0. A pixel of colour 0 is transparent
+whatever its depth, and belongs to no group. `[Must-match]`
+
+#### 3.17.5 Sort keys and drawing
+
+1. The floor pass is one draw item with key `(layer 0, primary 10000,
+   secondary 0)`: one past the last floor square, as the shroud is one past the
+   last roof square. It draws every pixel with D = 0 and colour not 0, over the
+   floor tiles. `[Must-match]`
+2. The pixels of group hex B are one draw item with key `(layer 2, primary B,
+   secondary 0xFFFFFFFF)`. No object key reaches that secondary: the largest is
+   `8 × (2^29 - 1) + 4`. A part above 4 stays refused for objects, and
+   secondaries `0xFFFFFFFD` and `0xFFFFFFFE` stay refused. So a group draws
+   after the objects of its own hex. `[Must-match]`
+3. Groups draw whether or not their hex is in the visited lattice of SPEC-014
+   §3.44: before an upright object, every group of a lower hex not yet drawn
+   draws first; the rest draw after the last object and before the roofs.
+   `[Must-match]`
+4. The Flat, Roof, Outline, FloatingText, NoHex and Cursor layers draw as
+   before, and a translucent object blends with whatever the canvas holds when
+   it draws, the earlier groups included. `[Must-match]`
+5. **Light.** A pixel with D ≥ 1 is lit as an object on hex B; a pixel with
+   D = 0 by the hex under its canvas point (SPEC-003 §3.7), or at the ambient
+   level when that point is off the grid. The level is
+   `trunc(max(ambient, light) / 512)` through the SPEC-001 §3.7 intensity table,
+   and indexes 229-255 stay unlit, as for objects. `[Safe rule]`
+6. **Suppression.** On the backdrop's elevation, an object of art category 3
+   (suppression 1 or 3) or with a listed PID (2 or 3) is not drawn, not
+   outlined and never a pick hit. It keeps its list index and every world role:
+   it blocks, stops sight, is saved and is seen by scripts. A listed PID whose
+   prototype is a door is dropped from the list with one log line, and the door
+   draws. `[Safe rule]`
+
+#### 3.17.6 Foreground fade
+
+A foreground pixel has its fade bit set and D ≥ 1.
+
+1. **Player.** When the player is placed and not hidden, a foreground pixel
+   whose group hex is greater than the player's hex, inside the rectangle of
+   the SPEC-014 §3.37 mask as that section places it, is drawn through the mask
+   with that section's formula and the weight m at the pixel (m = 0 leaves it
+   opaque). Inside the mask the pixel is lit as §3.37 lights a masked wall,
+   without the 229-255 exemption. Under the Vanilla preset this is the only
+   fade. `[Must-match]` for the formula, `[Safe rule]` for the selection
+2. **Cursor.** When a refresh has a roof peek (section 3.10), a foreground
+   pixel whose group hex is greater than the hex under the peek's centre, and
+   that the peek's disc and ordered dither would remove from a roof, is not
+   drawn. With no hex under the centre there is no cursor fade. This rule is
+   tested before the player's. `[Safe rule]`
+3. When the mask art cannot be loaded, foreground pixels draw opaque.
+   `[Safe rule]`
+4. Fading never moves a pixel to another group, so it reorders nothing, and it
+   does not uncover anything for picking. `[Safe rule]`
+
+#### 3.17.7 Picking
+
+A sprite pixel of an upright object on hex h is not a pick hit when the
+backdrop has a pixel of colour not 0 at that canvas point with group hex
+B ≥ h; a flat object's pixel is covered by any group pixel there. This is the
+drawing order, ties included. Picking still reads the world and the reference
+rules only (section 3.13 item 3). `[Safe rule]`
+
+#### 3.17.8 Both paths, errors and memory
+
+1. The instanced path draws the same canvas and the same draw records as the
+   reference path. It builds one image per draw item for each refresh on the
+   CPU and submits it through the existing instance modes; in the masked mode,
+   instance flag 4 selects per pixel between the lit draw and the masked blend.
+   No depth attachment, no 16-bit texture and no new binding is used (section
+   3.11 is unchanged). A refresh whose images do not fit the atlas is refused
+   and redrawn by the reference path (section 3.12). `[May-improve]`
+2. An absent index file means no backdrop. A malformed index, or a palette
+   hash that differs from the loaded palette file's, is one log line per map,
+   and the map draws without the backdrop: tiles and every object. `[Safe rule]`
+3. A chunk the index marks present that is missing or malformed disables that
+   elevation's backdrop and its suppression for the session, with one log line,
+   so no hole opens where suppressed walls were. `[Safe rule]`
+4. The parsers refuse, with the format name (`BKD` or `BKC`) and a byte offset:
+   a wrong magic or version; an empty or out-of-range elevation mask; a record
+   whose elevation is not its mask bit; a clear colour bit or an unknown plane
+   bit; a chunk size outside the four; a width or height of 0 or above 16384;
+   chunk counts other than the ceilings; an origin hex outside 0-39999; a PID
+   count above 4096, or not 0 without PID suppression; a compression or
+   suppression code out of range; a nonzero reserved byte; a presence byte
+   other than 0 or 1; bytes after the last list; a chunk whose elevation,
+   planes, column or row disagree with the index or that the index marks
+   absent; a payload length that is not exact; a depth of 40001 or more; a zlib
+   stream that fails, ends early or is followed by bytes. `[Safe rule]`
+5. Chunks are decoded on demand for the refresh rectangle, synchronously, and
+   kept in a cache of 64 MiB by default (`backdrop_cache_mib`, 1-1024);
+   eviction is least recently drawn, ties by ascending (elevation, row,
+   column). The cache changes no canvas byte. `[May-improve]` for the policy
+6. A backdrop changes no world value: `state_hash`, `combat_hash`, the
+   checkpoint stream, saves and the random number stream are the same with and
+   without it (section 3.13). `[Must-match]`
+7. A backdrop never holds roofs: roof squares stay tiles in the Roof layer, and
+   roof hiding and the roof peek are unchanged. `[Must-match]`
+
+#### 3.17.9 Vectors
+
+With a palette whose intensity and mix tables leave indexes 7 and 9 unchanged
+at the levels used, ambient light 65536 and no light source:
+
+- **Keys.** The group of hex 20508 has key `0x4000501CFFFFFFFF`; an object on
+  hex 20508, list index 0, part 0 has `0x4000501C00000000`; on hex 20509,
+  `0x4000501D00000000`. They sort in that order. The floor pass has key
+  `0x0000271000000000`.
+- **Bytes.** A backdrop of 4 by 1 pixels, colour `07 07 07 07`, depth `0000
+  0000 501D 501D` (D = 20509, group hex 20508), under a 4 by 1 upright sprite
+  `09 09 09 09` at the same canvas pixels: with the object on hex 20100 the
+  canvas is `09 09 07 07`; on hex 20508, `09 09 07 07`; on hex 20509, `09 09 09
+  09`; with no object, `07 07 07 07`.
+- **Fade.** The same, with the fade bit set on all four pixels and the sprite
+  the player's, on hex 20100, the mask covering the four pixels with weight 1:
+  the two D ≥ 1 pixels become `mix[intensity[07][1]][intensity[09][127]]`, and
+  the two D = 0 pixels stay `09`. With the mask's player hex above the group
+  hex they draw opaque, `07`.
+- **Refused.** Magic `VBKE`; chunk size 100; a depth of 40001; a payload one
+  byte short; bytes after a zlib stream.
+
 ## 4. Required Tests
 
 The implementer writes at least these tests. They use synthetic data only.
@@ -1804,6 +2026,46 @@ Revision 3 adds:
   two places (revision 3's measured rule). Draw order among objects does not change.
   The movement outline leaves the list of 100 and draws with the cursor.
 
+Revision 5 adds (each on the owner's brief `docs/prerendered-backdrop-cutaway.md`;
+"owner decision" is the brief's recommended answer, taken on the owner's
+instruction of 2026-11-27, and "implementing-side default" fills a gap the brief
+left):
+
+- **D-45 (owner decision).** A group draws after the objects of its own hex, so
+  ties go to the backdrop (question 1).
+- **D-46 (owner decision).** Secondary `0xFFFFFFFF` in layer 2 is reserved for the
+  group item (question 2). This amends section 2.1's "part is 0 to 4" for that one
+  secondary only.
+- **D-47 (implementing-side default).** The floor pass has key (layer 0, primary
+  10000, secondary 0). The brief gave it no key.
+- **D-48 (owner decision).** Pixels with D = 0 use per-hex light, not the
+  interpolated floor light (question 3).
+- **D-49 (owner decision).** Chunks are stored or zlib; no LZSS framing
+  (question 4).
+- **D-50 (owner decision).** A palette hash mismatch refuses the backdrop
+  (question 5).
+- **D-51 (owner decision).** A door PID in a suppression list is dropped with a log
+  line and the door draws (question 6).
+- **D-52 (owner decision).** Backdrops draw under the Vanilla preset, with the
+  player mask only (question 7).
+- **D-53 (owner decision).** The chunk cache is 64 MiB by default, set by
+  `backdrop_cache_mib` (question 8).
+- **D-54 (owner decision).** The fade plane is one bit per pixel; the mask supplies
+  the weight (question 9).
+- **D-55 (implementing-side default).** A faded pixel inside the mask is lit
+  without the 229-255 exemption, as SPEC-014 §3.37 lights a masked wall, so a
+  painted wall and a wall object fade alike. The brief's "stay unlit" holds
+  outside the mask.
+- **D-56 (implementing-side default).** A D = 0 pixel whose canvas point is off
+  the grid is lit at the ambient level.
+- **D-57 (implementing-side default).** Picking uses the drawing order, ties
+  included (B ≥ h), where the brief's section 3.8 said "larger"; fading uncovers
+  nothing for picking.
+- **D-58 (implementing-side default).** The instanced path builds per-item images
+  on the CPU and uses no depth attachment or 16-bit texture, which the brief's
+  section 3.9 item 2 allows. The brief's `R16Uint` depth texture is not used, and
+  section 3.11 item 1 is unchanged.
+
 ## 7. Clean-Room Verification Checklist
 
 - [x] Zero C/C++ code snippets or struct definitions included.
@@ -1834,3 +2096,7 @@ Revision 3 adds:
   throwaway script that is not committed. Revision 4's layer 7 keys were computed
   the same way, and no engine Rust code was read.
 - [x] Decisions separate owner instructions from Team A defaults.
+- [x] Revision 5 was written by the implementing side from the owner's brief and
+  the engine's own code and tests, after the Team A/B split ended. It holds no
+  implementation-source path, no 40-character hexadecimal string and no code
+  listing, and its vectors are synthetic.

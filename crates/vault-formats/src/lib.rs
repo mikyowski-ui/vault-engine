@@ -3,6 +3,7 @@
 pub mod acm;
 pub mod ai;
 pub mod automap;
+pub mod backdrop;
 mod binary;
 pub mod cfg;
 pub mod credits;
@@ -33,6 +34,7 @@ pub mod sfx;
 #[cfg(feature = "host-fs")]
 pub mod staged;
 pub mod sve;
+pub mod tile_remap;
 pub mod vfs;
 
 pub use automap::AutomapDb;
@@ -74,11 +76,13 @@ pub use geometry::HexGrid;
 pub use lip::LipFile;
 pub use lst::{LstKind, LstTable};
 pub use map::MapFile;
+pub use mod_manifest::{ArtRegistration, ProtoRegistration, TileRemapRegistration};
 pub use mod_manifest::{EnhancedOverrides, ModManifest};
 pub use msg::{MsgCatalog, TextMode};
 pub use palette::Palette;
 pub use pro::Prototype;
 pub use pro_catalog::LocalPrototypeCatalog;
+pub use tile_remap::TileRemap;
 pub use vfs::{
     ByteSource, DropError, DropIgnored, DropReport, LayerEntry, LayeredVfs, LoadOrderPolicy,
     MemoryDir, MemoryMount, MemoryProvider, ModLayer, ServedBy, Vfs, VfsError, VfsPath,

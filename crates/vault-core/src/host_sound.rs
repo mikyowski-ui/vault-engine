@@ -97,7 +97,17 @@ impl<A: WorldAssets> WorldHost<A> {
         extra: u8,
     ) -> Option<Vec<u8>> {
         let art = Fid(self.world.get(object)?.raw.art_id);
-        let stem = self.assets.art_token(art.category(), art.base())?;
+        let stem = if matches!(art.category(), 1 | 8) {
+            self.assets.art_token(art.category(), art.base())?
+        } else {
+            // SPEC-007 §2.1.1: an extended identifier's wide row.
+            let row = if self.assets.art_extended(art.0) {
+                art.wide_base()
+            } else {
+                u32::from(art.base())
+            };
+            self.assets.art_row_token(art.category(), row)?
+        };
         sfx::character_name(&stem, animation, art.weapon(), extra)
     }
     /// §3.8 weapon name: the weapon's sound byte and damage type (none for

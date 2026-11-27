@@ -138,6 +138,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "backdrop"
+path = "fuzz_targets/backdrop.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "sve"
 path = "fuzz_targets/sve.rs"
 test = false
@@ -196,6 +203,13 @@ bench = false
 [[bin]]
 name = "stack_check"
 path = "fuzz_targets/stack_check.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tile_remap"
+path = "fuzz_targets/tile_remap.rs"
 test = false
 doc = false
 bench = false

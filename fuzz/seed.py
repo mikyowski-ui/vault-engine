@@ -202,6 +202,35 @@ def main():
         write("stack_check", f"program-{name}.int", bytes([selector]) + program)
     registering = read(FIXTURES / "spec024a" / "gl_cheapap.int.hex")
     write("stack_check", "gl_cheapap.int", bytes([1 | 8]) + registering)
+    # Backdrop: a 70 by 3 elevation 1 with all planes (index + chunk 1, 0).
+    header = b"VBKD\x00\x01\x02\x00\x00\x40" + bytes(6) + bytes(8)
+    record = bytes([1, 7, 0, 0]) + bytes(12) + struct.pack(">IIHHI", 70, 3, 2, 1, 0)
+    write("backdrop", "index.bkd", header + record + b"\x01\x01")
+    pixels = 6 * 3
+    payload = bytes(range(pixels)) + struct.pack(">18H", *range(pixels)) + bytes(3)
+    chunk = b"VBKC\x00\x01\x01\x07\x00\x01\x00\x00" + struct.pack(">I", len(payload))
+    write("backdrop", "chunk-stored.bkc", bytes([0]) + chunk + payload)
+    stored = b"\x78\x01\x01" + struct.pack("<HH", len(payload), ~len(payload) & 0xFFFF) + payload
+    a, b = 1, 0
+    for byte in payload:
+        a = (a + byte) % 65521
+        b = (b + a) % 65521
+    write("backdrop", "chunk-zlib.bkc", bytes([1]) + chunk + stored + struct.pack(">I", b << 16 | a))
+    # Tile remaps (vector E, an empty one, one with a spread of entries) and
+    # manifests with the art, prototype and remap tables.
+    def remap(pairs):
+        return b"VTLX\x00\x01" + struct.pack(">H", len(pairs)) + b"".join(
+            struct.pack(">HI", local, row) for local, row in pairs)
+    write("tile_remap", "vector-e.tlx", remap([(4000, 5000)]))
+    write("tile_remap", "empty.tlx", remap([]))
+    write("tile_remap", "full.tlx", remap([(local, 0xFFFFFF - local) for local in range(4096) if local != 1][:4095]))
+    write("mod_manifest", "extended-art.toml", b'name = "Art"\n\n[[art]]\ncategory = "scenery"\n'
+          b'file = "tc_rock1.frm"\nindex = 5000\n\n[[protos]]\ncategory = "items"\n'
+          b'file = "00005000.pro"\nindex = 5000\n\n[[tile_remap]]\nmap = "tc_hall.map"\n'
+          b'file = "maps/tc_hall.tlx"\n')
+    write("mod_manifest", "extended-art-capped.toml", b'name = "Art"\n\n[[art]]\ncategory = "critters"\n'
+          b'file = "a.frm"\nindex = 4095\n\n[[art]]\ncategory = "items"\nfile = "b.frm"\n'
+          b'index = 16777215\n')
     for directory in sorted(CORPUS.iterdir()):
         print(f"{directory.relative_to(ROOT)}: {len(list(directory.iterdir()))} seeds")
 

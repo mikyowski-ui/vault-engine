@@ -227,9 +227,21 @@ impl LstTable {
     pub fn bookkeeping_len(&self) -> usize {
         self.entries.len()
     }
+    /// The kind the table was parsed as.
+    pub fn kind(&self) -> LstKind {
+        self.kind
+    }
     pub fn art_id(&self, id: u32) -> Option<&LstEntry> {
         (self.kind == LstKind::Art)
             .then(|| self.entries.get((id & 0xfff) as usize))
+            .flatten()
+    }
+    /// Art list row `row`, unmasked: the lookup of an extended identifier's
+    /// wide row (`docs/extended-art-namespaces.md` §3.2), which
+    /// [`Self::art_id`]'s 12-bit mask cannot reach.
+    pub fn art_row(&self, row: u32) -> Option<&LstEntry> {
+        (self.kind == LstKind::Art)
+            .then(|| self.entries.get(row as usize))
             .flatten()
     }
     pub fn script_id(&self, id: u32) -> Option<&LstEntry> {

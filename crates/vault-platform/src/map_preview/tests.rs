@@ -934,6 +934,7 @@ fn roof_art_binds_whatever_the_hide_bit_except_the_blank_index() {
         &preview.host.assets,
         &map,
         &preview.host.world.render_objects(),
+        None,
     )
     .unwrap();
     assert!(art.tile_art.first().is_some_and(Option::is_some));

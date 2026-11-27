@@ -7,11 +7,11 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
-use vault_formats::mod_manifest::ModRegistry;
+use vault_formats::mod_manifest::{ModManifest, ModRegistry, PROTO_CATEGORIES};
 use vault_formats::{
     ArtCatalog, Fid, Font, FontKind, FontSet, FrmArchive, GamFile, GamSection, GcdFile,
-    LocalPrototypeCatalog, LstKind, LstTable, MAX_ASSET_BYTES, MapFile, MsgCatalog, Prototype, Vfs,
-    VfsPath, pro::Category,
+    LocalPrototypeCatalog, LstKind, LstTable, MAX_ASSET_BYTES, MapFile, MsgCatalog, Prototype,
+    TileRemap, Vfs, VfsPath, fid::ART_DIRECTORIES, pro::Category,
 };
 use vault_vm::{IntProgram, WordSet, stack_check};
 
@@ -111,6 +111,30 @@ pub trait WorldAssets {
     /// which picks the location names (SPEC-014 §3.38, SPEC-007 §3.12).
     fn critter_alias(&self, _index: u16) -> Option<i32> {
         None
+    }
+    /// SPEC-007 §2.1.1 (extended identifiers): the canonical identifier of
+    /// row `row` of art category `category`'s resolved list, the plain one
+    /// below 4096 and the extended one above, or `None` when no identifier
+    /// addresses that row (an unknown category, a critter or head row above
+    /// 4095, or a row past the resolved list). SPEC-024a `mod_art_fid`.
+    fn art_fid(&self, _category: u8, _row: u32) -> Option<u32> {
+        None
+    }
+    /// SPEC-007 §2.1.1: whether `fid` is an extended identifier under the
+    /// session's resolved lists (bit 31 set, a category 0-10 other than
+    /// critters and heads, and that list longer than 4,096 rows). Without
+    /// art lists no identifier is.
+    fn art_extended(&self, _fid: u32) -> bool {
+        false
+    }
+    /// The unaliased list token of resolved row `row`, unmasked (the wide
+    /// counterpart of [`Self::art_token`]); a row past 4095 has none
+    /// without wide lists.
+    fn art_row_token(&self, category: u8, row: u32) -> Option<Vec<u8>> {
+        u16::try_from(row)
+            .ok()
+            .filter(|row| u32::from(*row) < vault_formats::fid::PLAIN_ROWS)
+            .and_then(|row| self.art_token(category, row))
     }
     /// Load the art selected by a complete SPEC-007 identifier.
     fn object_art(&self, _fid: u32) -> Result<Arc<FrmArchive>, WorldError> {
@@ -241,6 +265,12 @@ pub struct VfsWorldAssets {
     mod_scripts: RefCell<BTreeMap<String, Option<IntProgram>>>,
     /// SPEC-024b §4.11 the session's virtual files, by canonical path.
     virtual_files: RefCell<BTreeMap<String, Vec<u8>>>,
+    /// The `[[tile_remap]]` sidecars, parsed and checked at launch, by
+    /// lowercased map file name.
+    tile_remaps: BTreeMap<String, TileRemap>,
+    /// Whether the art lists' diagnostics were handed out
+    /// ([`Self::take_art_diagnostics`]).
+    art_noted: std::cell::Cell<bool>,
 }
 impl VfsWorldAssets {
     pub fn new(vfs: Arc<dyn Vfs>, language: &str) -> Result<Self, WorldError> {
@@ -275,13 +305,21 @@ impl VfsWorldAssets {
             registry: ModRegistry::default(),
             game: std::cell::Cell::new(crate::GameProfile::Fallout1),
             mod_scripts: RefCell::new(BTreeMap::new()),
+            tile_remaps: BTreeMap::new(),
+            art_noted: std::cell::Cell::new(false),
         }
         .with_registry()
     }
     /// The mod layers' registrations
     /// ([`ModRegistry::from_vfs`](vault_formats::mod_manifest::ModRegistry::from_vfs)).
     /// A malformed manifest, a conflict, or a script row the base
-    /// `scripts.lst` already has is an error.
+    /// `scripts.lst` already has is an error, and so is (SPEC-024a §2.4):
+    /// an `[[art]]` row inside the served art list, a `[[protos]]` row at
+    /// or inside the served prototype list or naming a file the VFS does
+    /// not serve, and a `[[tile_remap]]` whose map or sidecar the VFS does
+    /// not serve or whose sidecar is not a valid `VTLX` file. Each message
+    /// names the mod and the row. With `[[art]]` rows the art lists load
+    /// here, so a registration error stops the launch.
     fn with_registry(mut self) -> Result<Self, WorldError> {
         let registry = ModRegistry::from_vfs(self.vfs.as_ref())
             .map_err(|error| WorldError::Invalid(format!("mod registration: {error}")))?;
@@ -297,7 +335,158 @@ impl VfsWorldAssets {
             )));
         }
         self.registry = registry;
+        self.check_protos()?;
+        self.check_tile_remaps()?;
+        if !self.registry.art.is_empty() {
+            self.art_catalog()?;
+        }
         Ok(self)
+    }
+    /// The `name` of the first enabled layer's manifest that `owns`
+    /// matches, for a registration error (the layer's path when the
+    /// manifest has no name).
+    fn row_owner(&self, owns: impl Fn(&ModManifest) -> bool) -> String {
+        let manifests = self.vfs.layer_manifests().unwrap_or_default();
+        manifests
+            .into_iter()
+            .find_map(|(layer, bytes)| {
+                let text = String::from_utf8(bytes).ok()?;
+                let manifest = ModManifest::parse(&text).ok()?;
+                if !owns(&manifest) {
+                    return None;
+                }
+                Some(if manifest.name.is_empty() {
+                    layer
+                } else {
+                    manifest.name
+                })
+            })
+            .unwrap_or_else(|| "?".to_owned())
+    }
+    fn registration_error(
+        &self,
+        owns: impl Fn(&ModManifest) -> bool,
+        message: String,
+    ) -> WorldError {
+        WorldError::Invalid(format!(
+            "mod registration: \"{}\": {message}",
+            self.row_owner(owns)
+        ))
+    }
+    /// SPEC-024a §2.4: each `[[protos]]` row lies past the served
+    /// prototype list (its one-based `index` above the list's entry count)
+    /// and names a file the VFS serves.
+    fn check_protos(&self) -> Result<(), WorldError> {
+        for row in self.registry.protos() {
+            let directory = PROTO_CATEGORIES
+                .get(usize::from(row.category))
+                .copied()
+                .unwrap_or("?");
+            let owns = |manifest: &ModManifest| manifest.protos.contains(row);
+            let list = format!("proto/{directory}/{directory}.lst");
+            let served = self
+                .list(&list, LstKind::Prototype)
+                .map_or(0, |list| list.entries().len());
+            if usize::try_from(row.index).is_ok_and(|index| index <= served) {
+                return Err(self.registration_error(
+                    owns,
+                    format!(
+                        "[[protos]] {directory} prototype {} is at or inside {list}'s {served} \
+                         entries",
+                        row.index
+                    ),
+                ));
+            }
+            let file = format!("proto/{directory}/{}", row.file);
+            if !self.exists(&file) {
+                return Err(self.registration_error(
+                    owns,
+                    format!(
+                        "[[protos]] {directory} prototype {}: {file} is not served",
+                        row.index
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+    /// SPEC-024a §2.4: each `[[tile_remap]]` names a map the VFS serves and
+    /// a sidecar it serves that parses as SPEC-007 §2.1.2's `VTLX` layout.
+    /// The parsed sidecars are kept for [`Self::tile_remap`].
+    fn check_tile_remaps(&mut self) -> Result<(), WorldError> {
+        let mut parsed = BTreeMap::new();
+        for (map, row) in &self.registry.tile_remaps {
+            let owns = |manifest: &ModManifest| manifest.tile_remaps.contains(row);
+            let path = format!("maps/{}", row.map);
+            if !self.exists(&path) {
+                return Err(self.registration_error(
+                    owns,
+                    format!("[[tile_remap]] of map {}: {path} is not served", row.map),
+                ));
+            }
+            if !self.exists(&row.file) {
+                return Err(self.registration_error(
+                    owns,
+                    format!(
+                        "[[tile_remap]] of map {}: sidecar {} is not served",
+                        row.map, row.file
+                    ),
+                ));
+            }
+            let remap = self
+                .read(&row.file)
+                .and_then(|bytes| Ok(TileRemap::parse(&bytes)?))
+                .map_err(|error| {
+                    self.registration_error(
+                        owns,
+                        format!(
+                            "[[tile_remap]] of map {}: sidecar {}: {error}",
+                            row.map, row.file
+                        ),
+                    )
+                })?;
+            parsed.insert(map.clone(), remap);
+        }
+        self.tile_remaps = parsed;
+        Ok(())
+    }
+    /// SPEC-007 §2.1.2: the tile remap a mod layer registers for map
+    /// `map_file_name` (a file name under `maps/`, with or without that
+    /// folder, compared without ASCII case), checked at launch; `None`
+    /// when no layer registers one.
+    pub fn tile_remap(&self, map_file_name: &str) -> Result<Option<TileRemap>, WorldError> {
+        let name = map_file_name
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(map_file_name)
+            .to_ascii_lowercase();
+        if self.registry.tile_remap(&name).is_none() {
+            return Ok(None);
+        }
+        self.tile_remaps
+            .get(&name)
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| WorldError::Invalid(format!("tile remap of {name} was not checked")))
+    }
+    /// The VFS path `art/tiles/<name>` of resolved tile list row `row`
+    /// (a remapped floor or roof index may name a row past 4095); `None`
+    /// past the list, for an empty registered-gap row, or without lists.
+    pub fn tile_row_path(&self, row: u32) -> Option<String> {
+        self.art_catalog().ok()?.row_path(4, row).ok()
+    }
+    /// The art lists' diagnostics (SPEC-007 §2.1.1: each resolved list
+    /// longer than 4,096 rows, and the first row plain identifiers cannot
+    /// reach), once per session: the first call loads the lists and gives
+    /// the lines, every later call gives none. The shell logs them; they are
+    /// never a world effect.
+    pub fn take_art_diagnostics(&self) -> Vec<String> {
+        if self.art_noted.replace(true) {
+            return Vec::new();
+        }
+        self.art_catalog()
+            .map(|catalog| catalog.diagnostics().to_vec())
+            .unwrap_or_default()
     }
     /// What the mod layers register.
     pub fn registry(&self) -> &ModRegistry {
@@ -317,12 +506,39 @@ impl VfsWorldAssets {
             }
         }
     }
-    /// Category art lists, parsed once on first use.
+    /// Category art lists, parsed once on first use: the resolved lists,
+    /// the served list files followed by the mod layers' `[[art]]` rows
+    /// (SPEC-007 §2.1.1). A row inside a served list, or one the catalog
+    /// refuses, is a `mod registration` error naming the mod and the row.
     pub fn art_catalog(&self) -> Result<Arc<ArtCatalog>, WorldError> {
         if let Some(catalog) = self.art.borrow().as_ref() {
             return Ok(catalog.clone());
         }
-        let catalog = Arc::new(ArtCatalog::load(&*self.vfs)?);
+        let mut catalog = ArtCatalog::load(&*self.vfs)?;
+        let rows: Vec<_> = self.registry.art().cloned().collect();
+        for row in &rows {
+            let served = catalog.list_len(row.category);
+            if row.index < served {
+                let directory = ART_DIRECTORIES
+                    .get(usize::from(row.category))
+                    .copied()
+                    .unwrap_or("?");
+                return Err(self.registration_error(
+                    |manifest| manifest.art.contains(row),
+                    format!(
+                        "[[art]] {directory} row {} is inside art/{directory}/{directory}.lst's \
+                         {served} rows",
+                        row.index
+                    ),
+                ));
+            }
+        }
+        if !rows.is_empty() {
+            catalog
+                .register(&rows)
+                .map_err(|error| WorldError::Invalid(format!("mod registration: {error}")))?;
+        }
+        let catalog = Arc::new(catalog);
         *self.art.borrow_mut() = Some(catalog.clone());
         Ok(catalog)
     }
@@ -529,13 +745,24 @@ impl VfsWorldAssets {
     pub fn skilldex_path(&self, index: i32) -> Result<String, WorldError> {
         self.art_name("skilldex", index)
     }
+    /// A prototype by PID, through its category's list; an entry number
+    /// past the list that a `[[protos]]` row registers reads that row's
+    /// file (SPEC-024a §2.4).
     fn load_prototype(&self, pid: u32) -> Result<Arc<Prototype>, WorldError> {
         let category = Category::from_pid(pid)?;
         let folder = category.directory();
         let list = self.list(&format!("proto/{folder}/{folder}.lst"), LstKind::Prototype)?;
-        let name = list
-            .prototype_id(pid)
-            .and_then(|entry| entry.name.as_deref())
+        let entry = pid & 0x00ff_ffff;
+        let registered = usize::try_from(entry)
+            .is_ok_and(|entry| entry > list.entries().len())
+            .then(|| self.registry.protos.get(&(category as u8, entry)))
+            .flatten()
+            .map(|row| row.file.as_bytes());
+        let name = registered
+            .or_else(|| {
+                list.prototype_id(pid)
+                    .and_then(|entry| entry.name.as_deref())
+            })
             .filter(|name| !name.is_empty())
             .ok_or_else(|| WorldError::Invalid(format!("prototype {pid:#x} has no list entry")))?;
         let path = format!(
@@ -810,6 +1037,20 @@ impl WorldAssets for VfsWorldAssets {
     fn critter_alias(&self, index: u16) -> Option<i32> {
         self.art_catalog().ok()?.critter_alias(index)
     }
+    fn art_fid(&self, category: u8, row: u32) -> Option<u32> {
+        let catalog = self.art_catalog().ok()?;
+        if row >= catalog.list_len(category) {
+            return None;
+        }
+        catalog.canonical_fid(category, row).map(|fid| fid.0)
+    }
+    fn art_extended(&self, fid: u32) -> bool {
+        self.art_catalog()
+            .is_ok_and(|catalog| catalog.is_extended(Fid(fid)))
+    }
+    fn art_row_token(&self, category: u8, row: u32) -> Option<Vec<u8>> {
+        Some(self.art_catalog().ok()?.row_token(category, row)?.to_vec())
+    }
     fn art_exists(&self, fid: u32) -> bool {
         self.art_catalog()
             .ok()
@@ -883,11 +1124,9 @@ impl WorldAssets for VfsWorldAssets {
     /// `<stem>.sav` beside the data files.
     fn map(&self, path: &str) -> Result<MapFile, WorldError> {
         let game = self.game.get();
-        Ok(MapFile::parse_for(
-            &self.read(path)?,
-            &LocalPrototypeCatalog::for_game(&*self.vfs, game),
-            game,
-        )?)
+        let prototypes = LocalPrototypeCatalog::for_game(&*self.vfs, game)
+            .with_registered(self.registry.protos().cloned());
+        Ok(MapFile::parse_for(&self.read(path)?, &prototypes, game)?)
     }
     /// SPEC-008 §3.10: a name is matched against `map.msg` 0-65 (uppercased,
     /// `.SAV` read as `.MAP`); an unlisted name, or one of 16 or more bytes
